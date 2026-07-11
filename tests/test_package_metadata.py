@@ -1,5 +1,8 @@
 from pathlib import Path
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 import arti
 import arti.jax as arti_jax

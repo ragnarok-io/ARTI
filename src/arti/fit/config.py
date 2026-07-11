@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .._toml import loads as load_toml
 from .objectives import resolve_objectives
 from .plugins import get_plugin
 from .profiles import AdapterProfile, resolve_profile
@@ -184,11 +185,7 @@ def load_fit_config(path: str | Path) -> FitProjectConfig:
     if suffix == ".json":
         payload = json.loads(target.read_text(encoding="utf-8"))
     elif suffix == ".toml":
-        try:
-            import tomllib
-        except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
-            raise RuntimeError("TOML config loading requires Python 3.11+ or use JSON") from exc
-        payload = tomllib.loads(target.read_text(encoding="utf-8"))
+        payload = load_toml(target.read_text(encoding="utf-8"))
     else:
         raise ValueError("ARTI fit config must be a .json or .toml file")
     if not isinstance(payload, dict):

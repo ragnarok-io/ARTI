@@ -73,6 +73,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "safetensors" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "torch" },
 ]
 
@@ -183,6 +184,7 @@ requires-dist = [
     { name = "safetensors", marker = "extra == 'all'", specifier = ">=0.4" },
     { name = "safetensors", marker = "extra == 'qwen'", specifier = ">=0.4" },
     { name = "safetensors", marker = "extra == 'sd'", specifier = ">=0.4" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "torch", specifier = ">=2.2" },
     { name = "torch", marker = "extra == 'all'", specifier = ">=2.2" },
     { name = "torch", marker = "extra == 'dev'", specifier = ">=2.2" },

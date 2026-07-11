@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from ._version import __version__
+from ._toml import loads as load_toml
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ def load_attach_config(path: str | Path) -> ARTIAttachConfig:
     if target.suffix.lower() != ".toml":
         raise ValueError("ARTI attachment config must end in .toml")
     raw = target.read_bytes()
-    payload = tomllib.loads(raw.decode("utf-8"))
+    payload = load_toml(raw.decode("utf-8"))
     root = payload.get("arti", {})
     format_version = int(root.get("format_version", 1))
     recall = payload.get("recall")

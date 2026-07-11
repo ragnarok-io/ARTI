@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "safetensors>=0.4",
+    "tomli>=2.0; python_version < '3.11'",
     "torch>=2.2",
 ]
 

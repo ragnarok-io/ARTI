@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from ._toml import loads as load_toml
 from .pretrained import ARTIPlan, pretrained, validate_pretrained_lock
 from .providers import provider_report
 
@@ -16,9 +17,7 @@ def load_pretrained_config(path: str | Path) -> dict[str, Any]:
     if target.suffix.lower() == ".json":
         payload = json.loads(target.read_text(encoding="utf-8"))
     elif target.suffix.lower() == ".toml":
-        import tomllib
-
-        payload = tomllib.loads(target.read_text(encoding="utf-8"))
+        payload = load_toml(target.read_text(encoding="utf-8"))
     else:
         raise ValueError("pretrained config must be .json or .toml")
     if not isinstance(payload, dict):
