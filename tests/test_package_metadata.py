@@ -22,6 +22,18 @@ def test_public_version_matches_pyproject():
     assert arti.__version__ == project_version()
 
 
+def test_release_identity_and_citation_are_consistent():
+    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    version = project_version()
+
+    assert payload["project"]["authors"] == [{"name": "Thiocy"}]
+    assert f"version: {version}" in citation
+    assert "name: Thiocy" in citation
+    assert f"@v{version}" in readme
+
+
 def test_package_declares_pep561_type_marker():
     assert (ROOT / "src" / "arti" / "py.typed").exists()
 

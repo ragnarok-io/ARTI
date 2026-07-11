@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use ARTI in research or software, please cite this project."
+title: "ARTI: Composable Latent Tensor Layers for PyTorch"
+type: software
+authors:
+  - name: Thiocy
+    website: "https://github.com/Thiocy"
+version: 1.0.1
+date-released: 2026-07-11
+repository-code: "https://github.com/ragnarok-io/ARTI"
+url: "https://github.com/ragnarok-io/ARTI"
+license: MIT

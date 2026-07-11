@@ -1,11 +1,11 @@
 [project]
 name = "arti"
-version = "1.0.0"
+version = "1.0.1"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "ARTI contributors" }]
+authors = [{ name = "Thiocy" }]
 keywords = ["pytorch", "neural-networks", "latent-tensor", "representation-learning"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -107,6 +107,9 @@ include = [
     "/CONTRIBUTING.md",
     "/STABILITY.md",
     "/SECURITY.md",
+    "/AUTHORS.md",
+    "/AI_ASSISTANCE.md",
+    "/CITATION.cff",
     "/LICENSE",
     "/pyproject.toml",
     "/uv.lock",

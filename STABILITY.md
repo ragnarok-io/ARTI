@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.0.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.0.1 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
