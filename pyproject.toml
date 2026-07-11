@@ -1,6 +1,6 @@
 [project]
-name = "arti"
-version = "1.0.1"
+name = "arti-fit"
+version = "1.0.2"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"

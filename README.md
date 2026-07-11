@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.0.1 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.0.2 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -22,11 +22,13 @@ LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 Add ARTI to a project with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv add "arti @ git+https://github.com/ragnarok-io/ARTI.git@v1.0.1"
+uv add arti-fit
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
 project chooses the appropriate CPU or CUDA build of PyTorch.
+
+The PyPI distribution is named `arti-fit`; the Python import remains `arti`.
 
 Optional integrations can be installed as needed:
 

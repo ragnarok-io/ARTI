@@ -28,10 +28,11 @@ def test_release_identity_and_citation_are_consistent():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     version = project_version()
 
+    assert payload["project"]["name"] == "arti-fit"
     assert payload["project"]["authors"] == [{"name": "Thiocy"}]
     assert f"version: {version}" in citation
     assert "name: Thiocy" in citation
-    assert f"@v{version}" in readme
+    assert "uv add arti-fit" in readme
 
 
 def test_package_declares_pep561_type_marker():
