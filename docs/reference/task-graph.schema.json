@@ -1,0 +1,86 @@
+{
+  "$id": "https://arti.local/schemas/task-graph.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "command_kind": {
+      "enum": [
+        "build",
+        "apply"
+      ],
+      "type": "string"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "task-graph"
+    },
+    "package_name": {
+      "const": "arti"
+    },
+    "task_graph": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": "object"
+        },
+        "tasks": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "depends_on": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "kind": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "depends_on"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "tasks",
+        "artifacts"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "format_version",
+    "package_name",
+    "kind",
+    "command_kind",
+    "task_graph"
+  ],
+  "title": "ARTI Task Graph Artifact",
+  "type": "object"
+}

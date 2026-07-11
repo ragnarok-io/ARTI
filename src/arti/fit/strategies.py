@@ -1,0 +1,147 @@
+"""Named insertion strategies for common neural module layouts."""
+
+from __future__ import annotations
+
+
+STRATEGY_PATTERNS = {
+    "all-linear": ("*",),
+    "transformer": (
+        "*.embed_tokens",
+        "*.embeddings",
+        "*.word_embeddings",
+        "*.attn.out_proj",
+        "*.attention.output.dense",
+        "self_attn",
+        "*.self_attn.out_proj",
+        "*.self_attn",
+        "*.mlp.fc2",
+        "*.mlp.down_proj",
+        "*.output.dense",
+        "*.feed_forward.w2",
+        "*.ffn.output",
+        "*.final_layer_norm",
+        "*.layer_norm",
+    ),
+    "vision-transformer": (
+        "patch_embed.proj",
+        "*.patch_embed.proj",
+        "pos_drop",
+        "*.pos_drop",
+        "blocks.*.attn.proj",
+        "*.blocks.*.attn.proj",
+        "blocks.*.mlp.fc2",
+        "*.blocks.*.mlp.fc2",
+        "blocks.*.norm1",
+        "*.blocks.*.norm1",
+        "blocks.*.norm2",
+        "*.blocks.*.norm2",
+        "norm",
+        "*.norm",
+        "fc_norm",
+        "*.fc_norm",
+        "head",
+        "*.head",
+    ),
+    "vision-cnn": (
+        "conv",
+        "*.conv",
+        "conv1",
+        "*.conv1",
+        "*.conv2",
+        "*.conv3",
+        "bn",
+        "*.bn",
+        "bn1",
+        "*.bn1",
+        "*.bn2",
+        "*.bn3",
+        "features.*",
+        "*.features.*",
+        "layer*.conv*",
+        "*.layer*.conv*",
+        "layer*.*.conv*",
+        "*.layer*.*.conv*",
+        "layer*.bn*",
+        "*.layer*.bn*",
+        "layer*.*.bn*",
+        "*.layer*.*.bn*",
+        "*.downsample.*",
+        "stem.*",
+        "*.stem.*",
+    ),
+    "recurrent": (
+        "rnn",
+        "*.rnn",
+        "lstm",
+        "*.lstm",
+        "gru",
+        "*.gru",
+        "*.encoder.rnn",
+        "*.encoder.lstm",
+        "*.encoder.gru",
+    ),
+    "attention": (
+        "*.attn.out_proj",
+        "*.attention.output.dense",
+        "self_attn",
+        "*.self_attn.out_proj",
+        "*.self_attn",
+        "*.cross_attn.out_proj",
+    ),
+    "mlp": (
+        "*.mlp.fc2",
+        "*.mlp.down_proj",
+        "*.output.dense",
+        "*.feed_forward.w2",
+        "*.ffn.output",
+    ),
+    "classifier": (
+        "classifier",
+        "*.classifier",
+        "head",
+        "*.head",
+        "lm_head",
+        "*.lm_head",
+    ),
+    "vision-head": (
+        "head",
+        "*.head",
+        "classifier",
+        "*.classifier",
+        "fc",
+        "*.fc",
+    ),
+    "embedding": (
+        "embed",
+        "*.embed",
+        "*.embed_tokens",
+        "*.embeddings",
+        "*.word_embeddings",
+    ),
+    "normalization": (
+        "bn",
+        "bn*",
+        "batch_norm",
+        "group_norm",
+        "norm",
+        "*.norm",
+        "*.bn",
+        "*.bn*",
+        "*.batch_norm",
+        "*.group_norm",
+        "*.layer_norm",
+        "*.final_layer_norm",
+        "*.LayerNorm",
+    ),
+}
+
+
+def resolve_where(where: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    raw = tuple(where) if isinstance(where, (list, tuple)) else (where,)
+    patterns: list[str] = []
+    for item in raw:
+        if item in STRATEGY_PATTERNS:
+            patterns.extend(STRATEGY_PATTERNS[item])
+        else:
+            patterns.append(item)
+    return tuple(patterns)

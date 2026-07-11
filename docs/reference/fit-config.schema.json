@@ -1,0 +1,317 @@
+{
+  "$id": "https://arti.local/schemas/fit-config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "fit": {
+      "additionalProperties": true,
+      "properties": {
+        "causal": {
+          "type": "boolean"
+        },
+        "objective": {
+          "items": {
+            "enum": [
+              "preserve-output",
+              "task-fit",
+              "validate"
+            ],
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        },
+        "objectives": {
+          "items": {
+            "enum": [
+              "preserve-output",
+              "task-fit",
+              "validate"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "phases": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "plugins": {
+          "items": {
+            "enum": [
+              "recurrent",
+              "timm",
+              "torch",
+              "transformers",
+              "vision-cnn"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "enum": [
+            "autoregressive-observer",
+            "latent-adapt",
+            "observer-phase",
+            "virtual-recall"
+          ],
+          "type": "string"
+        },
+        "scale": {
+          "enum": [
+            "base",
+            "large",
+            "small",
+            "tiny"
+          ],
+          "type": "string"
+        },
+        "target_modules": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "insertion": {
+      "additionalProperties": false,
+      "properties": {
+        "every": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "freeze_base": {
+          "type": "boolean"
+        },
+        "max_adapters": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_extra_params": {
+          "oneOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "pattern": "^([0-9]+(_[0-9]+)*|[0-9]+(\\.[0-9]+)?%)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "where": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "mechanism": {
+      "additionalProperties": false,
+      "properties": {
+        "coord_dim": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coord_frame_mode": {
+          "enum": [
+            "none",
+            "paired_rotation",
+            "operator_bank",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hidden_multiplier": {
+          "exclusiveMinimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "interface_slots": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observer_phase": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "operator_count": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_activation": {
+          "enum": [
+            "half",
+            "none",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recall_slots": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_steps": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "virtual_recall": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "objective": {
+      "items": {
+        "enum": [
+          "preserve-output",
+          "task-fit",
+          "validate"
+        ],
+        "type": "string"
+      },
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "objectives": {
+      "items": {
+        "enum": [
+          "preserve-output",
+          "task-fit",
+          "validate"
+        ],
+        "type": "string"
+      },
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "phases": {
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "plugins": {
+      "items": {
+        "enum": [
+          "recurrent",
+          "timm",
+          "torch",
+          "transformers",
+          "vision-cnn"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "profile": {
+      "enum": [
+        "autoregressive-observer",
+        "latent-adapt",
+        "observer-phase",
+        "virtual-recall"
+      ],
+      "type": "string"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "causal": {
+          "type": "boolean"
+        },
+        "coord_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame_operators_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mask_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observer_coord_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "scale": {
+      "enum": [
+        "base",
+        "large",
+        "small",
+        "tiny"
+      ],
+      "type": "string"
+    }
+  },
+  "title": "ARTI Fit Project Config",
+  "type": "object"
+}

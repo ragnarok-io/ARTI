@@ -1,0 +1,125 @@
+[project]
+name = "arti"
+version = "1.0.0"
+description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ARTI contributors" }]
+keywords = ["pytorch", "neural-networks", "latent-tensor", "representation-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "safetensors>=0.4",
+    "torch>=2.2",
+]
+
+[project.scripts]
+arti = "arti.cli:main"
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.2",
+]
+jax = [
+    "jax>=0.4.30",
+    "equinox>=0.11.0",
+    "optax>=0.2.0",
+]
+dev = [
+    "build>=1.2",
+    "hatchling>=1.25",
+    "numpy>=2.0",
+    "pytest>=8.0",
+    "torch>=2.2",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+]
+font = [
+    "pillow>=10.0",
+]
+qwen = [
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+    "transformers>=4.51",
+]
+peft = [
+    "accelerate>=0.33",
+    "peft>=0.12",
+    "transformers>=4.51",
+]
+sd = [
+    "accelerate>=0.33",
+    "diffusers>=0.30",
+    "peft>=0.12",
+    "pillow>=10.0",
+    "safetensors>=0.4",
+    "transformers>=4.51",
+]
+all = [
+    "torch>=2.2",
+    "jax>=0.4.30",
+    "equinox>=0.11.0",
+    "optax>=0.2.0",
+    "numpy>=2.0",
+    "pillow>=10.0",
+    "accelerate>=0.33",
+    "diffusers>=0.30",
+    "peft>=0.12",
+    "safetensors>=0.4",
+    "transformers>=4.51",
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+    "pytest>=8.0",
+    "build>=1.2",
+    "hatchling>=1.25",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arti"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/arti",
+    "/tests",
+    "/docs/reference/*.schema.json",
+    "/examples",
+    "/README.md",
+    "/CONTRIBUTING.md",
+    "/STABILITY.md",
+    "/SECURITY.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+exclude = ["/.tmp*", "/.venv", "/dist", "/build", "/benchmarks"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/arti/py.typed" = "arti/py.typed"
+"docs/reference/fit-config.schema.json" = "arti/schemas/fit-config.schema.json"
+"docs/reference/task-graph.schema.json" = "arti/schemas/task-graph.schema.json"
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
