@@ -52,6 +52,12 @@ def test_package_declares_pretrained_ecosystem_extras():
     assert any(dependency.startswith("peft") for dependency in extras["peft"])
 
 
+def test_package_declares_web_export_extra():
+    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = payload["project"]["optional-dependencies"]
+    assert {"onnx>=1.16", "onnxscript>=0.3"}.issubset(extras["web"])
+
+
 def test_backend_status_is_explicit():
     assert "torch" in arti.available_backends()
     assert arti_jax.backend_status() in {"available", "unavailable"}

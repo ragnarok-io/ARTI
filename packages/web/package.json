@@ -1,0 +1,39 @@
+{
+  "name": "@arti-fit/web",
+  "version": "0.1.0-alpha.1",
+  "description": "Experimental ARTI inference runtime for WebGPU and WebAssembly",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "license": "MIT",
+  "publishConfig": {"access": "public"},
+  "repository": {"type": "git", "url": "git+https://github.com/ragnarok-io/ARTI.git"},
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.dev.json && rollup -c",
+    "test": "vitest run --config vitest.config.mjs",
+    "test:browser": "playwright test",
+    "serve:browser": "vite --config vite.browser.config.mjs",
+    "docs": "typedoc"
+  },
+  "dependencies": {"onnxruntime-web": "^1.22.0"},
+  "devDependencies": {
+    "@playwright/test": "^1.53.0",
+    "@rollup/plugin-typescript": "^12.1.2",
+    "@types/node": "^22.15.0",
+    "@webgpu/types": "^0.1.60",
+    "rollup": "^4.41.0",
+    "tslib": "^2.8.1",
+    "typedoc": "^0.28.5",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "arti-monorepo",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build:web": "pnpm --filter @arti-fit/web run build",
+    "test:web": "pnpm --filter @arti-fit/web run test",
+    "test:web:parity": "uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures && pnpm --filter @arti-fit/web run test",
+    "docs:web": "pnpm --filter @arti-fit/web run docs"
+  }
+}

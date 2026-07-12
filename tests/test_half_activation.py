@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 import arti
 import arti.functional as F
@@ -27,6 +28,39 @@ def test_half_module_is_activation_like_and_stateless() -> None:
     y.sum().backward()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"base": float("nan")}, "base"),
+        ({"base": float("inf")}, "base"),
+        ({"scale": float("nan")}, "scale"),
+        ({"scale": float("inf")}, "scale"),
+        ({"threshold": float("nan")}, "threshold"),
+        ({"threshold": float("inf")}, "threshold"),
+    ],
+)
+def test_half_rejects_nonfinite_scalar_parameters(
+    kwargs: dict[str, float], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        arti_nn.Half(**kwargs)(torch.ones(2, 3))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"base": torch.tensor(float("nan"))}, "base"),
+        ({"scale": torch.tensor(float("inf"))}, "scale"),
+        ({"threshold": torch.tensor(float("nan"))}, "threshold"),
+    ],
+)
+def test_half_rejects_nonfinite_tensor_parameters(
+    kwargs: dict[str, torch.Tensor], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        arti_nn.Half(**kwargs)(torch.ones(2, 3))
 
 
 def test_half_stochastic_only_applies_in_training_mode() -> None:

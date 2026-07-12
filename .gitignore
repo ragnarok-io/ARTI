@@ -10,5 +10,11 @@ dist/
 site/
 .coverage
 htmlcov/
+node_modules/
+.pnpm-store/
+packages/*/dist/
+packages/*/docs/api/
+packages/*/test-results/
+packages/*/playwright-report/
 *.arti.st
 *.lock.json

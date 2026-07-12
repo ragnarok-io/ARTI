@@ -48,9 +48,7 @@ def half(
     base_t = torch.as_tensor(base, device=x.device, dtype=x.dtype)
     scale_t = torch.as_tensor(scale, device=x.device, dtype=x.dtype)
     deficit = torch.relu((threshold_t - x.abs()) / scale_t)
-    if not isinstance(base, Tensor) and base == 0.5:
-        survival = torch.exp2(-deficit)
-    elif not isinstance(base, Tensor) and base == 1.0:
+    if not isinstance(base, Tensor) and base == 1.0:
         survival = torch.ones_like(deficit)
     elif not isinstance(base, Tensor):
         survival = torch.exp(deficit * math.log(base))

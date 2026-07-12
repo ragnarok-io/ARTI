@@ -1,6 +1,6 @@
 [project]
 name = "arti-fit"
-version = "1.0.2"
+version = "1.1.0"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,10 +37,16 @@ jax = [
     "equinox>=0.11.0",
     "optax>=0.2.0",
 ]
+web = [
+    "onnx>=1.16",
+    "onnxscript>=0.3",
+]
 dev = [
     "build>=1.2",
     "hatchling>=1.25",
     "numpy>=2.0",
+    "onnx>=1.16",
+    "onnxscript>=0.3",
     "pytest>=8.0",
     "torch>=2.2",
 ]
@@ -76,6 +82,8 @@ all = [
     "equinox>=0.11.0",
     "optax>=0.2.0",
     "numpy>=2.0",
+    "onnx>=1.16",
+    "onnxscript>=0.3",
     "pillow>=10.0",
     "accelerate>=0.33",
     "diffusers>=0.30",
@@ -102,6 +110,7 @@ include = [
     "/src/arti",
     "/tests",
     "/docs/reference/*.schema.json",
+    "/docs/webgpu-alpha.md",
     "/examples",
     "/README.md",
     "/CONTRIBUTING.md",

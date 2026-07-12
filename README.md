@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.0.2 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.1.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -37,6 +37,13 @@ uv sync --extra jax
 uv sync --extra qwen
 uv sync --extra peft
 uv sync --extra sd
+uv sync --extra web
+```
+
+The alpha browser runtime is published separately:
+
+```bash
+pnpm add @arti-fit/web@alpha
 ```
 
 ## Use ARTI As A Layer
@@ -149,6 +156,14 @@ publisher signatures. Obtain models and weights from trusted sources.
 
 Experimental and legacy APIs are identified in their docstrings and are not
 frozen at the same level as the supported core surface.
+
+## WebGPU Alpha
+
+`arti.web.export(...)` can export deterministic `Half`, soft `Fold`, and
+soft-fold `LearnedPulse` modules as hashed ONNX artifacts. The separate
+`@arti-fit/web` package executes those artifacts with WebGPU and falls back to
+WebAssembly when `device: "auto"` is selected. Browser training and Recall are
+not part of this alpha. See [WebGPU Alpha](docs/webgpu-alpha.md).
 
 ## Develop
 
