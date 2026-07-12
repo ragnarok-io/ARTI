@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { Tensor, loadArti } from '../src/index.js';
+import { Tensor, loadArti, loadArtiStateful } from '../src/index.js';
 
 interface TensorPayload { dims: number[]; data: number[] }
 interface FixtureCase { inputs: Record<string, TensorPayload>; outputs: Record<string, TensorPayload> }
@@ -86,10 +86,66 @@ run('Python graph to ONNX Runtime Web parity', () => {
     };
     await expect(loadArti('http://arti.local/half/', {device: 'wasm', fetch: corrupt, wasmBinary, wasmNumThreads: 1})).rejects.toThrow(/size|SHA-256/);
   });
+
+  it('runs stateful Recall read/commit/snapshot/restore/fork/reset without parameter training', async () => {
+    const directory = path.resolve(root, 'stateful-recall');
+    const fixture = JSON.parse(await readFile(path.join(directory, 'case.json'), 'utf8')) as {
+      inputs: Record<string, TensorPayload>; expected: Record<string, TensorPayload>; tolerance: {atol: number; rtol: number};
+    };
+    wasmBinary ??= new Uint8Array(await readFile(wasmPath));
+    const url = 'http://arti.local/stateful-recall/';
+    const options = {device: 'wasm' as const, fetch: fixtureFetch(root), wasmBinary, wasmNumThreads: 1};
+    const module = await loadArtiStateful(url, options);
+    const full = tensor(fixture.inputs.full!); const mask = tensor(fixture.inputs.mask!);
+    const first = await module.run('read', {x: full, mask});
+    await expectTensor(first.recognition!, fixture.expected.initial_recognition!, fixture.tolerance);
+    for (let index = 0; index < 4; index += 1) {
+      const diagnostics = await module.commit('update', {trace_key: first.trace_key!, observed: full, mask});
+      dispose(diagnostics);
+    }
+    const corrupt = tensor(fixture.inputs.corrupt!); const novel = tensor(fixture.inputs.unseen!);
+    const seen = await module.run('read', {x: corrupt, mask});
+    const unseen = await module.run('read', {x: novel, mask});
+    await expectTensor(seen.recognition!, fixture.expected.seen_recognition!, fixture.tolerance);
+    await expectTensor(seen.delta!, fixture.expected.seen_delta!, fixture.tolerance);
+    await expectTensorAbsolute(unseen.recognition!, fixture.expected.unseen_recognition!, fixture.tolerance.atol);
+    const snapshot = await module.snapshot();
+    expect(snapshot.tensors.strengths?.dims).toEqual(fixture.expected.strengths!.dims);
+    expectError(Array.from(snapshot.tensors.strengths!.data), fixture.expected.strengths!.data, fixture.tolerance);
+    await expect(module.commit('update', {trace_key: first.trace_key!, mask})).rejects.toThrow(/observed is required/);
+    const afterFailedCommit = await module.snapshot();
+    expect(Array.from(afterFailedCommit.tensors.strengths!.data)).toEqual(Array.from(snapshot.tensors.strengths!.data));
+    const fork = await module.fork();
+    const forked = await fork.run('read', {x: tensor(fixture.inputs.corrupt!), mask: tensor(fixture.inputs.mask!)});
+    await expectTensor(forked.recognition!, fixture.expected.seen_recognition!, fixture.tolerance);
+    fork.reset();
+    const reset = await fork.run('read', {x: tensor(fixture.inputs.corrupt!), mask: tensor(fixture.inputs.mask!)});
+    expect(Math.max(...Array.from(await reset.recognition!.getData()) as number[])).toBeLessThan(1e-4);
+    await fork.restore(snapshot);
+    await expect(module.run('read', {x: full, mask, keys: full})).rejects.toThrow(/managed/);
+    await expect(module.run('read', {x: full, mask, invented: full})).rejects.toThrow(/not declared/);
+    dispose(first); dispose(seen); dispose(unseen); dispose(forked); dispose(reset);
+    full.dispose(); mask.dispose(); corrupt.dispose(); novel.dispose(); await fork.dispose(); await module.dispose();
+    expect(() => module.stateInfo()).toThrow(/disposed/);
+
+    const limited = await loadArtiStateful(url, {...options, maxStateBytes: 1});
+    const limitedX = tensor(fixture.inputs.full!); const limitedMask = tensor(fixture.inputs.mask!);
+    await expect(limited.run('read', {x: limitedX, mask: limitedMask})).rejects.toThrow(/budget/);
+    limitedX.dispose(); limitedMask.dispose(); await limited.dispose();
+    await expect(loadArtiStateful(url, {...options, maxArtifactBytes: 1})).rejects.toThrow(/artifact requires.*budget/);
+  });
 });
 
 function tensor(value: TensorPayload): Tensor { return new Tensor('float32', Float32Array.from(value.data), value.dims); }
 function tensors(values: Record<string, TensorPayload>): Record<string, Tensor> { return Object.fromEntries(Object.entries(values).map(([name, value]) => [name, tensor(value)])); }
+function dispose(values: Record<string, Tensor>): void { for (const value of Object.values(values)) value.dispose(); }
+async function expectTensor(actual: Tensor, expected: TensorPayload, tolerance: {atol: number; rtol: number}): Promise<void> {
+  expect(actual.dims).toEqual(expected.dims); expectError(Array.from(await actual.getData()) as number[], expected.data, tolerance);
+}
+async function expectTensorAbsolute(actual: Tensor, expected: TensorPayload, atol: number): Promise<void> {
+  expect(actual.dims).toEqual(expected.dims); const values = Array.from(await actual.getData()) as number[];
+  expect(Math.max(...values.map((value, index) => Math.abs(value - expected.data[index]!)))).toBeLessThanOrEqual(atol);
+}
 function fixtureFetch(fixtures: string): typeof fetch {
   return async (input) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());

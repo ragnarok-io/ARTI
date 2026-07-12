@@ -1,6 +1,6 @@
 {
   "name": "@arti-fit/web",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Experimental ARTI inference runtime for WebGPU and WebAssembly",
   "type": "module",
   "main": "./dist/index.js",

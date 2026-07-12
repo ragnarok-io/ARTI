@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.2.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.3.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -165,6 +165,11 @@ tensor inputs and outputs into a hashed artifact v2 ONNX graph. The separate
 Pulse, Recall, `q`, or `mask` rules. It uses WebGPU and falls back to
 WebAssembly when `device: "auto"` is selected. See
 [WebGPU Alpha](docs/webgpu-alpha.md).
+
+Stateful Recall can be exported as paired read/update artifact v3 graphs and
+loaded with `loadArtiStateful(...)`. Model parameters remain read-only;
+mutable state is explicit, fixed-size, bounded by caller budgets, and
+non-persistent unless the application requests a snapshot.
 
 ## Develop
 

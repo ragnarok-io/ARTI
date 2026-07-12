@@ -1,4 +1,4 @@
-import { Tensor, loadArti } from '../src/index.js';
+import { Tensor, loadArti, loadArtiStateful } from '../src/index.js';
 import { env } from 'onnxruntime-web/webgpu';
 const wasmUrl = '/ort-runtime.wasm';
 
@@ -10,6 +10,7 @@ declare global {
   interface Window {
     artiWebGPUInfo: () => Promise<Record<string, unknown>>;
     runArtiParity: (name: string, warmup?: number, runs?: number) => Promise<Record<string, unknown>>;
+    runStatefulRecall: () => Promise<Record<string, unknown>>;
   }
 }
 
@@ -24,6 +25,33 @@ window.artiWebGPUInfo = async () => {
     device: info.device,
     description: info.description,
     isFallbackAdapter: 'isFallbackAdapter' in adapter ? Boolean(adapter.isFallbackAdapter) : false,
+  };
+};
+
+window.runStatefulRecall = async () => {
+  const fixture = await (await fetch('/stateful-recall/case.json')).json() as {
+    inputs: Record<string, TensorPayload>; expected: Record<string, TensorPayload>;
+  };
+  const module = await loadArtiStateful('/stateful-recall/', {device: 'webgpu', wasmPaths: {wasm: wasmUrl}});
+  const full = tensor(fixture.inputs.full!); const mask = tensor(fixture.inputs.mask!);
+  const first = await module.run('read', {x: full, mask});
+  let firstCommittedBytes = 0;
+  for (let index = 0; index < 64; index += 1) {
+    const diagnostics = await module.commit('update', {trace_key: first.trace_key!, observed: full, mask});
+    for (const value of Object.values(diagnostics)) value.dispose();
+    if (index === 0) firstCommittedBytes = module.stateInfo().bytes;
+  }
+  const state = module.stateInfo();
+  const corrupt = tensor(fixture.inputs.corrupt!); const novel = tensor(fixture.inputs.unseen!);
+  const seen = await module.run('read', {x: corrupt, mask}); const unseen = await module.run('read', {x: novel, mask});
+  const seenRecognition = Array.from(await seen.recognition!.getData() as Float32Array);
+  const unseenRecognition = Array.from(await unseen.recognition!.getData() as Float32Array);
+  for (const output of [...Object.values(first), ...Object.values(seen), ...Object.values(unseen)]) output.dispose();
+  full.dispose(); mask.dispose(); corrupt.dispose(); novel.dispose(); await module.dispose();
+  return {
+    device: module.device, state, firstCommittedBytes,
+    seenRecognition: seenRecognition.reduce((a, b) => a + b, 0) / seenRecognition.length,
+    unseenRecognition: unseenRecognition.reduce((a, b) => a + b, 0) / unseenRecognition.length,
   };
 };
 

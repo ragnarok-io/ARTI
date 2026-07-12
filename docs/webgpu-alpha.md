@@ -97,3 +97,51 @@ pnpm docs:web
 The browser test requires a local Chrome installation and hardware WebGPU. CI
 runs artifact generation, TypeScript build, and WASM parity; it does not treat
 a software WebGPU adapter as hardware evidence.
+
+## Stateful Recall Artifact
+
+Stateful Recall is an alpha inference-time adaptation path, not browser
+training. Python exports the same initialized `StatefulRecall` as two graphs:
+
+```python
+import torch
+from arti.nn import StatefulRecall
+from arti.web import export_stateful_recall
+
+recall = StatefulRecall(dim=64, slots=16).eval()
+export_stateful_recall(
+    recall,
+    "recall-web",
+    example_x=torch.randn(1, 32, 64),
+    example_mask=torch.ones(1, 32),
+)
+```
+
+`read.onnx` reads immutable model parameters and explicit state without
+changing either. `update.onnx` applies Python-defined recognition, learned
+write quality, slot assignment, delta correction, and decay, and returns a new
+fixed-size state. The TypeScript runtime only follows manifest entrypoints and
+state bindings.
+
+```ts
+const recall = await loadArtiStateful("/recall-web/");
+const read = await recall.run("read", {x, mask});
+const info = await recall.commit("update", {
+  trace_key: read.trace_key,
+  observed: x,
+  mask,
+});
+```
+
+`commit()` swaps state only after every declared next-state tensor is produced,
+then disposes the previous buffers. State is memory-only and non-persistent;
+`snapshot()`, `restore()`, `fork()`, and `reset()` are explicit lifecycle
+operations. `snapshot()` and `fork()` may transfer state through CPU memory,
+while the continuous WebGPU `run`/`commit` path keeps committed state on GPU.
+Applications should set `maxStateBytes` according to their device budget and
+`maxArtifactBytes` according to their download and session-creation budget.
+The runtime derives state bytes from declared tensor shapes, requires the
+manifest budget to match, rejects non-local artifact file names, bounds file
+and entrypoint fan-out, and downloads model files sequentially. Recall masks
+must match `[batch, tokens]` exactly; broadcastable higher-rank masks are
+rejected before latent computation.

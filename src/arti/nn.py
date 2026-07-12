@@ -587,8 +587,9 @@ class RecallRefiner(nn.Module):
 
 Pulse = LearnedPulse
 
+from .stateful_recall import StatefulRecall
 from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
-__all__ = ["Layer", "Half", "Fold", "Pulse", "LearnedPulse", "RecallRefiner", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
+__all__ = ["Layer", "Half", "Fold", "Pulse", "LearnedPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 
 def __getattr__(name: str):

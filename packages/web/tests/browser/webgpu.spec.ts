@@ -20,3 +20,14 @@ test('uses a hardware WebGPU adapter and matches PyTorch', async ({page}) => {
   }
   console.log(JSON.stringify({adapter, reports}));
 });
+
+test('keeps committed Recall state on WebGPU and suppresses unseen reads', async ({page}) => {
+  await page.goto('http://127.0.0.1:4178/browser/');
+  const report = await page.evaluate(() => window.runStatefulRecall());
+  expect(report.device).toBe('webgpu');
+  expect(Object.values((report.state as {locations: Record<string, string>}).locations)).toEqual(['gpu-buffer', 'gpu-buffer', 'gpu-buffer']);
+  expect(Number((report.state as {bytes: number}).bytes)).toBe(Number(report.firstCommittedBytes));
+  expect(Number(report.seenRecognition)).toBeGreaterThan(0.8);
+  expect(Number(report.unseenRecognition)).toBeLessThan(0.05);
+  console.log(JSON.stringify(report));
+});

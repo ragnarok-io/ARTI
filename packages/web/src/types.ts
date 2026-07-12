@@ -10,4 +10,8 @@ export interface LoadArtiOptions {
   wasmBinary?: ArrayBuffer | Uint8Array;
   wasmPaths?: string | {wasm?: string | URL; mjs?: string | URL};
   wasmNumThreads?: number;
+  /** Maximum mutable state memory for stateful artifacts. Defaults to 256 MiB. */
+  maxStateBytes?: number;
+  /** Maximum aggregate model bytes for stateful artifacts. Defaults to 512 MiB. */
+  maxArtifactBytes?: number;
 }
