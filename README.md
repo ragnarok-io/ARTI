@@ -151,11 +151,15 @@ publisher signatures. Obtain models and weights from trusted sources.
 - `arti.nn`: `Layer`, `Half`, `Fold`, `Pulse`, `RecallRefiner`, and visual workspace modules.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
 - `arti.torch`: backend-explicit aliases for PyTorch applications.
-- `arti.jax`: optional functional JAX backend with JIT and gradient support.
+- `arti.jax`: optional functional JAX subset with array-only parameter trees,
+  JIT, whole-tree gradients, and batch/VMAP-consistent single-sample APIs.
 - `arti.functional`: mask, visibility, pooling, coordinate-frame, and activation helpers.
 
 Experimental and legacy APIs are identified in their docstrings and are not
 frozen at the same level as the supported core surface.
+
+ARTI remains PyTorch-first. The JAX namespace does not provide attachment,
+training helpers, Recall, serialization, or full `ARTILayer` parity.
 
 ## WebGPU Alpha
 

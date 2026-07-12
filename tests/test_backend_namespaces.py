@@ -2,6 +2,7 @@ import pytest
 import torch
 
 import arti
+import arti.backend as backend
 import arti.jax as arti_jax
 import arti.torch as arti_torch
 import arti.torch.blocks as torch_blocks
@@ -32,20 +33,52 @@ def test_backend_discovery_reports_current_and_planned_backends():
         assert "jax" in arti.planned_backends()
 
 
+def test_jax_backend_status_distinguishes_unavailable(monkeypatch) -> None:
+    backend.jax_backend_status.cache_clear()
+    monkeypatch.setattr(backend, "find_spec", lambda name: None)
+    assert backend.jax_backend_status() == "unavailable"
+    assert "jax" not in backend.available_backends()
+    assert "jax" in backend.planned_backends()
+    backend.jax_backend_status.cache_clear()
+
+
+def test_jax_backend_status_distinguishes_broken(monkeypatch) -> None:
+    import builtins
+
+    original_import = builtins.__import__
+    backend.jax_backend_status.cache_clear()
+    monkeypatch.setattr(backend, "find_spec", lambda name: object())
+
+    def broken_import(name, *args, **kwargs):
+        if name == "jax":
+            raise OSError("broken jaxlib")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    assert backend.jax_backend_status() == "broken"
+    assert "jax" not in backend.available_backends()
+    assert "jax" in backend.planned_backends()
+    backend.jax_backend_status.cache_clear()
+
+
 def test_jax_namespace_reports_optional_backend_status():
-    assert arti_jax.backend_status() in {"available", "unavailable"}
+    assert arti_jax.backend_status() in {"available", "broken", "unavailable"}
     smoke = arti_jax.smoke_report()
     assert smoke["backend_status"] == arti_jax.backend_status()
     if arti_jax.backend_status() == "unavailable":
         assert smoke["smoke_status"] == "skipped"
         with pytest.raises(arti_jax.ARTIJAXBackendUnavailableError):
             arti_jax.require_jax_backend()
-    else:
+    elif arti_jax.backend_status() == "available":
         assert smoke["smoke_status"] == "passed"
         assert smoke["forward_ok"] is True
         assert smoke["jit_ok"] is True
         assert smoke["grad_ok"] is True
         arti_jax.require_jax_backend()
+    else:
+        assert smoke["smoke_status"] == "failed"
+        with pytest.raises(arti_jax.ARTIJAXBackendUnavailableError):
+            arti_jax.require_jax_backend()
 
 
 def test_jax_functional_smoke_when_available():

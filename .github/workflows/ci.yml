@@ -19,6 +19,18 @@ jobs:
       - run: uv run --extra dev pytest
       - run: uv build
 
+  jax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --extra dev --extra jax
+      - run: uv run python -m pytest tests_jax/test_jax_contract.py tests_jax/test_jax_torch_parity.py
+      - run: uv run arti doctor --allow-cpu-torch --require-jax-smoke
+
   web:
     runs-on: ubuntu-latest
     steps:

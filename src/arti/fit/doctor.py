@@ -40,6 +40,8 @@ class BackendCapabilities:
     torch_cuda_amp_available: bool
     torch_compile_available: bool
     jax_backend_status: str
+    jax_version: str | None
+    jaxlib_version: str | None
     jax_smoke: dict[str, Any]
     jax_smoke_status: str
     gpu_readiness_level: str
@@ -148,20 +150,32 @@ def backend_capabilities() -> BackendCapabilities:
     torch_cuda_available = torch.cuda.is_available()
     torch_devices = cuda_devices()
     torch_cuda_smoke = cuda_smoke_probe()
+    jax_status = jax_backend_status()
     jax_smoke = jax_smoke_report()
+    jax_version = None
+    jaxlib_version = None
+    if jax_status != "unavailable":
+        try:
+            import jax
+            import jaxlib
+
+            jax_version = str(jax.__version__)
+            jaxlib_version = str(jaxlib.__version__)
+        except Exception:
+            pass
     smi_available, driver_version, smi_cuda_version, smi_devices = nvidia_smi_report()
     if torch_cuda_available:
         gpu_readiness_level = "torch_cuda_runtime_available"
-        interpretation = "PyTorch CUDA runtime is available and the local CUDA smoke probe can be used."
+        interpretation = "PyTorch CUDA runtime is available. Run benchmarks/profile_scaling.py --device cuda to generate scaling evidence."
     elif smi_devices:
         gpu_readiness_level = "nvidia_hardware_detected_torch_cpu"
         interpretation = (
             "NVIDIA hardware is visible through nvidia-smi, but the current PyTorch build is CPU-only or cannot access CUDA. "
-            "Install a CUDA-enabled PyTorch build to use ARTI on this device."
+            "Install a CUDA-enabled PyTorch build before claiming ARTI CUDA runtime evidence."
         )
     else:
         gpu_readiness_level = "cpu_only"
-        interpretation = "No NVIDIA CUDA hardware is visible locally; ARTI will use the CPU runtime."
+        interpretation = "No NVIDIA CUDA hardware is visible locally. This proves CPU smoke readiness only, not CUDA scaling evidence."
     return BackendCapabilities(
         python=sys.version.split()[0],
         platform=platform.platform(),
@@ -181,7 +195,9 @@ def backend_capabilities() -> BackendCapabilities:
         torch_cuda_smoke_status=str(torch_cuda_smoke.get("smoke_status")),
         torch_cuda_amp_available=torch_cuda_available,
         torch_compile_available=hasattr(torch, "compile"),
-        jax_backend_status=jax_backend_status(),
+        jax_backend_status=jax_status,
+        jax_version=jax_version,
+        jaxlib_version=jaxlib_version,
         jax_smoke=jax_smoke,
         jax_smoke_status=str(jax_smoke.get("smoke_status")),
         gpu_readiness_level=gpu_readiness_level,
@@ -210,6 +226,8 @@ def validate_backend_capabilities(payload: dict[str, Any], *, allow_cpu_torch: b
         "torch_cuda_amp_available",
         "torch_compile_available",
         "jax_backend_status",
+        "jax_version",
+        "jaxlib_version",
         "jax_smoke",
         "jax_smoke_status",
         "gpu_readiness_level",
@@ -220,12 +238,12 @@ def validate_backend_capabilities(payload: dict[str, Any], *, allow_cpu_torch: b
         return [f"missing fields: {sorted(missing)}"]
     if "torch" not in payload["available_backends"]:
         failures.append("available_backends must include torch")
-    if payload["jax_backend_status"] not in {"available", "unavailable"}:
-        failures.append("jax_backend_status must be available or unavailable")
+    if payload["jax_backend_status"] not in {"available", "broken", "unavailable"}:
+        failures.append("jax_backend_status must be available, broken, or unavailable")
     if payload["jax_backend_status"] == "available" and "jax" not in payload["available_backends"]:
         failures.append("available JAX backend must be listed in available_backends")
-    if payload["jax_backend_status"] == "unavailable" and "jax" not in payload["planned_backends"]:
-        failures.append("unavailable JAX backend must be listed in planned_backends")
+    if payload["jax_backend_status"] in {"broken", "unavailable"} and "jax" not in payload["planned_backends"]:
+        failures.append("non-available JAX backend must be listed in planned_backends")
     if payload["jax_smoke_status"] not in {"passed", "skipped", "failed"}:
         failures.append("jax_smoke_status must be passed, skipped, or failed")
     if not isinstance(payload["jax_smoke"], dict):
@@ -236,6 +254,8 @@ def validate_backend_capabilities(payload: dict[str, Any], *, allow_cpu_torch: b
         failures.append("available JAX backend requires passing jax_smoke_status")
     if payload["jax_backend_status"] == "unavailable" and payload["jax_smoke_status"] != "skipped":
         failures.append("unavailable JAX backend requires skipped jax_smoke_status")
+    if payload["jax_backend_status"] == "broken" and payload["jax_smoke_status"] != "failed":
+        failures.append("broken JAX backend requires failed jax_smoke_status")
     if payload["gpu_readiness_level"] not in {"cpu_only", "nvidia_hardware_detected_torch_cpu", "torch_cuda_runtime_available"}:
         failures.append("gpu_readiness_level must be cpu_only, nvidia_hardware_detected_torch_cpu, or torch_cuda_runtime_available")
     if not isinstance(payload["torch_cuda_available"], bool):
@@ -304,6 +324,8 @@ def doctor_report_markdown(report: dict[str, Any]) -> str:
         f"- Available: `{capabilities['available_backends']}`",
         f"- Planned: `{capabilities['planned_backends']}`",
         f"- JAX status: `{capabilities['jax_backend_status']}`",
+        f"- JAX version: `{capabilities['jax_version']}`",
+        f"- jaxlib version: `{capabilities['jaxlib_version']}`",
         f"- JAX smoke: `{capabilities['jax_smoke']}`",
         f"- torch.compile available: `{capabilities['torch_compile_available']}`",
         f"- CUDA smoke: `{capabilities['torch_cuda_smoke']}`",

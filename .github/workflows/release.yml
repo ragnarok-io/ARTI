@@ -14,7 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --extra dev
+      - run: uv sync --locked --extra dev
+      - name: Verify tag matches package version
+        run: test "v$(uv run python -c 'import arti; print(arti.__version__)')" = "$GITHUB_REF_NAME"
       - run: uv run --extra dev pytest
       - run: uv build --no-sources
       - uses: actions/upload-artifact@v4

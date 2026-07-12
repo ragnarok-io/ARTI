@@ -60,7 +60,7 @@ def test_package_declares_web_export_extra():
 
 def test_backend_status_is_explicit():
     assert "torch" in arti.available_backends()
-    assert arti_jax.backend_status() in {"available", "unavailable"}
+    assert arti_jax.backend_status() in {"available", "broken", "unavailable"}
     if arti_jax.backend_status() == "available":
         assert "jax" in arti.available_backends()
         assert "jax" not in arti.planned_backends()
