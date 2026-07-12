@@ -3,7 +3,7 @@ import { env } from 'onnxruntime-web/webgpu';
 const wasmUrl = '/ort-runtime.wasm';
 
 interface TensorPayload { dims: number[]; data: number[] }
-interface FixtureCase { inputs: Record<string, TensorPayload>; expected: TensorPayload }
+interface FixtureCase { inputs: Record<string, TensorPayload>; outputs: Record<string, TensorPayload> }
 interface Fixture { tolerance: {atol: number; rtol: number}; cases: FixtureCase[] }
 
 declare global {
@@ -34,50 +34,50 @@ window.runArtiParity = async (name, warmup = 0, runs = 0) => {
   let maxRelative = 0;
   for (const item of fixture.cases) {
     const inputs = Object.fromEntries(Object.entries(item.inputs).map(([key, value]) => [key, tensor(value)]));
-    const y = await module.forward(inputs.x!, {q: inputs.q, mask: inputs.mask});
-    const raw = await y.getData();
-    if (!(raw instanceof Float32Array)) throw new Error('ARTI Web output is not float32');
-    const actual = Array.from(raw);
-    for (let index = 0; index < actual.length; index += 1) {
-      const difference = Math.abs(actual[index]! - item.expected.data[index]!);
-      maxAbsolute = Math.max(maxAbsolute, difference);
-      maxRelative = Math.max(maxRelative, difference / Math.max(Math.abs(item.expected.data[index]!), 1e-8));
+    const outputs = await module.run(inputs);
+    for (const [outputName, expected] of Object.entries(item.outputs)) {
+      const y = outputs[outputName]!;
+      const raw = await y.getData();
+      if (!(raw instanceof Float32Array)) throw new Error('ARTI Web output is not float32');
+      const actual = Array.from(raw);
+      for (let index = 0; index < actual.length; index += 1) {
+        const difference = Math.abs(actual[index]! - expected.data[index]!);
+        maxAbsolute = Math.max(maxAbsolute, difference);
+        maxRelative = Math.max(maxRelative, difference / Math.max(Math.abs(expected.data[index]!), 1e-8));
+      }
+      y.dispose();
     }
-    y.dispose();
   }
 
   const sample = fixture.cases[0]!;
   const inputs = Object.fromEntries(Object.entries(sample.inputs).map(([key, value]) => [key, tensor(value)]));
-  const gpuDevice = await env.webgpu.device;
-  const outputBytes = sample.expected.data.length * Float32Array.BYTES_PER_ELEMENT;
-  const outputBuffer = gpuDevice.createBuffer({
-    size: Math.ceil(outputBytes / 16) * 16,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-  });
-  const outputTensor = Tensor.fromGpuBuffer(outputBuffer, {dataType: 'float32', dims: sample.expected.dims});
-  const into = await module.forwardInto(outputTensor, inputs.x!, {q: inputs.q, mask: inputs.mask});
-  if (into !== outputTensor) throw new Error('forwardInto did not preserve the preallocated tensor');
-  const staging = gpuDevice.createBuffer({size: Math.ceil(outputBytes / 4) * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
-  const encoder = gpuDevice.createCommandEncoder();
-  encoder.copyBufferToBuffer(outputBuffer, 0, staging, 0, outputBytes);
-  gpuDevice.queue.submit([encoder.finish()]);
-  await staging.mapAsync(GPUMapMode.READ);
-  const intoData = Array.from(new Float32Array(staging.getMappedRange().slice(0, outputBytes)));
-  staging.unmap();
-  staging.destroy();
-  outputBuffer.destroy();
   let forwardIntoMaxAbsolute = 0;
-  for (let index = 0; index < intoData.length; index += 1) {
-    forwardIntoMaxAbsolute = Math.max(forwardIntoMaxAbsolute, Math.abs(intoData[index]! - sample.expected.data[index]!));
+  if (Object.keys(sample.outputs).length === 1) {
+    const outputName = Object.keys(sample.outputs)[0]!;
+    const expected = sample.outputs[outputName]!;
+    const gpuDevice = await env.webgpu.device;
+    const outputBytes = expected.data.length * Float32Array.BYTES_PER_ELEMENT;
+    const outputBuffer = gpuDevice.createBuffer({size: Math.ceil(outputBytes / 16) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST});
+    const outputTensor = Tensor.fromGpuBuffer(outputBuffer, {dataType: 'float32', dims: expected.dims});
+    const into = (await module.run(inputs, {[outputName]: outputTensor}))[outputName]!;
+    if (into !== outputTensor) throw new Error('forwardInto did not preserve the preallocated tensor');
+    const staging = gpuDevice.createBuffer({size: Math.ceil(outputBytes / 4) * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
+    const encoder = gpuDevice.createCommandEncoder();
+    encoder.copyBufferToBuffer(outputBuffer, 0, staging, 0, outputBytes);
+    gpuDevice.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const intoData = Array.from(new Float32Array(staging.getMappedRange().slice(0, outputBytes)));
+    staging.unmap(); staging.destroy(); outputBuffer.destroy();
+    for (let index = 0; index < intoData.length; index += 1) forwardIntoMaxAbsolute = Math.max(forwardIntoMaxAbsolute, Math.abs(intoData[index]! - expected.data[index]!));
   }
   for (let index = 0; index < warmup; index += 1) {
-    const y = await module.forward(inputs.x!, {q: inputs.q, mask: inputs.mask});
-    y.dispose();
+    const outputs = await module.run(inputs);
+    for (const tensor of Object.values(outputs)) tensor.dispose();
   }
   const start = performance.now();
   for (let index = 0; index < runs; index += 1) {
-    const y = await module.forward(inputs.x!, {q: inputs.q, mask: inputs.mask});
-    y.dispose();
+    const outputs = await module.run(inputs);
+    for (const tensor of Object.values(outputs)) tensor.dispose();
   }
   const meanMilliseconds = runs === 0 ? 0 : (performance.now() - start) / runs;
   await module.dispose();

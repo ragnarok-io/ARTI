@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.1.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.2.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
@@ -48,7 +48,7 @@ issues may require an exception, which must be documented.
 | CPU | Supported |
 | NVIDIA CUDA | Supported through CUDA-enabled PyTorch |
 | JAX | Optional functional backend; smaller surface than PyTorch |
-| WebGPU | Alpha inference runtime for exported Half, Fold, and LearnedPulse artifacts |
+| WebGPU | Alpha Python-first runtime for generic artifact v2 tensor graphs |
 | Transformers, PEFT, Diffusers | Optional integrations |
 | Artifact format | `arti.st` format version 1 |
 

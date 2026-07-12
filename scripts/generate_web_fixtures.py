@@ -1,4 +1,4 @@
-"""Generate deterministic ARTI Web parity artifacts for TypeScript tests."""
+"""Generate deterministic Python-first ARTI Web parity artifacts."""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ import json
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 
 from arti.nn import Fold, Half, LearnedPulse
 from arti.web import export
+
+
+class GenericAffine(nn.Module):
+    """Test-only module proving the Web runtime has no ARTI class registry."""
+
+    def forward(self, signal: torch.Tensor, gate: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"result": signal * (1.0 + gate), "salience": gate.expand_as(signal)}
 
 
 def _tensor_payload(tensor: torch.Tensor) -> dict[str, object]:
@@ -19,15 +27,18 @@ def _tensor_payload(tensor: torch.Tensor) -> dict[str, object]:
 
 def _run(module, inputs):
     with torch.inference_mode():
-        if isinstance(module, Half):
-            return module(inputs["x"])
-        return module(inputs["x"], q=inputs.get("q"), mask=inputs.get("mask"))
+        value = module(**inputs)
+    if isinstance(value, torch.Tensor):
+        return {"y": value}
+    if isinstance(value, dict):
+        return value
+    return {f"output_{index}": tensor for index, tensor in enumerate(value)}
 
 
 def _case(module, inputs):
     return {
         "inputs": {name: _tensor_payload(value) for name, value in inputs.items()},
-        "expected": _tensor_payload(_run(module, inputs)),
+        "outputs": {name: _tensor_payload(value) for name, value in _run(module, inputs).items()},
     }
 
 
@@ -50,30 +61,10 @@ def generate(root: Path) -> None:
     q7 = torch.sigmoid(torch.randn(3, 7, 1))
 
     _write_fixture(root, "half", Half().eval(), {"x": x5}, {"x": x7}, {"atol": 1e-5, "rtol": 1e-5})
-    _write_fixture(
-        root,
-        "fold-salience",
-        Fold(k=3, dim=4).eval(),
-        {"x": x5, "mask": mask5},
-        {"x": x7, "mask": mask7},
-        {"atol": 1e-4, "rtol": 1e-3},
-    )
-    _write_fixture(
-        root,
-        "fold-q",
-        Fold(k=3, dim=4).eval(),
-        {"x": x5, "q": q5, "mask": mask5},
-        {"x": x7, "q": q7, "mask": mask7},
-        {"atol": 1e-4, "rtol": 1e-3},
-    )
-    _write_fixture(
-        root,
-        "learned-pulse",
-        LearnedPulse(k=3, dim=4, hidden_dim=6).eval(),
-        {"x": x5, "q": q5, "mask": mask5},
-        {"x": x7, "q": q7, "mask": mask7},
-        {"atol": 1e-4, "rtol": 1e-3},
-    )
+    _write_fixture(root, "fold-salience", Fold(k=3, dim=4).eval(), {"x": x5, "mask": mask5}, {"x": x7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
+    _write_fixture(root, "fold-q", Fold(k=3, dim=4).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
+    _write_fixture(root, "learned-pulse", LearnedPulse(k=3, dim=4, hidden_dim=6).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
+    _write_fixture(root, "generic-affine", GenericAffine().eval(), {"signal": x5, "gate": q5}, {"signal": x7, "gate": q7}, {"atol": 1e-5, "rtol": 1e-5})
 
 
 def main() -> None:

@@ -35,6 +35,8 @@ jobs:
           cache: pnpm
       - run: uv sync --extra dev
       - run: pnpm install --frozen-lockfile
+      - run: uv run python scripts/generate_web_contract.py packages/web/src/generated/contract.ts
+      - run: git diff --exit-code -- packages/web/src/generated/contract.ts
       - run: uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures
       - run: pnpm build:web
       - run: pnpm test:web

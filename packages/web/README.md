@@ -1,8 +1,8 @@
 # @arti-fit/web
 
-Experimental, inference-only ARTI runtime for WebGPU with a WebAssembly
-fallback. Artifacts are exported from Python with `arti.web.export` and are
-verified before ONNX Runtime creates an inference session.
+Python-first, inference-only ARTI binding for WebGPU with a WebAssembly
+fallback. Python defines and exports the graph contract; this package is a
+generic verifier and executor with no Half, Fold, Pulse, `q`, or `mask` logic.
 
 ```bash
 pnpm add @arti-fit/web@alpha
@@ -13,10 +13,10 @@ import { loadArti, Tensor } from "@arti-fit/web";
 
 const layer = await loadArti("/layer-web/", { device: "auto" });
 const x = new Tensor("float32", values, [batch, tokens, dim]);
-const y = await layer.forward(x);
+const { y } = await layer.run({ x });
 await layer.dispose();
 ```
 
-Alpha support is limited to deterministic `Half`, soft `Fold`, and soft-fold
-`LearnedPulse` artifacts using float32. Browser training and Recall are not
-part of this release.
+Artifact v2 accepts Python-supported float32 tensor-in/tensor-out modules.
+Browser training is not part of this release. Artifact v1 must be re-exported
+with the current Python package.

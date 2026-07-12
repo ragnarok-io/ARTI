@@ -1,8 +1,9 @@
 # WebGPU Alpha
 
-ARTI includes an experimental browser deployment path for deterministic
-`Half`, soft `Fold`, and soft-fold `LearnedPulse` modules. Python exports an
-ONNX artifact; `@arti-fit/web` validates and executes it with ONNX Runtime Web.
+ARTI includes an experimental Python-first browser deployment path. Python
+calls the real module, defines the complete artifact contract, and exports its
+ONNX graph. `@arti-fit/web` generically validates and executes the declared
+inputs and outputs with ONNX Runtime Web; it contains no ARTI mechanism rules.
 
 This is an inference boundary. It does not change `arti.st`, support browser
 training, or claim full parity with every ARTI mechanism.
@@ -51,7 +52,7 @@ import { loadArti, Tensor } from "@arti-fit/web";
 const layer = await loadArti("/layer-web/", { device: "auto" });
 const x = new Tensor("float32", values, [batch, tokens, 64]);
 const mask = new Tensor("float32", maskValues, [batch, tokens]);
-const y = await layer.forward(x, { mask });
+const { y } = await layer.run({ x, mask });
 
 await y.getData(); // Explicitly downloads a WebGPU result to CPU.
 y.dispose();
@@ -59,31 +60,34 @@ await layer.dispose();
 ```
 
 `device: "auto"` tries WebGPU and then WASM. `device: "webgpu"` never silently
-falls back. Outputs stay on the GPU when WebGPU is active. Use `forwardInto`
-with an ORT tensor backed by a preallocated GPU buffer when the caller owns a
-buffer pool.
+falls back. Outputs stay on the GPU when WebGPU is active. Pass a second named
+output map to `run(inputs, outputs)` when the caller owns a GPU buffer pool.
 
 Self-hosted and offline applications can pass `wasmPaths` or `wasmBinary` to
 `loadArti`. Applications remain responsible for serving the matching ONNX
 Runtime Web control binary.
 
-## Supported Surface
+## Python-Owned Contract
 
-- float32 `[B, N, D]` input
-- deterministic `Half`
-- `Fold(mode="soft", topk=None, dropout=0)`
-- soft-fold `LearnedPulse` without top-k or dropout
-- optional exported `q` and `mask` contracts
-- dynamic batch and token dimensions
-- artifact size and SHA-256 verification
+- Python accepts supported CPU float32 tensor inputs and calls
+  `module.forward(**example_inputs)` directly.
+- Tensor, named tensor mapping, and tensor sequence outputs become named ONNX
+  outputs in artifact v2.
+- Input/output names, shapes, dynamic axes, module metadata, and supported
+  modes are decided by Python.
+- TypeScript contracts and validators are generated from
+  `arti.web.contract`; CI rejects generated-file drift.
+- JavaScript retains only browser concerns: fetch, SHA-256, provider choice,
+  GPU buffers, execution, and disposal.
 
-Stochastic Half, attention/top-k Fold, lazy feature dimensions, Recall, and
-training fail during export with an explicit unsupported-mode error.
+Unsupported Python module modes fail before export. Artifact v1 is rejected
+with a request to re-export it from the current Python package.
 
 ## Development Checks
 
 ```bash
 uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures
+uv run python scripts/generate_web_contract.py packages/web/src/generated/contract.ts
 pnpm build:web
 pnpm test:web
 pnpm --filter @arti-fit/web test:browser

@@ -1,13 +1,13 @@
-"""Export deterministic ARTI modules for the TypeScript Web runtime."""
+"""Export Python-defined ARTI modules for the generic Web runtime."""
 
 from __future__ import annotations
 
 import hashlib
 import inspect
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 import torch
 import torch.nn as nn
@@ -15,13 +15,13 @@ from torch import Tensor
 
 from .._version import __version__
 from ..nn import Fold, Half, LearnedPulse
-
-
-ARTI_WEB_FORMAT = "arti.web"
-ARTI_WEB_FORMAT_VERSION = 1
-ARTI_WEB_MANIFEST = "arti-web.json"
-ARTI_WEB_MODEL = "model.onnx"
-ARTI_WEB_LOCK = "arti-web.lock.json"
+from .contract import (
+    ARTI_WEB_FORMAT,
+    ARTI_WEB_FORMAT_VERSION,
+    ARTI_WEB_LOCK,
+    ARTI_WEB_MANIFEST,
+    ARTI_WEB_MODEL,
+)
 
 
 @dataclass(frozen=True)
@@ -37,17 +37,26 @@ class ARTIWebExportResult:
 
 
 class _ExportWrapper(nn.Module):
-    def __init__(self, module: nn.Module, input_names: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        module: nn.Module,
+        input_names: tuple[str, ...],
+        output_kind: str,
+        output_keys: tuple[str, ...],
+    ) -> None:
         super().__init__()
         self.module = module
         self.input_names = input_names
+        self.output_kind = output_kind
+        self.output_keys = output_keys
 
-    def forward(self, *values: Tensor) -> Tensor:
-        inputs = dict(zip(self.input_names, values, strict=True))
-        x = inputs["x"]
-        if isinstance(self.module, Half):
-            return self.module(x)
-        return self.module(x, q=inputs.get("q"), mask=inputs.get("mask"))
+    def forward(self, *values: Tensor):
+        result = self.module(**dict(zip(self.input_names, values, strict=True)))
+        if self.output_kind == "tensor":
+            return result
+        if self.output_kind == "mapping":
+            return tuple(result[key] for key in self.output_keys)
+        return tuple(result)
 
 
 def export(
@@ -55,26 +64,31 @@ def export(
     path: str | Path,
     *,
     example_inputs: Mapping[str, Tensor],
+    output_names: Sequence[str] | None = None,
     dynamic_batch: bool = True,
     dynamic_tokens: bool = True,
     opset_version: int = 18,
 ) -> ARTIWebExportResult:
-    """Export a deterministic ARTI module as a static Web artifact directory.
+    """Compile a Python module into a generic ARTI Web artifact.
 
-    The alpha exporter supports deterministic :class:`Half`, soft
-    :class:`Fold`, and soft-fold :class:`LearnedPulse` modules with float32
-    ``[B, N, D]`` inputs. Optional ``q`` and ``mask`` inputs become part of the
-    artifact contract only when present in ``example_inputs``.
+    The Python module is the source of truth. The exporter calls its real
+    ``forward(**example_inputs)`` method, records the resulting tensor
+    contract, and exports that same call path to ONNX. JavaScript does not
+    inspect the module type or reproduce mechanism-specific behavior.
     """
 
-    if not isinstance(module, (Half, Fold, LearnedPulse)):
-        raise TypeError("Web export supports Half, Fold, and LearnedPulse modules")
+    if not isinstance(module, nn.Module):
+        raise TypeError("module must be a torch.nn.Module")
     if module.training:
         raise ValueError("Web export requires module.eval()")
     if opset_version < 18:
         raise ValueError("opset_version must be at least 18")
-    _validate_module(module)
-    names, tensors = _validate_inputs(module, example_inputs)
+    _validate_supported_mode(module)
+    input_names, tensors = _validate_inputs(example_inputs)
+
+    with torch.inference_mode():
+        sample = module(**dict(zip(input_names, tensors, strict=True)))
+    resolved_names, output_tensors, output_kind, output_keys = _normalize_outputs(sample, output_names)
 
     target = Path(path)
     target.mkdir(parents=True, exist_ok=True)
@@ -82,11 +96,18 @@ def export(
     manifest_path = target / ARTI_WEB_MANIFEST
     lock_path = target / ARTI_WEB_LOCK
 
-    wrapper = _ExportWrapper(module, names).eval()
-    dynamic_axes = _dynamic_axes(names, module, tensors, dynamic_batch, dynamic_tokens)
+    wrapper = _ExportWrapper(module, input_names, output_kind, output_keys).eval()
+    dynamic_axes = _dynamic_axes(
+        input_names,
+        tensors,
+        resolved_names,
+        output_tensors,
+        dynamic_batch,
+        dynamic_tokens,
+    )
     export_options = {
-        "input_names": list(names),
-        "output_names": ["y"],
+        "input_names": list(input_names),
+        "output_names": list(resolved_names),
         "dynamic_axes": dynamic_axes or None,
         "opset_version": opset_version,
         "do_constant_folding": True,
@@ -97,19 +118,25 @@ def export(
         torch.onnx.export(wrapper, tensors, model_path, **export_options)
 
     model_sha = _sha256(model_path)
-    output_shape = _output_shape(module, tensors[0])
     manifest = {
         "format": ARTI_WEB_FORMAT,
         "format_version": ARTI_WEB_FORMAT_VERSION,
         "package_version": __version__,
-        "module": {"type": type(module).__name__, "config": _module_config(module)},
+        "producer": {"backend": "torch", "graph_format": "onnx"},
+        "module": {"type": _module_type(module), "config": _module_config(module)},
         "runtime": {
             "dtype": "float32",
             "opset_version": opset_version,
             "execution_providers": ["webgpu", "wasm"],
         },
-        "inputs": [_tensor_contract(name, tensor, dynamic_batch, dynamic_tokens) for name, tensor in zip(names, tensors, strict=True)],
-        "output": _shape_contract("y", output_shape, dynamic_batch, dynamic_tokens and isinstance(module, Half)),
+        "inputs": [
+            _tensor_contract(name, tensor, dynamic_axes.get(name, {}))
+            for name, tensor in zip(input_names, tensors, strict=True)
+        ],
+        "outputs": [
+            _tensor_contract(name, tensor, dynamic_axes.get(name, {}))
+            for name, tensor in zip(resolved_names, output_tensors, strict=True)
+        ],
         "files": {ARTI_WEB_MODEL: {"sha256": model_sha, "size": model_path.stat().st_size}},
     }
     _write_json(manifest_path, manifest)
@@ -124,14 +151,14 @@ def export(
     return ARTIWebExportResult(target, manifest_path, model_path, lock_path, manifest_sha, model_sha)
 
 
-def _validate_module(module: nn.Module) -> None:
+def _validate_supported_mode(module: nn.Module) -> None:
     if isinstance(module, Half):
         if module.stochastic:
             raise ValueError("stochastic Half is not supported by Web export")
         return
-    if module.dim is None:
-        raise ValueError("Web export requires an explicit dim")
     if isinstance(module, Fold):
+        if module.dim is None:
+            raise ValueError("Web export requires Fold to have an explicit dim")
         if module.mode != "soft":
             raise ValueError("Web export currently supports Fold(mode='soft') only")
         if module.topk is not None:
@@ -139,80 +166,89 @@ def _validate_module(module: nn.Module) -> None:
         if module.dropout.p != 0:
             raise ValueError("Web export requires Fold dropout=0")
         return
-    if module.fold_mode != "soft":
-        raise ValueError("Web export currently supports LearnedPulse(fold_mode='soft') only")
-    if module.fold_topk is not None or module.q_topk is not None:
-        raise ValueError("Web export does not support LearnedPulse topk modes")
-    if module.dropout.p != 0:
-        raise ValueError("Web export requires LearnedPulse dropout=0")
+    if isinstance(module, LearnedPulse):
+        if module.dim is None:
+            raise ValueError("Web export requires LearnedPulse to have an explicit dim")
+        if module.fold_mode != "soft":
+            raise ValueError("Web export currently supports LearnedPulse(fold_mode='soft') only")
+        if module.fold_topk is not None or module.q_topk is not None:
+            raise ValueError("Web export does not support LearnedPulse topk modes")
+        if module.dropout.p != 0:
+            raise ValueError("Web export requires LearnedPulse dropout=0")
 
 
-def _validate_inputs(module: nn.Module, values: Mapping[str, Tensor]) -> tuple[tuple[str, ...], tuple[Tensor, ...]]:
-    allowed = {"x"} if isinstance(module, Half) else {"x", "q", "mask"}
-    unknown = set(values) - allowed
-    if unknown:
-        raise ValueError(f"unsupported Web export inputs: {sorted(unknown)}")
-    if "x" not in values:
-        raise ValueError("example_inputs must contain x")
-    names = tuple(name for name in ("x", "q", "mask") if name in values)
+def _validate_inputs(values: Mapping[str, Tensor]) -> tuple[tuple[str, ...], tuple[Tensor, ...]]:
+    if not values:
+        raise ValueError("example_inputs must contain at least one tensor")
+    names = tuple(values)
+    if len(set(names)) != len(names) or any(not name or not isinstance(name, str) for name in names):
+        raise ValueError("example input names must be unique non-empty strings")
     tensors = tuple(values[name] for name in names)
-    x = tensors[0]
-    if not isinstance(x, Tensor) or x.ndim != 3:
-        raise ValueError("x must be a Tensor with shape [B, N, D]")
-    if x.dtype != torch.float32:
-        raise ValueError("Web alpha export supports float32 only")
-    if x.device.type != "cpu":
-        raise ValueError("example inputs must be on CPU")
-    dim = getattr(module, "dim", None)
-    if dim is not None and x.shape[-1] != dim:
-        raise ValueError(f"expected x feature dim {dim}, got {x.shape[-1]}")
-    for name, tensor in zip(names[1:], tensors[1:], strict=True):
-        if not isinstance(tensor, Tensor) or tensor.device.type != "cpu":
-            raise ValueError(f"{name} must be a CPU Tensor")
+    for name, tensor in zip(names, tensors, strict=True):
+        if not isinstance(tensor, Tensor):
+            raise ValueError(f"{name} must be a Tensor")
         if tensor.dtype != torch.float32:
             raise ValueError(f"{name} must use float32 for Web export")
-        if tensor.ndim not in {2, 3} or tensor.shape[:2] != x.shape[:2] or (tensor.ndim == 3 and tensor.shape[-1] != 1):
-            raise ValueError(f"{name} must have shape [B, N] or [B, N, 1]")
+        if tensor.device.type != "cpu":
+            raise ValueError(f"{name} must be a CPU Tensor")
+        if tensor.ndim == 0:
+            raise ValueError(f"{name} must have at least one dimension")
     return names, tensors
 
 
-def _dynamic_axes(names, module, tensors, dynamic_batch, dynamic_tokens):
+def _normalize_outputs(value, names: Sequence[str] | None):
+    if isinstance(value, Tensor):
+        tensors = (value,)
+        kind = "tensor"
+        keys: tuple[str, ...] = ()
+        defaults = ("y",)
+    elif isinstance(value, Mapping):
+        keys = tuple(value)
+        tensors = tuple(value[key] for key in keys)
+        kind = "mapping"
+        defaults = keys
+    elif isinstance(value, (tuple, list)):
+        tensors = tuple(value)
+        kind = "sequence"
+        keys = ()
+        defaults = tuple(f"output_{index}" for index in range(len(tensors)))
+    else:
+        raise TypeError("Web export requires Tensor, tensor mapping, or tensor sequence outputs")
+    if not tensors or any(not isinstance(tensor, Tensor) for tensor in tensors):
+        raise TypeError("all Web export outputs must be tensors")
+    for tensor in tensors:
+        if tensor.dtype != torch.float32 or tensor.device.type != "cpu" or tensor.ndim == 0:
+            raise ValueError("Web export outputs must be non-scalar CPU float32 tensors")
+    resolved = tuple(names) if names is not None else defaults
+    if len(resolved) != len(tensors) or len(set(resolved)) != len(resolved) or any(not name for name in resolved):
+        raise ValueError("output_names must uniquely name every output tensor")
+    return resolved, tensors, kind, keys
+
+
+def _dynamic_axes(input_names, inputs, output_names, outputs, dynamic_batch, dynamic_tokens):
     axes: dict[str, dict[int, str]] = {}
-    for name, tensor in zip(names, tensors, strict=True):
+    reference = inputs[0]
+    for name, tensor in [*zip(input_names, inputs, strict=True), *zip(output_names, outputs, strict=True)]:
         entry: dict[int, str] = {}
-        if dynamic_batch:
+        if dynamic_batch and tensor.ndim >= 1 and tensor.shape[0] == reference.shape[0]:
             entry[0] = "batch"
-        if dynamic_tokens and tensor.ndim >= 2:
+        if dynamic_tokens and tensor.ndim >= 2 and reference.ndim >= 2 and tensor.shape[1] == reference.shape[1]:
             entry[1] = "tokens"
         if entry:
             axes[name] = entry
-    output: dict[int, str] = {}
-    if dynamic_batch:
-        output[0] = "batch"
-    if dynamic_tokens and isinstance(module, Half):
-        output[1] = "tokens"
-    if output:
-        axes["y"] = output
     return axes
 
 
-def _tensor_contract(name: str, tensor: Tensor, dynamic_batch: bool, dynamic_tokens: bool):
-    return _shape_contract(name, list(tensor.shape), dynamic_batch, dynamic_tokens)
+def _tensor_contract(name: str, tensor: Tensor, axes: Mapping[int, str]):
+    shape: list[int | str] = list(tensor.shape)
+    for axis, symbol in axes.items():
+        shape[axis] = symbol
+    return {"name": name, "dtype": "float32", "shape": shape}
 
 
-def _shape_contract(name: str, shape: list[int], dynamic_batch: bool, dynamic_tokens: bool):
-    resolved: list[int | str] = list(shape)
-    if dynamic_batch:
-        resolved[0] = "batch"
-    if dynamic_tokens and len(resolved) >= 2:
-        resolved[1] = "tokens"
-    return {"name": name, "dtype": "float32", "shape": resolved}
-
-
-def _output_shape(module: nn.Module, x: Tensor) -> list[int]:
-    if isinstance(module, Half):
-        return list(x.shape)
-    return [x.shape[0], module.k, x.shape[-1]]
+def _module_type(module: nn.Module) -> str:
+    cls = type(module)
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def _module_config(module: nn.Module):
@@ -220,15 +256,17 @@ def _module_config(module: nn.Module):
         return {"threshold": module.threshold, "base": module.base, "scale": module.scale, "stochastic": False}
     if isinstance(module, Fold):
         return {"k": module.k, "dim": module.dim, "hidden_dim": module.hidden_dim, "temperature": module.temperature, "mode": module.mode}
-    return {
-        "k": module.k,
-        "dim": module.dim,
-        "hidden_dim": module.hidden_dim,
-        "refine": module.refine_enabled,
-        "refine_mode": module.refine_mode,
-        "fold_mode": module.fold_mode,
-        "use_half": module.use_half,
-    }
+    if isinstance(module, LearnedPulse):
+        return {
+            "k": module.k,
+            "dim": module.dim,
+            "hidden_dim": module.hidden_dim,
+            "refine": module.refine_enabled,
+            "refine_mode": module.refine_mode,
+            "fold_mode": module.fold_mode,
+            "use_half": module.use_half,
+        }
+    return {}
 
 
 def _write_json(path: Path, payload: object) -> None:

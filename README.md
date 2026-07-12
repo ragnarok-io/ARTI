@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.1.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.2.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -159,11 +159,12 @@ frozen at the same level as the supported core surface.
 
 ## WebGPU Alpha
 
-`arti.web.export(...)` can export deterministic `Half`, soft `Fold`, and
-soft-fold `LearnedPulse` modules as hashed ONNX artifacts. The separate
-`@arti-fit/web` package executes those artifacts with WebGPU and falls back to
-WebAssembly when `device: "auto"` is selected. Browser training and Recall are
-not part of this alpha. See [WebGPU Alpha](docs/webgpu-alpha.md).
+`arti.web.export(...)` calls the real Python module and compiles its named
+tensor inputs and outputs into a hashed artifact v2 ONNX graph. The separate
+`@arti-fit/web` package is a generic executor: it contains no Half, Fold,
+Pulse, Recall, `q`, or `mask` rules. It uses WebGPU and falls back to
+WebAssembly when `device: "auto"` is selected. See
+[WebGPU Alpha](docs/webgpu-alpha.md).
 
 ## Develop
 

@@ -1,13 +1,14 @@
 import * as ort from 'onnxruntime-web/webgpu';
 
 import { parseLock, parseManifest, sha256, verifyFile } from './artifact.js';
-import type { ActiveARTIDevice, ARTIWebManifest, ForwardOptions, LoadArtiOptions, TensorContract } from './types.js';
+import type { ActiveARTIDevice, ARTIWebManifest, TensorContract } from './generated/contract.js';
+import type { LoadArtiOptions, TensorMap } from './types.js';
 
 const MANIFEST = 'arti-web.json';
 const MODEL = 'model.onnx';
 const LOCK = 'arti-web.lock.json';
 
-/** A loaded, inference-only ARTI Web module. */
+/** A generic executor for a Python-exported ARTI graph. */
 export class ARTIWebModule {
   readonly manifest: ARTIWebManifest;
   readonly device: ActiveARTIDevice;
@@ -20,13 +21,36 @@ export class ARTIWebModule {
     this.device = device;
   }
 
-  /** Run the exported ARTI module and keep WebGPU output on the GPU. */
-  async forward(x: ort.Tensor, options: ForwardOptions = {}): Promise<ort.Tensor> { return this.run(x, options); }
+  /** Execute exactly the named inputs and outputs declared by Python. */
+  async run(inputs: TensorMap, outputs?: TensorMap): Promise<TensorMap> {
+    if (!this.session) throw new Error('ARTI Web module has been disposed');
+    const symbols = new Map<string, number>();
+    const feeds = validateTensorMap(inputs, this.manifest.inputs, symbols, 'input');
+    const fetches = outputs === undefined ? undefined : validateTensorMap(outputs, this.manifest.outputs, symbols, 'output');
+    if (fetches && Object.values(fetches).some((tensor) => tensor.location !== 'gpu-buffer')) {
+      throw new Error('preallocated ARTI Web outputs must use gpu-buffer tensors');
+    }
+    const results = fetches ? await this.session.run(feeds, fetches) : await this.session.run(feeds);
+    for (const contract of this.manifest.outputs) {
+      if (!results[contract.name]) throw new Error(`ARTI Web runtime did not produce ${contract.name}`);
+    }
+    return results;
+  }
 
-  /** Run into a caller-provided ORT tensor, including a preallocated GPU tensor. */
-  async forwardInto(output: ort.Tensor, x: ort.Tensor, options: ForwardOptions = {}): Promise<ort.Tensor> {
-    if (output.location !== 'gpu-buffer') throw new Error('forwardInto requires a gpu-buffer output tensor');
-    return this.run(x, options, output);
+  /** Convenience path for artifacts with exactly one input and one output. */
+  async forward(x: ort.Tensor): Promise<ort.Tensor> {
+    const [input] = requireSingle(this.manifest.inputs, 'input');
+    const [output] = requireSingle(this.manifest.outputs, 'output');
+    const results = await this.run({[input.name]: x});
+    return results[output.name]!;
+  }
+
+  /** Single-input/single-output execution into a caller-owned GPU buffer. */
+  async forwardInto(outputTensor: ort.Tensor, x: ort.Tensor): Promise<ort.Tensor> {
+    const [input] = requireSingle(this.manifest.inputs, 'input');
+    const [output] = requireSingle(this.manifest.outputs, 'output');
+    const results = await this.run({[input.name]: x}, {[output.name]: outputTensor});
+    return results[output.name]!;
   }
 
   /** Release the ONNX Runtime session. Calling it more than once is safe. */
@@ -35,31 +59,9 @@ export class ARTIWebModule {
     this.session = null;
     if (session) await session.release();
   }
-
-  private async run(x: ort.Tensor, options: ForwardOptions, output?: ort.Tensor): Promise<ort.Tensor> {
-    if (!this.session) throw new Error('ARTI Web module has been disposed');
-    const supplied: Record<string, ort.Tensor | undefined> = {x, q: options.q, mask: options.mask};
-    const declared = new Set(this.manifest.inputs.map((item) => item.name));
-    for (const optional of ['q', 'mask'] as const) {
-      if (supplied[optional] && !declared.has(optional)) throw new Error(`${optional} is not declared by this ARTI Web artifact`);
-      if (!supplied[optional] && declared.has(optional)) throw new Error(`${optional} is required by this ARTI Web artifact`);
-    }
-    const symbols = new Map<string, number>();
-    const feeds: Record<string, ort.Tensor> = {};
-    for (const contract of this.manifest.inputs) {
-      const tensor = supplied[contract.name];
-      if (!tensor) throw new Error(`${contract.name} is required by this ARTI Web artifact`);
-      validateTensor(tensor, contract, symbols);
-      feeds[contract.name] = tensor;
-    }
-    if (output) validateTensor(output, this.manifest.output, symbols);
-    const results = output ? await this.session.run(feeds, {y: output}) : await this.session.run(feeds);
-    if (!results.y) throw new Error('ARTI Web runtime did not produce y');
-    return results.y;
-  }
 }
 
-/** Load and verify an exported ARTI Web artifact. */
+/** Load and verify an artifact compiled by the Python package. */
 export async function loadArti(baseUrl: string | URL, options: LoadArtiOptions = {}): Promise<ARTIWebModule> {
   const fetcher = options.fetch ?? globalThis.fetch;
   if (!fetcher) throw new Error('loadArti requires a fetch implementation');
@@ -103,6 +105,19 @@ export async function loadArti(baseUrl: string | URL, options: LoadArtiOptions =
   throw new Error(`unable to initialize ARTI Web runtime for ${requested}${detail}`, {cause: lastError});
 }
 
+function validateTensorMap(values: TensorMap, contracts: TensorContract[], symbols: Map<string, number>, kind: string): TensorMap {
+  const expected = new Set(contracts.map((contract) => contract.name));
+  for (const name of Object.keys(values)) if (!expected.has(name)) throw new Error(`${name} is not declared as an ARTI Web ${kind}`);
+  const resolved: TensorMap = {};
+  for (const contract of contracts) {
+    const tensor = values[contract.name];
+    if (!tensor) throw new Error(`${contract.name} is required by this ARTI Web artifact`);
+    validateTensor(tensor, contract, symbols);
+    resolved[contract.name] = tensor;
+  }
+  return resolved;
+}
+
 function validateTensor(tensor: ort.Tensor, contract: TensorContract, symbols: Map<string, number>): void {
   if (tensor.type !== contract.dtype) throw new Error(`${contract.name} must use ${contract.dtype}, got ${tensor.type}`);
   if (tensor.dims.length !== contract.shape.length) throw new Error(`${contract.name} rank does not match its artifact contract`);
@@ -116,6 +131,11 @@ function validateTensor(tensor: ort.Tensor, contract: TensorContract, symbols: M
       symbols.set(expected, actual);
     }
   });
+}
+
+function requireSingle(contracts: TensorContract[], kind: string): [TensorContract] {
+  if (contracts.length !== 1) throw new Error(`forward requires exactly one artifact ${kind}; use run() for named tensors`);
+  return [contracts[0]!];
 }
 
 function normalizeBase(value: string | URL): URL {
