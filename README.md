@@ -170,6 +170,12 @@ Pulse, Recall, `q`, or `mask` rules. It uses WebGPU and falls back to
 WebAssembly when `device: "auto"` is selected. See
 [WebGPU Alpha](docs/webgpu-alpha.md).
 
+The binding also provides a CPU-friendly `predict()` path, contract-aware
+tensor factories, structured errors, cancellable loading, Python-generated
+artifact-specific TypeScript clients, and a native module Worker example.
+The low-level `run()` API remains available for GPU-resident and preallocated
+tensor workflows.
+
 Stateful Recall can be exported as paired read/update artifact v3 graphs and
 loaded with `loadArtiStateful(...)`. Model parameters remain read-only;
 mutable state is explicit, fixed-size, bounded by caller budgets, and

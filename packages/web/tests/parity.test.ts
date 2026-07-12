@@ -85,6 +85,12 @@ run('Python graph to ONNX Runtime Web parity', () => {
       return response;
     };
     await expect(loadArti('http://arti.local/half/', {device: 'wasm', fetch: corrupt, wasmBinary, wasmNumThreads: 1})).rejects.toThrow(/size|SHA-256/);
+    const corruptTypes: typeof fetch = async (input, init) => {
+      const response = await fetcher(input, init);
+      if (new URL(input instanceof Request ? input.url : input.toString()).pathname.endsWith('/artifact.ts')) return new Response(new TextEncoder().encode('tampered'), {status: 200});
+      return response;
+    };
+    await expect(loadArti('http://arti.local/half/', {device: 'wasm', fetch: corruptTypes, wasmBinary, wasmNumThreads: 1})).rejects.toThrow(/size|SHA-256/);
   });
 
   it('runs stateful Recall read/commit/snapshot/restore/fork/reset without parameter training', async () => {
@@ -118,7 +124,7 @@ run('Python graph to ONNX Runtime Web parity', () => {
     const fork = await module.fork();
     const forked = await fork.run('read', {x: tensor(fixture.inputs.corrupt!), mask: tensor(fixture.inputs.mask!)});
     await expectTensor(forked.recognition!, fixture.expected.seen_recognition!, fixture.tolerance);
-    fork.reset();
+    await fork.reset();
     const reset = await fork.run('read', {x: tensor(fixture.inputs.corrupt!), mask: tensor(fixture.inputs.mask!)});
     expect(Math.max(...Array.from(await reset.recognition!.getData()) as number[])).toBeLessThan(1e-4);
     await fork.restore(snapshot);

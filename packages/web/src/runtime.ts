@@ -1,40 +1,57 @@
 import * as ort from 'onnxruntime-web/webgpu';
 
 import { parseLock, parseManifest, sha256, verifyFile } from './artifact.js';
+import {ArtiWebError, sanitizeArtifactUrl} from './errors.js';
 import type { ActiveARTIDevice, ARTIWebManifest, TensorContract } from './generated/contract.js';
-import type { LoadArtiOptions, TensorMap } from './types.js';
+import {fromCPU, isCPUTensor, toCPU} from './tensor.js';
+import {summarizeDiagnosticError, type LoadAttemptDiagnostic, type LoadDiagnostics, type LoadProgressCallback, type LoadStage} from './diagnostics.js';
+import type {CPUTensor, LoadArtiOptions, OperationOptions, TensorInput, TensorMap} from './types.js';
 
 const MANIFEST = 'arti-web.json';
 const MODEL = 'model.onnx';
+const TYPESCRIPT = 'artifact.ts';
 const LOCK = 'arti-web.lock.json';
+const MAX_METADATA_BYTES = 1024 * 1024;
+const DEFAULT_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
 /** A generic executor for a Python-exported ARTI graph. */
 export class ARTIWebModule {
   readonly manifest: ARTIWebManifest;
   readonly device: ActiveARTIDevice;
+  readonly diagnostics: LoadDiagnostics;
   private session: ort.InferenceSession | null;
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private disposing = false;
+  private disposePromise: Promise<void> | null = null;
 
   /** @internal */
-  constructor(session: ort.InferenceSession, manifest: ARTIWebManifest, device: ActiveARTIDevice) {
+  constructor(session: ort.InferenceSession, manifest: ARTIWebManifest, device: ActiveARTIDevice, diagnostics?: LoadDiagnostics) {
     this.session = session;
     this.manifest = manifest;
     this.device = device;
+    this.diagnostics = diagnostics ?? {artifactUrl: '', startedAt: 0, finishedAt: 0, attempts: [], selectedDevice: device};
   }
 
   /** Execute exactly the named inputs and outputs declared by Python. */
   async run(inputs: TensorMap, outputs?: TensorMap): Promise<TensorMap> {
-    if (!this.session) throw new Error('ARTI Web module has been disposed');
+    if (this.disposing || !this.session) throw new ArtiWebError('ARTI Web module has been disposed', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+    const session = this.session;
     const symbols = new Map<string, number>();
     const feeds = validateTensorMap(inputs, this.manifest.inputs, symbols, 'input');
     const fetches = outputs === undefined ? undefined : validateTensorMap(outputs, this.manifest.outputs, symbols, 'output');
-    if (fetches && Object.values(fetches).some((tensor) => tensor.location !== 'gpu-buffer')) {
-      throw new Error('preallocated ARTI Web outputs must use gpu-buffer tensors');
-    }
-    const results = fetches ? await this.session.run(feeds, fetches) : await this.session.run(feeds);
-    for (const contract of this.manifest.outputs) {
-      if (!results[contract.name]) throw new Error(`ARTI Web runtime did not produce ${contract.name}`);
-    }
-    return results;
+    if (fetches && Object.values(fetches).some((tensor) => tensor.location !== 'gpu-buffer')) throw new ArtiWebError('preallocated ARTI Web outputs must use gpu-buffer tensors', {code: 'CONTRACT_MISMATCH', stage: 'output', device: this.device});
+    const operation = (async () => {
+      let results: TensorMap;
+      try { results = fetches ? await session.run(feeds, fetches) : await session.run(feeds); }
+      catch (error) { throw new ArtiWebError('ARTI Web inference failed', {code: 'INFERENCE_FAILED', stage: 'execution', device: this.device, cause: error}); }
+      for (const contract of this.manifest.outputs) {
+        if (!results[contract.name]) throw new ArtiWebError(`ARTI Web runtime did not produce ${contract.name}`, {code: 'CONTRACT_MISMATCH', stage: 'output', tensorName: contract.name, device: this.device});
+      }
+      return results;
+    })();
+    this.inFlight.add(operation);
+    try { return await operation; }
+    finally { this.inFlight.delete(operation); }
   }
 
   /** Convenience path for artifacts with exactly one input and one output. */
@@ -53,65 +70,214 @@ export class ARTIWebModule {
     return results[output.name]!;
   }
 
+  /** CPU-friendly inference which owns and releases all temporary ORT tensors. */
+  async predict(inputs: Readonly<Record<string, TensorInput>>, options: OperationOptions = {}): Promise<Record<string, CPUTensor>> {
+    throwIfAborted(options.signal);
+    if (this.disposing || !this.session) throw new ArtiWebError('ARTI Web module has been disposed', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+    const operation = this.predictOperation(inputs, options);
+    this.inFlight.add(operation);
+    try { return await operation; }
+    finally { this.inFlight.delete(operation); }
+  }
+
+  private async predictOperation(inputs: Readonly<Record<string, TensorInput>>, options: OperationOptions): Promise<Record<string, CPUTensor>> {
+    const feeds: TensorMap = {};
+    const temporaryInputs: ort.Tensor[] = [];
+    let results: TensorMap | undefined;
+    try {
+      for (const [name, value] of Object.entries(inputs)) {
+        if (isCPUTensor(value)) {
+          const converted = fromCPU(value);
+          temporaryInputs.push(converted);
+          feeds[name] = converted;
+        } else feeds[name] = value;
+      }
+      results = await this.run(feeds);
+      throwIfAborted(options.signal);
+      const output: Record<string, CPUTensor> = {};
+      for (const contract of this.manifest.outputs) {
+        output[contract.name] = await toCPU(results[contract.name]!);
+        throwIfAborted(options.signal);
+      }
+      return output;
+    } catch (error) {
+      if (error instanceof ArtiWebError) throw error;
+      throw new ArtiWebError('ARTI Web prediction failed', {code: 'INFERENCE_FAILED', stage: 'predict', device: this.device, cause: error});
+    } finally {
+      if (results) disposeUnique(results);
+      for (const tensor of temporaryInputs) tensor.dispose();
+    }
+  }
+
   /** Release the ONNX Runtime session. Calling it more than once is safe. */
   async dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposing = true;
     const session = this.session;
     this.session = null;
-    if (session) await session.release();
+    this.disposePromise = (async () => {
+      await Promise.allSettled([...this.inFlight]);
+      if (session) await session.release();
+    })();
+    return this.disposePromise;
   }
 }
 
 /** Load and verify an artifact compiled by the Python package. */
 export async function loadArti(baseUrl: string | URL, options: LoadArtiOptions = {}): Promise<ARTIWebModule> {
   const fetcher = options.fetch ?? globalThis.fetch;
-  if (!fetcher) throw new Error('loadArti requires a fetch implementation');
+  if (!fetcher) throw new ArtiWebError('loadArti requires a fetch implementation', {code: 'FETCH_FAILED', stage: 'fetch'});
   if (options.wasmBinary !== undefined) ort.env.wasm.wasmBinary = options.wasmBinary;
   if (options.wasmPaths !== undefined) ort.env.wasm.wasmPaths = options.wasmPaths;
   if (options.wasmNumThreads !== undefined) ort.env.wasm.numThreads = options.wasmNumThreads;
   const base = normalizeBase(baseUrl);
-  const [manifestResponse, lockResponse] = await Promise.all([fetcher(new URL(MANIFEST, base)), fetcher(new URL(LOCK, base))]);
-  requireOk(manifestResponse, MANIFEST);
-  requireOk(lockResponse, LOCK);
-  const [manifestBuffer, lockValue] = await Promise.all([manifestResponse.arrayBuffer(), lockResponse.json()]);
-  const lock = parseLock(lockValue);
-  if ((await sha256(manifestBuffer)) !== lock.manifest.sha256) throw new Error('arti-web.json SHA-256 does not match its lock');
-  const manifest = parseManifest(JSON.parse(new TextDecoder().decode(manifestBuffer)));
+  const startedAt = Date.now();
+  const attempts: LoadAttemptDiagnostic[] = [];
+  const maxArtifactBytes = requireBudget(options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES, 'maxArtifactBytes', base);
+  let manifestBuffer: ArrayBuffer;
+  let lockBuffer: ArrayBuffer;
+  try {
+    [manifestBuffer, lockBuffer] = await Promise.all([
+      download(new URL(MANIFEST, base), MANIFEST, MAX_METADATA_BYTES, fetcher, options.signal, options.onProgress, 'manifest'),
+      download(new URL(LOCK, base), LOCK, MAX_METADATA_BYTES, fetcher, options.signal, options.onProgress, 'lock'),
+    ]);
+  } catch (error) { throw structuredLoadError(error, base); }
+  let lock;
+  let manifest;
+  try {
+    throwIfAborted(options.signal, base);
+    lock = parseLock(JSON.parse(new TextDecoder().decode(lockBuffer)));
+    if ((await sha256(manifestBuffer)) !== lock.manifest.sha256) throw new Error('arti-web.json SHA-256 does not match its lock');
+    throwIfAborted(options.signal, base);
+    manifest = parseManifest(JSON.parse(new TextDecoder().decode(manifestBuffer)));
+  } catch (error) { throw structuredLoadError(error, base, 'ARTIFACT_INVALID', 'parse'); }
+  const declaredFiles = Object.entries(manifest.files);
+  requireMatchingFileSets(manifest.files, lock.files, base);
+  for (const [name] of declaredFiles) if (name !== MODEL && name !== TYPESCRIPT) throw new ArtiWebError(`unsupported ARTI Web artifact file ${name}`, {code: 'ARTIFACT_INVALID', stage: 'verify', artifactUrl: base});
+  const declaredArtifactBytes = declaredFiles.reduce((total, [, record]) => total + record.size, 0);
+  if (!Number.isSafeInteger(declaredArtifactBytes) || declaredArtifactBytes > maxArtifactBytes) throw artifactBudgetError(declaredArtifactBytes, maxArtifactBytes, base);
   const manifestModel = manifest.files[MODEL];
   const lockModel = lock.files[MODEL];
-  if (!manifestModel || !lockModel || manifestModel.sha256 !== lockModel.sha256 || manifestModel.size !== lockModel.size) throw new Error('model.onnx manifest and lock records disagree');
-  const modelResponse = await fetcher(new URL(MODEL, base));
-  requireOk(modelResponse, MODEL);
-  const modelBuffer = await modelResponse.arrayBuffer();
-  await verifyFile(MODEL, modelBuffer, lockModel);
+  if (!manifestModel || !lockModel || manifestModel.sha256 !== lockModel.sha256 || manifestModel.size !== lockModel.size) throw new ArtiWebError('model.onnx manifest and lock records disagree', {code: 'ARTIFACT_INVALID', stage: 'verify', artifactUrl: base});
+  if (lockModel.size > maxArtifactBytes) throw artifactBudgetError(lockModel.size, maxArtifactBytes, base);
+  let modelBuffer: ArrayBuffer;
+  try {
+    modelBuffer = await download(new URL(MODEL, base), MODEL, maxArtifactBytes, fetcher, options.signal, options.onProgress, 'model', lockModel.size);
+    throwIfAborted(options.signal, base);
+    progress(options.onProgress, {stage: 'verify', loadedBytes: modelBuffer.byteLength, totalBytes: lockModel.size});
+    await verifyFile(MODEL, modelBuffer, lockModel);
+    const typescriptRecord = manifest.files[TYPESCRIPT];
+    if (typescriptRecord) {
+      const locked = lock.files[TYPESCRIPT];
+      if (!locked || locked.sha256 !== typescriptRecord.sha256 || locked.size !== typescriptRecord.size) throw new ArtiWebError('artifact.ts manifest and lock records disagree', {code: 'ARTIFACT_INVALID', stage: 'verify', artifactUrl: base});
+      const sidecar = await download(new URL(TYPESCRIPT, base), TYPESCRIPT, maxArtifactBytes - modelBuffer.byteLength, fetcher, options.signal, options.onProgress, 'verify', locked.size);
+      await verifyFile(TYPESCRIPT, sidecar, locked);
+    }
+    throwIfAborted(options.signal, base);
+  } catch (error) { throw structuredLoadError(error, base, 'ARTIFACT_INVALID', 'verify'); }
 
   const requested = options.device ?? 'auto';
   const candidates: ActiveARTIDevice[] = requested === 'auto' ? (hasWebGPU() ? ['webgpu', 'wasm'] : ['wasm']) : [requested];
   let lastError: unknown;
   for (const device of candidates) {
-    if (!manifest.runtime.execution_providers.includes(device)) { lastError = new Error(`${device} is not supported by this ARTI Web artifact`); continue; }
-    if (device === 'webgpu' && !hasWebGPU()) { lastError = new Error('WebGPU is not available in this environment'); continue; }
+    const attemptStarted = Date.now();
+    let session: ort.InferenceSession | undefined;
+    progress(options.onProgress, {stage: 'initialize', device});
     try {
-      const session = await ort.InferenceSession.create(new Uint8Array(modelBuffer), {
+      throwIfAborted(options.signal, base);
+      if (!manifest.runtime.execution_providers.includes(device)) throw new Error(`${device} is not supported by this ARTI Web artifact`);
+      if (device === 'webgpu' && !hasWebGPU()) throw new Error('WebGPU is not available in this environment');
+      session = await ort.InferenceSession.create(new Uint8Array(modelBuffer), {
         executionProviders: [device],
         preferredOutputLocation: device === 'webgpu' ? 'gpu-buffer' : 'cpu',
       });
-      return new ARTIWebModule(session, manifest, device);
+      throwIfAborted(options.signal, base);
+      attempts.push({device, startedAt: attemptStarted, finishedAt: Date.now(), success: true});
+      const diagnostics: LoadDiagnostics = {artifactUrl: sanitizeArtifactUrl(base), startedAt, finishedAt: Date.now(), attempts, selectedDevice: device};
+      progress(options.onProgress, {stage: 'ready', device});
+      return new ARTIWebModule(session, manifest, device, diagnostics);
     } catch (error) {
+      if (session) await session.release();
       lastError = error;
+      attempts.push({device, startedAt: attemptStarted, finishedAt: Date.now(), success: false, error: summarizeDiagnosticError(error)});
+      if (error instanceof ArtiWebError && error.code === 'ABORTED') break;
       if (requested !== 'auto') break;
     }
   }
   const detail = lastError instanceof Error ? `: ${lastError.message}` : '';
-  throw new Error(`unable to initialize ARTI Web runtime for ${requested}${detail}`, {cause: lastError});
+  if (lastError instanceof ArtiWebError && lastError.code === 'ABORTED') throw lastError;
+  throw new ArtiWebError(`unable to initialize ARTI Web runtime for ${requested}${detail}`, {code: requested === 'auto' ? 'INITIALIZATION_FAILED' : 'DEVICE_UNAVAILABLE', stage: 'initialize', artifactUrl: base, device: requested, cause: lastError});
 }
+
+export async function download(url: URL, name: string, limit: number, fetcher: typeof globalThis.fetch, signal: AbortSignal | undefined, onProgress: LoadProgressCallback | undefined, stage: LoadStage, expectedSize?: number): Promise<ArrayBuffer> {
+  throwIfAborted(signal, url);
+  let response: Response;
+  try { response = await fetcher(url, {signal}); }
+  catch (error) { throw structuredLoadError(error, url); }
+  if (!response.ok) throw new ArtiWebError(`failed to load ${name}: HTTP ${response.status}`, {code: 'FETCH_FAILED', stage: 'fetch', artifactUrl: url});
+  const contentLength = parseContentLength(response.headers.get('content-length'));
+  if (expectedSize !== undefined && contentLength !== undefined && contentLength !== expectedSize) throw new ArtiWebError(`${name} Content-Length does not match its declared size`, {code: 'ARTIFACT_INVALID', stage: 'fetch', artifactUrl: url, expected: expectedSize, actual: contentLength});
+  if (contentLength !== undefined && contentLength > limit) throw artifactBudgetError(contentLength, limit, url);
+  if (expectedSize !== undefined && expectedSize > limit) throw artifactBudgetError(expectedSize, limit, url);
+  const readLimit = expectedSize === undefined ? limit : Math.min(limit, expectedSize);
+  const totalBytes = contentLength ?? expectedSize;
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const value = await response.arrayBuffer();
+    if (value.byteLength > readLimit) throw artifactBudgetError(value.byteLength, readLimit, url);
+    progress(onProgress, {stage, loadedBytes: value.byteLength, totalBytes});
+    throwIfAborted(signal, url);
+    return value;
+  }
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  try {
+    while (true) {
+      throwIfAborted(signal, url);
+      const {done, value} = await reader.read();
+      if (done) break;
+      loaded += value.byteLength;
+      if (!Number.isSafeInteger(loaded) || loaded > readLimit) throw artifactBudgetError(loaded, readLimit, url);
+      chunks.push(value);
+      progress(onProgress, {stage, loadedBytes: loaded, totalBytes});
+    }
+  } catch (error) { await reader.cancel().catch(() => undefined); throw error; }
+  throwIfAborted(signal, url);
+  const result = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+  return result.buffer;
+}
+
+export function throwIfAborted(signal?: AbortSignal, artifactUrl?: string | URL): void {
+  if (signal?.aborted) throw new ArtiWebError('ARTI Web operation was aborted', {code: 'ABORTED', stage: 'fetch', artifactUrl, cause: signal.reason});
+}
+export function requireBudget(value: number, name: string, artifactUrl: URL): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new ArtiWebError(`${name} must be a positive safe integer`, {code: 'CONTRACT_MISMATCH', stage: 'input', artifactUrl, expected: 'positive safe integer', actual: value});
+  return value;
+}
+export function progress(callback: LoadProgressCallback | undefined, value: Parameters<LoadProgressCallback>[0]): void { try { callback?.(value); } catch { /* Progress observers cannot break loading. */ } }
+export function structuredLoadError(error: unknown, url: string | URL, code: 'ARTIFACT_INVALID' | 'FETCH_FAILED' = 'FETCH_FAILED', stage: 'fetch' | 'parse' | 'verify' = 'fetch'): ArtiWebError {
+  if (error instanceof ArtiWebError) return error;
+  if (error instanceof DOMException && error.name === 'AbortError') return new ArtiWebError('ARTI Web operation was aborted', {code: 'ABORTED', stage: 'fetch', artifactUrl: url, cause: error});
+  const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+  return new ArtiWebError(`${stage === 'fetch' ? 'failed to fetch ARTI Web artifact' : 'invalid ARTI Web artifact'}${detail}`, {code, stage, artifactUrl: url, cause: error});
+}
+function artifactBudgetError(actual: number, limit: number, url: string | URL): ArtiWebError { return new ArtiWebError(`ARTI artifact requires ${actual} bytes, exceeding the ${limit}-byte budget`, {code: 'ARTIFACT_INVALID', stage: 'fetch', artifactUrl: url, expected: limit, actual}); }
+function parseContentLength(value: string | null): number | undefined { if (value === null || !/^\d+$/.test(value)) return undefined; const result = Number(value); return Number.isSafeInteger(result) ? result : undefined; }
+export function requireMatchingFileSets(manifestFiles: Record<string, unknown>, lockFiles: Record<string, unknown>, url: URL): void {
+  const manifestNames = Object.keys(manifestFiles).sort(); const lockNames = Object.keys(lockFiles).sort();
+  if (manifestNames.length !== lockNames.length || manifestNames.some((name, index) => name !== lockNames[index])) throw new ArtiWebError('manifest and lock file sets disagree', {code: 'ARTIFACT_INVALID', stage: 'verify', artifactUrl: url, expected: manifestNames, actual: lockNames});
+}
+function disposeUnique(values: TensorMap): void { for (const tensor of new Set(Object.values(values))) tensor.dispose(); }
 
 function validateTensorMap(values: TensorMap, contracts: TensorContract[], symbols: Map<string, number>, kind: string): TensorMap {
   const expected = new Set(contracts.map((contract) => contract.name));
-  for (const name of Object.keys(values)) if (!expected.has(name)) throw new Error(`${name} is not declared as an ARTI Web ${kind}`);
+  for (const name of Object.keys(values)) if (!expected.has(name)) throw tensorContractError(`${name} is not declared as an ARTI Web ${kind}`, name, [...expected], name, kind);
   const resolved: TensorMap = {};
   for (const contract of contracts) {
     const tensor = values[contract.name];
-    if (!tensor) throw new Error(`${contract.name} is required by this ARTI Web artifact`);
+    if (!tensor) throw tensorContractError(`${contract.name} is required by this ARTI Web artifact`, contract.name, contract, undefined, kind);
     validateTensor(tensor, contract, symbols);
     resolved[contract.name] = tensor;
   }
@@ -119,23 +285,26 @@ function validateTensorMap(values: TensorMap, contracts: TensorContract[], symbo
 }
 
 function validateTensor(tensor: ort.Tensor, contract: TensorContract, symbols: Map<string, number>): void {
-  if (tensor.type !== contract.dtype) throw new Error(`${contract.name} must use ${contract.dtype}, got ${tensor.type}`);
-  if (tensor.dims.length !== contract.shape.length) throw new Error(`${contract.name} rank does not match its artifact contract`);
+  if (tensor.type !== contract.dtype) throw tensorContractError(`${contract.name} must use ${contract.dtype}, got ${tensor.type}`, contract.name, contract.dtype, tensor.type, 'input');
+  if (tensor.dims.length !== contract.shape.length) throw tensorContractError(`${contract.name} rank does not match its artifact contract`, contract.name, contract.shape.length, tensor.dims.length, 'input');
   contract.shape.forEach((expected, index) => {
     const actual = tensor.dims[index];
-    if (actual === undefined) throw new Error(`${contract.name} is missing dimension ${index}`);
-    if (typeof expected === 'number' && expected !== actual) throw new Error(`${contract.name} dimension ${index} must be ${expected}, got ${actual}`);
+    if (actual === undefined) throw tensorContractError(`${contract.name} is missing dimension ${index}`, contract.name, expected, actual, 'input');
+    if (typeof expected === 'number' && expected !== actual) throw tensorContractError(`${contract.name} dimension ${index} must be ${expected}, got ${actual}`, contract.name, expected, actual, 'input');
     if (typeof expected === 'string') {
       const previous = symbols.get(expected);
-      if (previous !== undefined && previous !== actual) throw new Error(`${contract.name} dimension ${index} conflicts with dynamic axis ${expected}`);
+      if (previous !== undefined && previous !== actual) throw tensorContractError(`${contract.name} dimension ${index} conflicts with dynamic axis ${expected}`, contract.name, previous, actual, 'input');
       symbols.set(expected, actual);
     }
   });
 }
 
 function requireSingle(contracts: TensorContract[], kind: string): [TensorContract] {
-  if (contracts.length !== 1) throw new Error(`forward requires exactly one artifact ${kind}; use run() for named tensors`);
+  if (contracts.length !== 1) throw new ArtiWebError(`forward requires exactly one artifact ${kind}; use run() for named tensors`, {code: 'CONTRACT_MISMATCH', stage: kind === 'input' ? 'input' : 'output', expected: 1, actual: contracts.length});
   return [contracts[0]!];
+}
+function tensorContractError(message: string, tensorName: string, expected: unknown, actual: unknown, kind: string): ArtiWebError {
+  return new ArtiWebError(message, {code: 'CONTRACT_MISMATCH', stage: kind === 'output' ? 'output' : 'input', tensorName, expected, actual});
 }
 
 function normalizeBase(value: string | URL): URL {
@@ -143,5 +312,4 @@ function normalizeBase(value: string | URL): URL {
   if (!url.pathname.endsWith('/')) url.pathname += '/';
   return url;
 }
-function requireOk(response: Response, name: string): void { if (!response.ok) throw new Error(`failed to load ${name}: HTTP ${response.status}`); }
 function hasWebGPU(): boolean { return typeof navigator !== 'undefined' && 'gpu' in navigator && navigator.gpu !== undefined; }

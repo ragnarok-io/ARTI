@@ -21,6 +21,8 @@ from .contract import (
     ARTI_WEB_LOCK,
     ARTI_WEB_MANIFEST,
     ARTI_WEB_MODEL,
+    ARTI_WEB_TYPESCRIPT,
+    write_artifact_typescript,
 )
 
 
@@ -34,6 +36,8 @@ class ARTIWebExportResult:
     lock_path: Path
     manifest_sha256: str
     model_sha256: str
+    typescript_path: Path
+    typescript_sha256: str
 
 
 class _ExportWrapper(nn.Module):
@@ -139,16 +143,24 @@ def export(
         ],
         "files": {ARTI_WEB_MODEL: {"sha256": model_sha, "size": model_path.stat().st_size}},
     }
+    typescript_path = target / ARTI_WEB_TYPESCRIPT
+    write_artifact_typescript(manifest, typescript_path)
+    typescript_sha = _sha256(typescript_path)
+    typescript_record = {"sha256": typescript_sha, "size": typescript_path.stat().st_size}
+    manifest["files"][ARTI_WEB_TYPESCRIPT] = typescript_record
     _write_json(manifest_path, manifest)
     manifest_sha = _sha256(manifest_path)
     lock = {
         "format": ARTI_WEB_FORMAT,
         "format_version": ARTI_WEB_FORMAT_VERSION,
         "manifest": {"file": ARTI_WEB_MANIFEST, "sha256": manifest_sha},
-        "files": {ARTI_WEB_MODEL: {"sha256": model_sha, "size": model_path.stat().st_size}},
+        "files": {
+            ARTI_WEB_MODEL: {"sha256": model_sha, "size": model_path.stat().st_size},
+            ARTI_WEB_TYPESCRIPT: typescript_record,
+        },
     }
     _write_json(lock_path, lock)
-    return ARTIWebExportResult(target, manifest_path, model_path, lock_path, manifest_sha, model_sha)
+    return ARTIWebExportResult(target, manifest_path, model_path, lock_path, manifest_sha, model_sha, typescript_path, typescript_sha)
 
 
 def _validate_supported_mode(module: nn.Module) -> None:

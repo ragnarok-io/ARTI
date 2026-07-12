@@ -38,8 +38,9 @@ export(
 )
 ```
 
-The directory contains `arti-web.json`, `model.onnx`, and
-`arti-web.lock.json`. The example inputs define the deployment contract. If
+The directory contains `arti-web.json`, `model.onnx`, `artifact.ts`, and
+`arti-web.lock.json`. Python generates the typed client from the same named
+tensor contract and records its hash in the lock. The example inputs define the deployment contract. If
 `q` or `mask` is exported, the Web runtime requires it; if it is omitted, the
 runtime rejects it. Batch and token axes are dynamic by default, while feature
 dimension and folded workspace size remain fixed.
@@ -58,6 +59,12 @@ await y.getData(); // Explicitly downloads a WebGPU result to CPU.
 y.dispose();
 await layer.dispose();
 ```
+
+For ordinary application code, `predict()` accepts CPU tensor values and
+returns owned CPU results. `run()` remains the advanced path for GPU tensors
+and preallocated buffers. Loading supports `AbortSignal`, progress callbacks,
+bounded downloads, structured `ArtiWebError` diagnostics, and sanitized
+artifact URLs.
 
 `device: "auto"` tries WebGPU and then WASM. `device: "webgpu"` never silently
 falls back. Outputs stay on the GPU when WebGPU is active. Pass a second named
@@ -90,8 +97,7 @@ uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures
 uv run python scripts/generate_web_contract.py packages/web/src/generated/contract.ts
 pnpm build:web
 pnpm test:web
-pnpm --filter @arti-fit/web test:browser
-pnpm docs:web
+pnpm gate:web
 ```
 
 The browser test requires a local Chrome installation and hardware WebGPU. CI
@@ -145,3 +151,6 @@ manifest budget to match, rejects non-local artifact file names, bounds file
 and entrypoint fan-out, and downloads model files sequentially. Recall masks
 must match `[batch, tokens]` exactly; broadcastable higher-rank masks are
 rejected before latent computation.
+
+`reset()` is asynchronous and should be awaited so callers can observe any
+release failure and know exactly when the queued reset has completed.

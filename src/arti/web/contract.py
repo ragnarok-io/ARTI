@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+import json
 from pathlib import Path
 
 
@@ -11,6 +13,7 @@ ARTI_WEB_FORMAT_VERSION = 2
 ARTI_WEB_MANIFEST = "arti-web.json"
 ARTI_WEB_MODEL = "model.onnx"
 ARTI_WEB_LOCK = "arti-web.lock.json"
+ARTI_WEB_TYPESCRIPT = "artifact.ts"
 MAX_STATEFUL_FILES = 16
 MAX_STATEFUL_ENTRYPOINTS = 16
 MAX_STATEFUL_ARTIFACT_BYTES = 512 * 1024 * 1024
@@ -310,3 +313,68 @@ def write_typescript_contract(path: str | Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_typescript_contract(), encoding="utf-8")
     return target
+
+
+def render_artifact_typescript(manifest: Mapping[str, object]) -> str:
+    """Render a typed client whose names come from one exported v2 manifest."""
+
+    inputs = _manifest_tensor_names(manifest, "inputs")
+    outputs = _manifest_tensor_names(manifest, "outputs")
+    if manifest.get("format") != ARTI_WEB_FORMAT or manifest.get("format_version") != ARTI_WEB_FORMAT_VERSION:
+        raise ValueError("artifact TypeScript generation requires an ARTI Web v2 manifest")
+
+    input_type = _typescript_tensor_map(inputs)
+    output_type = _typescript_tensor_map(outputs)
+    descriptor = json.dumps(
+        {"format": ARTI_WEB_FORMAT, "format_version": ARTI_WEB_FORMAT_VERSION, "inputs": inputs, "outputs": outputs},
+        separators=(",", ":"),
+    )
+    if len(inputs) == 1 and len(outputs) == 1:
+        method = """  async forward(value: Tensor): Promise<Tensor> {
+    return this.module.forward(value);
+  }"""
+    else:
+        method = """  async run(inputs: ArtifactInputs): Promise<ArtifactOutputs> {
+    return await this.module.run(inputs) as ArtifactOutputs;
+  }"""
+    return f'''// Generated from arti-web.json by arti.web.contract. Do not edit by hand.
+import type {{ ARTIWebModule, Tensor }} from '@arti-fit/web';
+
+export const descriptor = {descriptor} as const;
+export type ArtifactInputs = {input_type};
+export type ArtifactOutputs = {output_type};
+
+export class ArtifactClient {{
+  constructor(readonly module: ARTIWebModule) {{}}
+
+{method}
+}}
+'''
+
+
+def write_artifact_typescript(manifest: Mapping[str, object], path: str | Path) -> Path:
+    """Write artifact-specific TypeScript generated from ``manifest``."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(render_artifact_typescript(manifest), encoding="utf-8")
+    return target
+
+
+def _manifest_tensor_names(manifest: Mapping[str, object], field: str) -> list[str]:
+    values = manifest.get(field)
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"manifest {field} must contain at least one tensor")
+    names: list[str] = []
+    for value in values:
+        if not isinstance(value, Mapping) or not isinstance(value.get("name"), str) or not value["name"]:
+            raise ValueError(f"manifest {field} contains an invalid tensor name")
+        names.append(value["name"])
+    if len(names) != len(set(names)):
+        raise ValueError(f"manifest {field} tensor names must be unique")
+    return names
+
+
+def _typescript_tensor_map(names: list[str]) -> str:
+    properties = "; ".join(f"{json.dumps(name)}: Tensor" for name in names)
+    return "{ " + properties + " }"

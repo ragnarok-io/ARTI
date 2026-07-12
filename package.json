@@ -6,6 +6,7 @@
     "build:web": "pnpm --filter @arti-fit/web run build",
     "test:web": "pnpm --filter @arti-fit/web run test",
     "test:web:parity": "uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures && pnpm --filter @arti-fit/web run test",
+    "gate:web": "uv run python scripts/generate_web_contract.py packages/web/src/generated/contract.ts && uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures && pnpm build:web && pnpm test:web && pnpm --filter @arti-fit/web run test:browser && pnpm docs:web",
     "docs:web": "pnpm --filter @arti-fit/web run docs"
   }
 }

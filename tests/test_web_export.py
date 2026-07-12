@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from arti.nn import Fold, Half, LearnedPulse, StatefulRecall
-from arti.web import artifact_schema, export, export_stateful_recall, render_typescript_contract, stateful_artifact_schema
+from arti.web import artifact_schema, export, export_stateful_recall, render_artifact_typescript, render_typescript_contract, stateful_artifact_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +41,8 @@ def test_web_export_writes_hashed_artifact(tmp_path, module, inputs, output_shap
     assert [item["name"] for item in manifest["inputs"]] == list(inputs)
     assert manifest["files"]["model.onnx"]["sha256"] == _sha256(result.model_path)
     assert lock["manifest"]["sha256"] == _sha256(result.manifest_path)
+    assert manifest["files"]["artifact.ts"]["sha256"] == _sha256(result.typescript_path)
+    assert lock["files"]["artifact.ts"] == manifest["files"]["artifact.ts"]
 
 
 def test_web_export_accepts_generic_named_inputs_and_outputs(tmp_path):
@@ -51,6 +53,40 @@ def test_web_export_accepts_generic_named_inputs_and_outputs(tmp_path):
     assert [item["name"] for item in manifest["inputs"]] == ["signal", "gate"]
     assert [item["name"] for item in manifest["outputs"]] == ["result", "salience"]
     assert manifest["module"]["type"].endswith("GenericAffine")
+    generated = result.typescript_path.read_text(encoding="utf-8")
+    assert '"signal": Tensor' in generated and '"gate": Tensor' in generated
+    assert '"result": Tensor' in generated and '"salience": Tensor' in generated
+    assert "async run(inputs: ArtifactInputs): Promise<ArtifactOutputs>" in generated
+    assert "async forward(" not in generated
+
+
+def test_artifact_typescript_is_deterministic_typed_and_mechanism_free():
+    manifest = {
+        "format": "arti.web",
+        "format_version": 2,
+        "module": {"type": "anything.Half", "config": {"threshold": 0.5}},
+        "inputs": [{"name": "input-value", "dtype": "float32", "shape": [1]}],
+        "outputs": [{"name": "result", "dtype": "float32", "shape": [1]}],
+    }
+    first = render_artifact_typescript(manifest)
+    assert first == render_artifact_typescript(dict(reversed(list(manifest.items()))))
+    assert '"input-value": Tensor' in first
+    assert "async forward(value: Tensor): Promise<Tensor>" in first
+    assert "module.forward(value)" in first
+    assert "Half" not in first and "Fold" not in first and "Recall" not in first
+    assert "module.type" not in first
+
+
+def test_generated_artifact_typescript_fixture_is_current_and_compiled_by_web_build():
+    manifest = {
+        "format": "arti.web",
+        "format_version": 2,
+        "inputs": [{"name": "signal"}, {"name": "gate"}],
+        "outputs": [{"name": "result"}, {"name": "salience"}],
+    }
+    generated = render_artifact_typescript(manifest)
+    fixture = (Path(__file__).parents[1] / "packages" / "web" / "tests" / "generated-artifact.ts").read_text(encoding="utf-8")
+    assert fixture.split("\n", 1)[1] == generated.split("\n", 1)[1]
 
 
 @pytest.mark.parametrize(

@@ -11,8 +11,47 @@ declare global {
     artiWebGPUInfo: () => Promise<Record<string, unknown>>;
     runArtiParity: (name: string, warmup?: number, runs?: number) => Promise<Record<string, unknown>>;
     runStatefulRecall: () => Promise<Record<string, unknown>>;
+    runWorkerSmoke: () => Promise<Record<string, unknown>>;
   }
 }
+
+window.runWorkerSmoke = async () => {
+  const fixture = (await (await fetch('/generic-affine/case.json')).json()) as Fixture;
+  const sample = fixture.cases[0]!;
+  const worker = new Worker(new URL('../examples/worker/arti.worker.ts', import.meta.url), {type: 'module'});
+  let nextId = 1;
+  const call = <T extends {id: number; type: string}>(request: Record<string, unknown>, transfers: Transferable[] = []) => new Promise<T>((resolve, reject) => {
+    const id = nextId++;
+    const listener = (event: MessageEvent<T & {error?: {message: string}}>) => {
+      if (event.data.id !== id) return;
+      worker.removeEventListener('message', listener);
+      if (event.data.type === 'error') reject(new Error(event.data.error?.message ?? 'worker failed'));
+      else resolve(event.data);
+    };
+    worker.addEventListener('message', listener);
+    worker.postMessage({...request, id}, transfers);
+  });
+  try {
+    const loaded = await call<{id: number; type: 'loaded'; device: 'webgpu' | 'wasm'}>({type: 'load', baseUrl: '/generic-affine/', device: 'webgpu', wasmPath: wasmUrl});
+    const inputs: Record<string, {dtype: 'float32'; dims: number[]; data: ArrayBuffer}> = {};
+    const transfers: ArrayBuffer[] = [];
+    for (const [name, value] of Object.entries(sample.inputs)) {
+      const data = Float32Array.from(value.data).buffer;
+      inputs[name] = {dtype: 'float32', dims: value.dims, data};
+      transfers.push(data);
+    }
+    const result = await call<{id: number; type: 'result'; outputs: Record<string, {dims: number[]; data: ArrayBuffer}>}>({type: 'run', inputs}, transfers);
+    let maxAbsolute = 0;
+    for (const [name, expected] of Object.entries(sample.outputs)) {
+      const actual = new Float32Array(result.outputs[name]!.data);
+      for (let index = 0; index < actual.length; index += 1) maxAbsolute = Math.max(maxAbsolute, Math.abs(actual[index]! - expected.data[index]!));
+    }
+    await call({type: 'dispose'});
+    return {device: loaded.device, maxAbsolute, inputBuffersDetached: transfers.every((buffer) => buffer.byteLength === 0)};
+  } finally {
+    worker.terminate();
+  }
+};
 
 window.artiWebGPUInfo = async () => {
   if (!navigator.gpu) throw new Error('WebGPU is unavailable');

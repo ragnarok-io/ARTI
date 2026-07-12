@@ -31,3 +31,12 @@ test('keeps committed Recall state on WebGPU and suppresses unseen reads', async
   expect(Number(report.unseenRecognition)).toBeLessThan(0.05);
   console.log(JSON.stringify(report));
 });
+
+test('runs a Python-exported artifact inside a module Worker with transferable tensors', async ({page}) => {
+  await page.goto('http://127.0.0.1:4178/browser/');
+  const report = await page.evaluate(() => window.runWorkerSmoke());
+  expect(report.device).toBe('webgpu');
+  expect(report.inputBuffersDetached).toBe(true);
+  expect(Number(report.maxAbsolute)).toBeLessThanOrEqual(1e-5);
+  console.log(JSON.stringify(report));
+});
