@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.3.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.5.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -99,6 +99,29 @@ workspace = fold(h, mask=mask)
 `Fold` compacts surviving information into a fixed-size workspace. Each module
 can be used independently.
 
+## Expand And Rearrange With UnFold
+
+`UnFold` exposes values queried from an input tensor and learns a hard,
+sample-conditioned layout while preserving every original input instance:
+
+```python
+import arti
+import torch
+
+x = torch.randn(4, 16, 64)
+unfold = arti.nn.UnFold(dim=64, exposed=8)
+y, exposed_mask = unfold(x, return_exposed_mask=True)
+
+assert y.shape == (4, 24, 64)
+assert exposed_mask.shape == (4, 24)
+```
+
+Original values may move, but they are not averaged, interpolated, projected,
+or discarded. The queried region and layout remain trainable and support masks,
+optional guide tensors, autograd, CUDA, and `arti.st` serialization. `UnFold`
+is unrelated to `torch.nn.Unfold`, which extracts image patches. See the
+[UnFold guide](docs/unfold.md).
+
 ## Attach To An Existing Model
 
 ARTI can discover and attach Recall branches without changing the model class:
@@ -148,7 +171,7 @@ publisher signatures. Obtain models and weights from trusted sources.
 
 ## Public Modules
 
-- `arti.nn`: `Layer`, `Half`, `Fold`, `Pulse`, `RecallRefiner`, and visual workspace modules.
+- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, `RecallRefiner`, and visual workspace modules.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
 - `arti.torch`: backend-explicit aliases for PyTorch applications.
 - `arti.jax`: optional functional JAX subset with array-only parameter trees,

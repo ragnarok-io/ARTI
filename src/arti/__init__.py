@@ -71,7 +71,7 @@ from .membrane import (
     membrane_public_emit_mask,
 )
 from .models import ARTIClassifier
-from .nn import Fold, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallRefiner, StatefulRecall, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from .nn import Fold, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallRefiner, StatefulRecall, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
 from .visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
 from .outputs import ARTIOutput
 from .pulse import PulseCompressor, PulseOutput, assert_pulse_distinct, fixed_width_pulse_ids, pulse_compress, pulse_distinctness_report
@@ -150,6 +150,7 @@ __all__ = [
     "layer_profiles",
     "Half",
     "Fold",
+    "UnFold",
     "Pulse",
     "LearnedPulse",
     "RecallRefiner",

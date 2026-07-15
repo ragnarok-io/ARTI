@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.3.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.5.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
@@ -8,7 +8,7 @@ not a separate package version and not an LTS promise.
 The following contracts are frozen across compatible 1.x releases:
 
 - Core tensor contracts for `[B, D]` and `[B, N, D]` inputs.
-- `arti.nn` core layers: `Layer`, `Half`, `Fold`, `Pulse`, and
+- `arti.nn` core layers: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, and
   `RecallRefiner`.
 - Root core layers: `ARTILayer`, `ARTIResidualBlock`, `ARTISequenceBlock`,
   `ARTIPooledBlock`, and `ARTIClassifier`.

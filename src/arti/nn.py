@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import math
 
 import torch
@@ -11,6 +12,20 @@ from torch import Tensor
 
 from .functional import half
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
+
+
+@lru_cache(maxsize=1)
+def _triton_palette_is_available() -> bool:
+    try:
+        from ._triton import is_available
+    except (ImportError, OSError):
+        return False
+    return is_available()
+
+
+@lru_cache(maxsize=None)
+def _device_supports_triton_palette(device_index: int) -> bool:
+    return torch.cuda.get_device_capability(device_index) >= (8, 0)
 
 
 def _fold_weighted_sum(x_weighted: Tensor, logits: Tensor, dropout: nn.Dropout, topk: int | None = None) -> Tensor:
@@ -102,6 +117,764 @@ class Half(nn.Module):
         if self.stochastic:
             args.append("stochastic=True")
         return ", ".join(args)
+
+
+class _HardLayoutSoftGradient(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: object, hard: Tensor, soft: Tensor) -> Tensor:
+        return hard
+
+    @staticmethod
+    def backward(ctx: object, gradient: Tensor) -> tuple[Tensor, Tensor]:
+        return gradient, gradient
+
+
+class UnFold(nn.Module):
+    """Expand and rearrange a tensor while preserving every input value.
+
+    ``UnFold`` queries ``exposed`` new values from the input, combines them
+    with the original values, and learns a sample-conditioned layout. The
+    forward path uses a hard gather: every original input instance appears
+    exactly once, but its position and adjacency may change. A soft layout is
+    used only as a surrogate gradient during training.
+
+    This layer is unrelated to :class:`torch.nn.Unfold`, which extracts image
+    patches.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        exposed: int = 1,
+        *,
+        guide_dim: int | None = None,
+        condition_dim: int | None = None,
+        hidden_dim: int | None = None,
+        temperature: float = 0.25,
+        sinkhorn_steps: int = 16,
+        max_length: int = 128,
+        hard_backend: str = "sort",
+        layout_mode: str = "learned",
+        value_operators: int = 8,
+        value_rank: int | None = None,
+        query_chunk_size: int | None = None,
+        operator_chunk_size: int | None = None,
+    ) -> None:
+        super().__init__()
+        if dim <= 0:
+            raise ValueError("dim must be positive")
+        if exposed <= 0:
+            raise ValueError("exposed must be positive")
+        if guide_dim is not None and guide_dim <= 0:
+            raise ValueError("guide_dim must be positive")
+        if condition_dim is not None and condition_dim <= 0:
+            raise ValueError("condition_dim must be positive")
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        if sinkhorn_steps <= 0:
+            raise ValueError("sinkhorn_steps must be positive")
+        if max_length <= 0:
+            raise ValueError("max_length must be positive")
+        if hard_backend not in {"sort", "greedy", "auction"}:
+            raise ValueError("hard_backend must be 'sort', 'greedy', or 'auction'")
+        if hard_backend != "sort" and max_length <= exposed:
+            raise ValueError("max_length must be greater than exposed for dense backends")
+        if layout_mode not in {"learned", "canonical"}:
+            raise ValueError("layout_mode must be 'learned' or 'canonical'")
+        if layout_mode != "learned" and guide_dim != 1:
+            raise ValueError("canonical layout mode requires guide_dim=1")
+        if layout_mode == "canonical" and hard_backend != "sort":
+            raise ValueError("canonical layout mode requires hard_backend='sort'")
+        if value_operators <= 0:
+            raise ValueError("value_operators must be positive")
+        if value_rank is not None and value_rank <= 0:
+            raise ValueError("value_rank must be positive")
+        if query_chunk_size is not None and query_chunk_size <= 0:
+            raise ValueError("query_chunk_size must be positive")
+        if operator_chunk_size is not None and operator_chunk_size <= 0:
+            raise ValueError("operator_chunk_size must be positive")
+        hidden = max(8, min(64, dim * 2)) if hidden_dim is None else hidden_dim
+        if hidden <= 0:
+            raise ValueError("hidden_dim must be positive")
+        self.dim = int(dim)
+        self.exposed = int(exposed)
+        self.guide_dim = None if guide_dim is None else int(guide_dim)
+        self.condition_dim = None if condition_dim is None else int(condition_dim)
+        self.hidden_dim = int(hidden)
+        self.temperature = float(temperature)
+        self.sinkhorn_steps = int(sinkhorn_steps)
+        self.max_length = int(max_length)
+        self.hard_backend = hard_backend
+        self.layout_mode = layout_mode
+        self.value_operators = int(value_operators)
+        self.value_rank = value_rank
+        self.query_chunk_size = query_chunk_size
+        self.operator_chunk_size = operator_chunk_size
+        # Internal execution policy. Auto remains conservative and falls back
+        # to the established differentiable slot path outside its measured gate.
+        self._operator_schedule = "auto"
+
+        self.exposed_queries = nn.Parameter(torch.empty(self.exposed, self.hidden_dim))
+        self.exposed_value_operators = (
+            nn.Parameter(torch.empty(self.value_operators, self.dim, self.dim))
+            if value_rank is None
+            else None
+        )
+        self.exposed_value_left = (
+            None
+            if value_rank is None
+            else nn.Parameter(torch.empty(self.value_operators, self.dim, value_rank))
+        )
+        self.exposed_value_right = (
+            None
+            if value_rank is None
+            else nn.Parameter(torch.empty(self.value_operators, value_rank, self.dim))
+        )
+        self.exposed_value_mix = nn.Parameter(
+            torch.empty(self.exposed, self.value_operators)
+        )
+        self.exposed_scale = nn.Parameter(torch.empty(self.exposed, self.dim))
+        self.exposed_bias = nn.Parameter(torch.empty(self.exposed, self.dim))
+        self.content_key = nn.Linear(self.dim, self.hidden_dim, bias=False)
+        self.guide_proj = None if guide_dim is None else nn.Linear(guide_dim, self.dim, bias=False)
+        self.condition_proj = (
+            None if condition_dim is None else nn.Linear(condition_dim, self.dim, bias=False)
+        )
+        self.exposed_guide = (
+            None if guide_dim is None else nn.Parameter(torch.empty(self.exposed, guide_dim))
+        )
+        coordinate_input_dim = self.dim + self.hidden_dim
+        if condition_dim is not None:
+            coordinate_input_dim += condition_dim
+        self.exposed_coordinate = (
+            nn.Sequential(
+                nn.Linear(coordinate_input_dim, self.hidden_dim),
+                nn.GELU(),
+                nn.Linear(self.hidden_dim, 1),
+            )
+            if layout_mode == "canonical"
+            else None
+        )
+        # Candidate layout must not depend on the storage order of the input.
+        # A candidate sees its own value and a symmetric masked summary.
+        layout_input_dim = self.dim * 2
+        if guide_dim is not None:
+            layout_input_dim += self.dim
+        if condition_dim is not None:
+            layout_input_dim += self.dim
+        self.layout_score = nn.Sequential(
+            nn.Linear(layout_input_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+        )
+        self.layout_slots = nn.Sequential(
+            nn.Linear(1, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+        )
+        self.rank_score = nn.Linear(self.hidden_dim, 1)
+        self.reset_parameters()
+
+    @property
+    def parameter_count(self) -> int:
+        return sum(parameter.numel() for parameter in self.parameters())
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.exposed_queries, std=0.02)
+        if self.exposed_value_operators is not None:
+            nn.init.xavier_uniform_(self.exposed_value_operators)
+        else:
+            assert self.exposed_value_left is not None
+            assert self.exposed_value_right is not None
+            nn.init.xavier_uniform_(self.exposed_value_left)
+            nn.init.xavier_uniform_(self.exposed_value_right)
+        nn.init.normal_(
+            self.exposed_value_mix,
+            std=self.value_operators**-0.5,
+        )
+        nn.init.normal_(self.exposed_scale, mean=1.0, std=0.02)
+        nn.init.normal_(self.exposed_bias, std=0.02)
+        self.content_key.reset_parameters()
+        if self.guide_proj is not None:
+            self.guide_proj.reset_parameters()
+            assert self.exposed_guide is not None
+            nn.init.normal_(self.exposed_guide, std=0.02)
+        if self.condition_proj is not None:
+            self.condition_proj.reset_parameters()
+        coordinate_modules = (
+            () if self.exposed_coordinate is None else tuple(self.exposed_coordinate)
+        )
+        for module in (
+            *self.layout_score,
+            *self.layout_slots,
+            self.rank_score,
+            *coordinate_modules,
+        ):
+            if isinstance(module, nn.Linear):
+                module.reset_parameters()
+
+    def _query_weights(
+        self,
+        keys: Tensor,
+        mask: Tensor,
+        start: int,
+        stop: int,
+    ) -> Tensor:
+        queries = self.exposed_queries[start:stop]
+        logits = torch.einsum("eh,bnh->ben", queries, keys)
+        logits = logits / self.hidden_dim**0.5
+        weights = torch.softmax(logits.masked_fill(~mask[:, None], -1e4), dim=-1)
+        weights = weights * mask[:, None].to(weights.dtype)
+        return weights / weights.sum(-1, keepdim=True).clamp_min(
+            torch.finfo(weights.dtype).eps
+        )
+
+    def _query_context(self, x: Tensor, mask: Tensor) -> Tensor:
+        keys = self.content_key(x)
+        chunk_size = (
+            self.exposed if self.query_chunk_size is None else self.query_chunk_size
+        )
+        attended_chunks = []
+        for start in range(0, self.exposed, chunk_size):
+            stop = min(start + chunk_size, self.exposed)
+            weights = self._query_weights(keys, mask, start, stop)
+            attended_chunks.append(torch.bmm(weights, x))
+        return torch.cat(attended_chunks, dim=1)
+
+    def _form_exposed_values(self, attended: Tensor) -> Tensor:
+        if self.value_rank is not None:
+            assert self.exposed_value_left is not None
+            assert self.exposed_value_right is not None
+            low_rank = torch.einsum(
+                "bed,rdp->berp",
+                attended,
+                self.exposed_value_left,
+            )
+            low_rank = low_rank * self.exposed_value_mix[None, :, :, None]
+            values = torch.einsum(
+                "berp,rph->beh",
+                low_rank,
+                self.exposed_value_right,
+            )
+            return values * self.exposed_scale + self.exposed_bias
+        assert self.exposed_value_operators is not None
+        chunk_size = (
+            self.value_operators
+            if self.operator_chunk_size is None
+            else self.operator_chunk_size
+        )
+        values = torch.zeros_like(attended)
+        for start in range(0, self.value_operators, chunk_size):
+            stop = min(start + chunk_size, self.value_operators)
+            transformed = torch.einsum(
+                "bed,rdh->berh",
+                attended,
+                self.exposed_value_operators[start:stop],
+            )
+            values = values + (
+                transformed
+                * self.exposed_value_mix[None, :, start:stop, None]
+            ).sum(dim=2)
+        return values * self.exposed_scale + self.exposed_bias
+
+    def _form_exposed_values_effective(self, attended: Tensor) -> Tensor:
+        """Apply the full operator bank after exact per-slot materialization."""
+
+        assert self.exposed_value_operators is not None
+        # Bound the temporary [E_chunk, D, D] tensor to roughly 8 MiB. This is
+        # an execution detail, not a persistent inference cache.
+        bytes_per_value = attended.element_size()
+        budget_elements = max(1, (8 * 1024 * 1024) // bytes_per_value)
+        effective_chunk = max(1, budget_elements // (self.dim * self.dim))
+        if self.query_chunk_size is not None:
+            effective_chunk = min(effective_chunk, self.query_chunk_size)
+        chunk_size = min(self.exposed, effective_chunk)
+        chunks = []
+        for start in range(0, self.exposed, chunk_size):
+            stop = min(start + chunk_size, self.exposed)
+            effective = torch.einsum(
+                "er,rdh->edh",
+                self.exposed_value_mix[start:stop],
+                self.exposed_value_operators,
+            )
+            values = torch.einsum(
+                "bed,edh->beh",
+                attended[:, start:stop],
+                effective,
+            )
+            chunks.append(
+                values * self.exposed_scale[start:stop]
+                + self.exposed_bias[start:stop]
+            )
+        return torch.cat(chunks, dim=1)
+
+    def _query_exposed_palette(self, x: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+        """Move the exact operator bank to the input workspace before emission."""
+
+        assert self.exposed_value_operators is not None
+        keys = self.content_key(x)
+        transformed = torch.einsum(
+            "bnd,rdh->bnrh",
+            x,
+            self.exposed_value_operators,
+        ).permute(0, 2, 1, 3)
+        chunk_size = (
+            self.exposed if self.query_chunk_size is None else self.query_chunk_size
+        )
+        exposed_chunks = []
+        attended_chunks = []
+        for start in range(0, self.exposed, chunk_size):
+            stop = min(start + chunk_size, self.exposed)
+            weights = self._query_weights(keys, mask, start, stop)
+            attended_chunks.append(torch.bmm(weights, x))
+            operator_context = torch.matmul(weights[:, None], transformed)
+            values = (
+                operator_context
+                * self.exposed_value_mix[start:stop].T[None, :, :, None]
+            ).sum(dim=1)
+            exposed_chunks.append(
+                values * self.exposed_scale[start:stop]
+                + self.exposed_bias[start:stop]
+            )
+        return torch.cat(exposed_chunks, dim=1), torch.cat(attended_chunks, dim=1)
+
+    def _query_exposed_triton_palette(
+        self,
+        x: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        assert self.exposed_value_operators is not None
+        from ._triton.unfold import _palette_values_unchecked
+
+        keys = self.content_key(x)
+        weights = self._query_weights(keys, mask, 0, self.exposed)
+        attended = torch.bmm(weights, x)
+        exposed = _palette_values_unchecked(
+            x,
+            weights,
+            self.exposed_value_operators,
+            self.exposed_value_mix,
+            self.exposed_scale,
+            self.exposed_bias,
+        )
+        return exposed, attended
+
+    def _estimate_operator_schedule(self, batch: int, length: int) -> str:
+        if self.value_rank is not None:
+            return "slot"
+
+        # Common query-key work is omitted because it is identical. The model
+        # compares value aggregation and operator contractions only.
+        b = batch
+        n = length
+        e = self.exposed
+        d = self.dim
+        r = self.value_operators
+        slot_cost = b * e * n * d + b * e * r * d * d
+        effective_cost = b * e * n * d + e * r * d * d + b * e * d * d
+        palette_cost = (
+            b * n * r * d * d
+            + b * e * n * r * d
+            + b * e * n * d
+        )
+        costs = {
+            "slot": slot_cost,
+            "palette": palette_cost,
+            "effective": effective_cost,
+        }
+        candidate = min(costs, key=costs.__getitem__)
+        # FLOP estimates do not capture grouped-GEMM utilization and launch
+        # overhead. Require a material analytic margin before leaving the
+        # established slot path.
+        return candidate if costs[candidate] * 4 <= slot_cost * 3 else "slot"
+
+    def _can_use_triton_palette(self, x: Tensor) -> bool:
+        compiler = getattr(torch, "compiler", None)
+        is_compiling = bool(compiler is not None and compiler.is_compiling())
+        if (
+            self.training
+            or torch.is_grad_enabled()
+            or is_compiling
+            or not x.is_cuda
+            or x.dtype not in {torch.float32, torch.bfloat16}
+            or self.value_rank is not None
+            or self.query_chunk_size is not None
+            or self.dim < 128
+            or self.exposed < 128
+            or x.shape[1] > 128
+            or self.value_operators > 16
+        ):
+            return False
+        device_index = x.device.index
+        if device_index is None:
+            device_index = torch.cuda.current_device()
+        if not _device_supports_triton_palette(device_index):
+            return False
+        return _triton_palette_is_available()
+
+    def _select_operator_schedule(self, x: Tensor) -> str:
+        if self._operator_schedule == "auto":
+            return "palette_triton" if self._can_use_triton_palette(x) else "slot"
+        if self._operator_schedule not in {
+            "slot",
+            "palette",
+            "effective",
+            "palette_triton",
+        }:
+            raise RuntimeError(
+                f"invalid private operator schedule: {self._operator_schedule!r}"
+            )
+        if self._operator_schedule == "palette_triton" and not self._can_use_triton_palette(x):
+            raise RuntimeError("private Triton palette schedule is unavailable for this input")
+        return self._operator_schedule
+
+    def _query_exposed(self, x: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+        schedule = self._select_operator_schedule(x)
+        if schedule == "palette_triton":
+            return self._query_exposed_triton_palette(x, mask)
+        if schedule == "palette":
+            return self._query_exposed_palette(x, mask)
+        attended = self._query_context(x, mask)
+        if schedule == "effective":
+            if self.value_rank is not None:
+                raise RuntimeError("effective schedule requires a full operator bank")
+            return self._form_exposed_values_effective(attended), attended
+        return self._form_exposed_values(attended), attended
+
+    def _soft_layout(self, logits: Tensor) -> Tensor:
+        log_layout = (logits / self.temperature).float()
+        for _ in range(self.sinkhorn_steps):
+            log_layout = log_layout - torch.logsumexp(log_layout, dim=-1, keepdim=True)
+            log_layout = log_layout - torch.logsumexp(log_layout, dim=-2, keepdim=True)
+        return log_layout.exp().to(logits.dtype)
+
+    @staticmethod
+    def _normalize_guide(guide: Tensor, mask: Tensor) -> Tensor:
+        stats_dtype = torch.float64 if guide.dtype == torch.float64 else torch.float32
+        values = guide.to(stats_dtype)
+        valid = mask[..., None]
+        weights = valid.to(stats_dtype)
+        count = weights.sum(dim=1, keepdim=True).clamp_min(1)
+        masked_values = torch.where(valid, values, torch.zeros_like(values))
+        mean = masked_values.sum(dim=1, keepdim=True) / count
+        centered = torch.where(valid, values - mean, torch.zeros_like(values))
+        variance = centered.square().sum(dim=1, keepdim=True) / count
+        normalized = centered / variance.sqrt().clamp_min(torch.finfo(stats_dtype).eps**0.5)
+        return normalized.to(guide.dtype)
+
+    def _soft_rank_layout(self, scores: Tensor) -> Tensor:
+        pairwise = torch.sigmoid((scores[:, :, None] - scores[:, None, :]) / self.temperature)
+        soft_rank = pairwise.sum(dim=-1) - 0.5
+        anchors = torch.arange(scores.shape[1], device=scores.device, dtype=scores.dtype)
+        log_layout = -(anchors[None, :, None] - soft_rank[:, None, :]).square()
+        log_layout = log_layout.float()
+        for _ in range(self.sinkhorn_steps):
+            log_layout = log_layout - torch.logsumexp(log_layout, dim=-1, keepdim=True)
+            log_layout = log_layout - torch.logsumexp(log_layout, dim=-2, keepdim=True)
+        return log_layout.exp().to(scores.dtype)
+
+    @staticmethod
+    def _greedy_matching(logits: Tensor) -> Tensor:
+        """Global-edge greedy baseline retained for assignment diagnostics."""
+
+        batch, total, _ = logits.shape
+        available_rows = torch.ones(batch, total, dtype=torch.bool, device=logits.device)
+        available_columns = torch.ones_like(available_rows)
+        source = torch.full((batch, total), -1, dtype=torch.long, device=logits.device)
+        scores = logits.detach()
+        batch_index = torch.arange(batch, device=logits.device)
+        for _ in range(total):
+            available = available_rows[:, :, None] & available_columns[:, None, :]
+            selected = scores.masked_fill(~available, -torch.inf).flatten(1).argmax(dim=1)
+            row = selected // total
+            column = selected % total
+            source[batch_index, row] = column
+            available_rows[batch_index, row] = False
+            available_columns[batch_index, column] = False
+        return source
+
+    @staticmethod
+    def _auction_matching(logits: Tensor) -> Tensor:
+        """Batched auction matching used by the hard forward path."""
+
+        batch, total, _ = logits.shape
+        scores = logits.float().detach()
+        prices = torch.zeros(batch, total, device=logits.device)
+        owner = torch.full((batch, total), -1, dtype=torch.long, device=logits.device)
+        source = torch.full_like(owner, -1)
+        batch_index = torch.arange(batch, device=logits.device)
+        epsilon = 1e-2
+        for _ in range(100 * total * total):
+            unmatched = source < 0
+            if not unmatched.any():
+                break
+            row = unmatched.to(torch.int64).argmax(dim=1)
+            active = unmatched.any(dim=1)
+            utility = scores[batch_index, row] - prices
+            best_two = utility.topk(2, dim=1)
+            column = best_two.indices[:, 0]
+            bid = best_two.values[:, 0] - best_two.values[:, 1] + epsilon
+            previous = owner[batch_index, column]
+            active_batch = batch_index[active]
+            active_column = column[active]
+            active_row = row[active]
+            displaced = previous[active]
+            displaced_mask = displaced >= 0
+            if displaced_mask.any():
+                source[active_batch[displaced_mask], displaced[displaced_mask]] = -1
+            prices[active_batch, active_column] += bid[active]
+            owner[active_batch, active_column] = active_row
+            source[active_batch, active_row] = active_column
+        if (source < 0).any():
+            raise RuntimeError("UnFold auction matching did not converge")
+        return source
+
+    def _hard_matching(self, logits: Tensor) -> Tensor:
+        if self.hard_backend == "auction":
+            return self._auction_matching(logits)
+        return self._greedy_matching(logits)
+
+    def forward(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+        *,
+        guide: Tensor | None = None,
+        exposed_guide: Tensor | None = None,
+        exposed_mask: Tensor | None = None,
+        condition: Tensor | None = None,
+        return_exposed_mask: bool = False,
+        return_source_index: bool = False,
+        return_soft_layout: bool = False,
+    ) -> Tensor | tuple[Tensor, ...]:
+        if x.ndim < 2:
+            raise ValueError("x must have shape [..., N, D]")
+        leading_shape = x.shape[:-2]
+        length, dim = x.shape[-2:]
+        if length == 0:
+            raise ValueError("x sequence length must be positive")
+        if dim != self.dim:
+            raise ValueError(f"x feature dimension {dim} does not match dim={self.dim}")
+        if x.device != self.exposed_bias.device or x.dtype != self.exposed_bias.dtype:
+            raise ValueError("x and UnFold parameters must have the same device and dtype")
+        if mask is not None:
+            if mask.dtype != torch.bool:
+                raise ValueError("mask must be a boolean tensor")
+            if mask.shape != x.shape[:-1]:
+                raise ValueError(f"mask must have shape {list(x.shape[:-1])}")
+            if mask.device != x.device:
+                raise ValueError("mask and x must be on the same device")
+        if guide is not None:
+            if self.guide_dim is None:
+                raise ValueError("guide was provided but guide_dim is disabled")
+            expected_guide_shape = (*x.shape[:-1], self.guide_dim)
+            if guide.shape != expected_guide_shape:
+                raise ValueError(f"guide must have shape {list(expected_guide_shape)}")
+            if not guide.is_floating_point():
+                raise ValueError("guide must be a floating-point tensor")
+            if guide.device != x.device:
+                raise ValueError("guide and x must be on the same device")
+            if not torch.isfinite(guide).all():
+                raise ValueError("guide must contain only finite values")
+        if exposed_guide is not None:
+            if self.layout_mode != "canonical":
+                raise ValueError("exposed_guide is only supported by canonical layout")
+            expected_exposed_guide_shape = (*leading_shape, self.exposed, 1)
+            if exposed_guide.shape != expected_exposed_guide_shape:
+                raise ValueError(
+                    f"exposed_guide must have shape {list(expected_exposed_guide_shape)}"
+                )
+            if not exposed_guide.is_floating_point():
+                raise ValueError("exposed_guide must be a floating-point tensor")
+            if exposed_guide.device != x.device:
+                raise ValueError("exposed_guide and x must be on the same device")
+            if not torch.isfinite(exposed_guide).all():
+                raise ValueError("exposed_guide must contain only finite values")
+        if exposed_mask is not None:
+            expected_exposed_mask_shape = (*leading_shape, self.exposed)
+            if exposed_mask.shape != expected_exposed_mask_shape:
+                raise ValueError(
+                    f"exposed_mask must have shape {list(expected_exposed_mask_shape)}"
+                )
+            if exposed_mask.dtype != torch.bool:
+                raise ValueError("exposed_mask must be a boolean tensor")
+            if exposed_mask.device != x.device:
+                raise ValueError("exposed_mask and x must be on the same device")
+        if condition is not None:
+            if self.condition_dim is None:
+                raise ValueError("condition was provided but condition_dim is disabled")
+            compact_shape = (*leading_shape, self.condition_dim)
+            singleton_shape = (*leading_shape, 1, self.condition_dim)
+            if condition.shape not in {compact_shape, singleton_shape}:
+                raise ValueError(
+                    f"condition must have shape {list(compact_shape)} or {list(singleton_shape)}"
+                )
+            if not condition.is_floating_point():
+                raise ValueError("condition must be a floating-point tensor")
+            if condition.device != x.device:
+                raise ValueError("condition and x must be on the same device")
+            if not torch.isfinite(condition).all():
+                raise ValueError("condition must contain only finite values")
+
+        flat_x = x.reshape(-1, length, dim)
+        batch = flat_x.shape[0]
+        flat_mask = (
+            torch.ones(batch, length, dtype=torch.bool, device=x.device)
+            if mask is None
+            else mask.reshape(batch, length)
+        )
+        exposed, attended = self._query_exposed(flat_x, flat_mask)
+        candidates = torch.cat((flat_x, exposed), dim=1)
+        valid_sample = flat_mask.any(dim=1, keepdim=True)
+        flat_exposed_mask = (
+            torch.ones(batch, self.exposed, dtype=torch.bool, device=x.device)
+            if exposed_mask is None
+            else exposed_mask.reshape(batch, self.exposed)
+        )
+        flat_exposed_mask = flat_exposed_mask & valid_sample
+        candidate_mask = torch.cat((flat_mask, flat_exposed_mask), dim=1)
+        total = candidates.shape[1]
+        if self.hard_backend != "sort" and total > self.max_length:
+            raise ValueError(
+                f"UnFold output length {total} exceeds max_length={self.max_length}; "
+                "use a shorter tensor or explicitly raise the alpha backend limit"
+            )
+
+        positions = torch.linspace(-1, 1, total, device=x.device, dtype=x.dtype)
+        flat_condition = None
+        if self.condition_dim is not None:
+            if condition is None:
+                flat_condition = flat_x.new_zeros(batch, self.condition_dim)
+            else:
+                flat_condition = condition.reshape(batch, self.condition_dim).to(x.dtype)
+        if self.layout_mode == "canonical":
+            if guide is None:
+                raise ValueError("layout_mode='canonical' requires guide")
+            original_scores = self._normalize_guide(
+                guide.reshape(batch, length, 1).to(x.dtype), flat_mask
+            ).squeeze(-1)
+            if exposed_guide is not None:
+                exposed_scores = exposed_guide.reshape(batch, self.exposed).to(x.dtype)
+            else:
+                assert self.exposed_coordinate is not None
+                query_identity = self.exposed_queries.to(x.dtype).unsqueeze(0).expand(
+                    batch, -1, -1
+                )
+                coordinate_parts = [attended, query_identity]
+                if flat_condition is not None:
+                    coordinate_parts.append(
+                        flat_condition[:, None].expand(-1, self.exposed, -1)
+                    )
+                exposed_scores = 3.0 * torch.tanh(
+                    self.exposed_coordinate(
+                        torch.cat(coordinate_parts, dim=-1)
+                    ).squeeze(-1)
+                )
+            rank_scores = torch.cat((original_scores, exposed_scores), dim=1)
+            invalid_rank = (
+                rank_scores.detach().abs().amax(dim=1, keepdim=True)
+                + 2.0
+                + positions / max(total, 1)
+            )
+            rank_scores = torch.where(candidate_mask, rank_scores, invalid_rank)
+            source = torch.argsort(rank_scores, dim=-1, stable=True)
+            soft_layout = (
+                self._soft_rank_layout(rank_scores)
+                if self.training or return_soft_layout
+                else None
+            )
+        else:
+            valid_weight = flat_mask.to(flat_x.dtype)
+            context = (flat_x * valid_weight[..., None]).sum(1)
+            context = context / valid_weight.sum(1, keepdim=True).clamp_min(1)
+            layout_parts = [
+                candidates,
+                context[:, None].expand(-1, total, -1),
+            ]
+            if self.guide_proj is not None:
+                if guide is None:
+                    candidate_guide = flat_x.new_zeros(batch, total, self.guide_dim)
+                else:
+                    flat_guide = guide.reshape(batch, length, self.guide_dim).to(x.dtype)
+                    normalized_guide = self._normalize_guide(flat_guide, flat_mask)
+                    assert self.exposed_guide is not None
+                    learned_exposed_guide = (
+                        self.exposed_guide.to(x.dtype)
+                        .unsqueeze(0)
+                        .expand(batch, -1, -1)
+                    )
+                    candidate_guide = torch.cat(
+                        (normalized_guide, learned_exposed_guide), dim=1
+                    )
+                layout_parts.append(self.guide_proj(candidate_guide))
+            if self.condition_proj is not None:
+                assert flat_condition is not None
+                projected_condition = self.condition_proj(flat_condition)
+                layout_parts.append(
+                    projected_condition[:, None].expand(-1, total, -1)
+                )
+            layout_input = torch.cat(layout_parts, dim=-1)
+            candidate_keys = F.normalize(self.layout_score(layout_input), dim=-1)
+            if self.hard_backend == "sort":
+                rank_scores = torch.tanh(self.rank_score(candidate_keys).squeeze(-1))
+                invalid_rank = (
+                    rank_scores.detach().abs().amax(dim=1, keepdim=True)
+                    + 2.0
+                    + positions / max(total, 1)
+                )
+                rank_scores = torch.where(candidate_mask, rank_scores, invalid_rank)
+                source = torch.argsort(rank_scores, dim=-1, stable=True)
+                soft_layout = (
+                    self._soft_rank_layout(rank_scores)
+                    if self.training or return_soft_layout
+                    else None
+                )
+            else:
+                slot_inputs = positions.reshape(total, 1)
+                slot_keys = F.normalize(self.layout_slots(slot_inputs), dim=-1)
+                logits = torch.einsum("rh,bch->brc", slot_keys, candidate_keys)
+                invalid_preference = positions.reshape(1, total, 1) * 4.0
+                logits = torch.where(candidate_mask[:, None], logits, invalid_preference)
+                source = self._hard_matching(logits)
+                soft_layout = (
+                    self._soft_layout(logits)
+                    if self.training or return_soft_layout
+                    else None
+                )
+        gather_index = source[..., None].expand(-1, -1, dim)
+        hard = candidates.gather(1, gather_index)
+        if self.training:
+            assert soft_layout is not None
+            soft = torch.bmm(soft_layout, candidates.detach())
+            y = _HardLayoutSoftGradient.apply(hard, soft)
+        else:
+            y = hard
+
+        output_shape = (*leading_shape, total)
+        outputs: list[Tensor] = [y.reshape(*output_shape, dim)]
+        if mask is not None:
+            outputs.append(candidate_mask.gather(1, source).reshape(*output_shape))
+        if return_exposed_mask:
+            exposed_candidates = torch.arange(total, device=x.device) >= length
+            outputs.append(exposed_candidates[source].reshape(*output_shape))
+        if return_source_index:
+            outputs.append(source.reshape(*output_shape))
+        if return_soft_layout:
+            assert soft_layout is not None
+            outputs.append(soft_layout.reshape(*leading_shape, total, total))
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)
+
+    def extra_repr(self) -> str:
+        return (
+            f"dim={self.dim}, exposed={self.exposed}, guide_dim={self.guide_dim}, "
+            f"condition_dim={self.condition_dim}, hidden_dim={self.hidden_dim}, "
+            f"temperature={self.temperature:g}, sinkhorn_steps={self.sinkhorn_steps}, "
+            f"max_length={self.max_length}, hard_backend={self.hard_backend!r}, "
+            f"layout_mode={self.layout_mode!r}, value_operators={self.value_operators}, "
+            f"value_rank={self.value_rank}, "
+            f"query_chunk_size={self.query_chunk_size}, "
+            f"operator_chunk_size={self.operator_chunk_size}"
+        )
 
 
 class Fold(nn.Module):
@@ -589,7 +1362,7 @@ Pulse = LearnedPulse
 
 from .stateful_recall import StatefulRecall
 from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
-__all__ = ["Layer", "Half", "Fold", "Pulse", "LearnedPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
+__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 
 def __getattr__(name: str):
