@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.5.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.6.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
@@ -19,6 +19,10 @@ The following contracts are frozen across compatible 1.x releases:
 Modules and parameters explicitly documented as alpha, experimental, or
 legacy are not frozen at the same level. They will still follow the deprecation
 process below.
+
+`FusionPulse` is introduced as an alpha API in 1.6.0. Its tensor-in/tensor-out
+contract is documented, but its structural-loss defaults are not part of the
+frozen core surface yet.
 
 ## Compatibility
 

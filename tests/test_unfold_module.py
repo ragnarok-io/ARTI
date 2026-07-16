@@ -26,6 +26,91 @@ def test_unfold_expands_and_preserves_every_original_instance_exactly() -> None:
         assert torch.equal(y[source == index], x[:, index])
 
 
+def test_unfold_runtime_target_length_reuses_one_capacity_at_different_sizes() -> None:
+    torch.manual_seed(4)
+    layer = UnFold(dim=3, exposed=4)
+    single = torch.randn(2, 2, 3)
+    concatenated = torch.randn(2, 8, 3)
+
+    single_y, single_exposed, single_source = layer(
+        single,
+        target_length=3,
+        return_exposed_mask=True,
+        return_source_index=True,
+    )
+    concat_y, concat_exposed, concat_source = layer(
+        concatenated,
+        target_length=12,
+        return_exposed_mask=True,
+        return_source_index=True,
+    )
+
+    assert single_y.shape == (2, 3, 3)
+    assert concat_y.shape == (2, 12, 3)
+    assert torch.equal(single_exposed.sum(1), torch.ones(2, dtype=torch.long))
+    assert torch.equal(concat_exposed.sum(1), torch.full((2,), 4, dtype=torch.long))
+    assert torch.equal(
+        _original_counts(single_source, single.shape[1]),
+        torch.ones(2, single.shape[1], dtype=torch.long),
+    )
+    assert torch.equal(
+        _original_counts(concat_source, concatenated.shape[1]),
+        torch.ones(2, concatenated.shape[1], dtype=torch.long),
+    )
+
+
+def test_unfold_runtime_target_length_activates_only_required_parameter_slots() -> None:
+    torch.manual_seed(6)
+    layer = UnFold(dim=3, exposed=4)
+    x = torch.randn(2, 3, 3, requires_grad=True)
+    layer(x, target_length=4).square().mean().backward()
+
+    assert layer.exposed_queries.grad is not None
+    assert layer.exposed_value_mix.grad is not None
+    assert layer.exposed_queries.grad[0].abs().sum() > 0
+    assert layer.exposed_value_mix.grad[0].abs().sum() > 0
+    assert torch.count_nonzero(layer.exposed_queries.grad[1:]) == 0
+    assert torch.count_nonzero(layer.exposed_value_mix.grad[1:]) == 0
+
+
+def test_unfold_runtime_target_length_shapes_masks_and_exposed_guides() -> None:
+    layer = UnFold(
+        dim=2,
+        exposed=4,
+        guide_dim=1,
+        layout_mode="canonical",
+    )
+    x = torch.randn(2, 3, 2)
+    mask = torch.tensor([[True, True, False], [True, True, True]])
+    guide = torch.randn(2, 3, 1)
+    exposed_guide = torch.randn(2, 2, 1)
+    exposed_mask = torch.tensor([[True, False], [True, True]])
+
+    y, output_mask, output_exposed = layer(
+        x,
+        mask,
+        target_length=5,
+        guide=guide,
+        exposed_guide=exposed_guide,
+        exposed_mask=exposed_mask,
+        return_exposed_mask=True,
+    )
+
+    assert y.shape == (2, 5, 2)
+    assert output_mask.shape == (2, 5)
+    assert output_exposed.shape == (2, 5)
+    assert torch.equal(output_mask.sum(1), torch.tensor([3, 5]))
+    assert torch.equal(output_exposed.sum(1), torch.tensor([2, 2]))
+
+
+@pytest.mark.parametrize("target_length", [3, 8, 3.5, True])
+def test_unfold_rejects_invalid_runtime_target_length(target_length: object) -> None:
+    layer = UnFold(dim=2, exposed=3)
+    x = torch.randn(1, 3, 2)
+    with pytest.raises(ValueError, match="target_length"):
+        layer(x, target_length=target_length)
+
+
 def test_unfold_layout_is_a_valid_sample_conditioned_rank() -> None:
     torch.manual_seed(5)
     layer = UnFold(dim=4, exposed=2)
@@ -211,11 +296,11 @@ def test_unfold_auto_triton_inference_matches_slot(dtype: torch.dtype) -> None:
 
     assert automatic._select_operator_schedule(x) == "slot"
     with torch.inference_mode():
-        assert automatic._select_operator_schedule(x) == "palette_triton"
+        assert automatic._select_operator_schedule(x) == "fused_triton"
         actual_exposed, actual_attended = automatic._query_exposed(x, mask)
         expected_exposed, expected_attended = slot._query_exposed(x, mask)
 
-    atol = 1e-6 if dtype == torch.float32 else 2e-3
+    atol = 1e-6 if dtype == torch.float32 else 4e-3
     rtol = 1e-5 if dtype == torch.float32 else 2e-2
     assert torch.allclose(actual_exposed, expected_exposed, atol=atol, rtol=rtol)
     assert torch.allclose(actual_attended, expected_attended, atol=atol, rtol=rtol)
@@ -236,6 +321,17 @@ def test_unfold_auto_triton_gate_rejects_unmeasured_shapes() -> None:
         assert long_input._select_operator_schedule(
             torch.randn(2, 129, 128, device="cuda", dtype=torch.bfloat16)
         ) == "slot"
+
+        fp32_shared_memory_fallback = (
+            UnFold(dim=256, exposed=128).cuda().eval()
+        )
+        fp32_input = torch.randn(2, 128, 256, device="cuda")
+        assert fp32_shared_memory_fallback._select_operator_schedule(
+            fp32_input
+        ) == "palette_triton"
+        fp32_shared_memory_fallback._operator_schedule = "fused_triton"
+        with pytest.raises(RuntimeError, match="fused Triton"):
+            fp32_shared_memory_fallback._select_operator_schedule(fp32_input)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -327,12 +423,28 @@ def test_unfold_guide_and_condition_gradients_are_finite() -> None:
 
 @pytest.mark.parametrize("field", ["guide", "condition"])
 def test_unfold_rejects_nonfinite_layout_inputs(field: str) -> None:
-    layer = UnFold(dim=3, guide_dim=2, condition_dim=2)
+    layer = UnFold(
+        dim=3,
+        guide_dim=2,
+        condition_dim=2,
+        validate_values=True,
+    )
     x = torch.randn(1, 4, 3)
     value = torch.randn(1, 4, 2) if field == "guide" else torch.randn(1, 2)
     value.reshape(-1)[0] = torch.nan
     with pytest.raises(ValueError, match="finite"):
         layer(x, **{field: value})
+
+
+def test_unfold_value_validation_is_an_explicit_debug_option() -> None:
+    layer = UnFold(dim=3, guide_dim=1)
+    x = torch.randn(1, 4, 3)
+    guide = torch.full((1, 4, 1), torch.nan)
+    assert layer(x, guide=guide).shape == (1, 5, 3)
+    assert "validate_values=True" not in repr(layer)
+    assert "validate_values=True" in repr(
+        UnFold(dim=3, guide_dim=1, validate_values=True)
+    )
 
 
 def test_unfold_sort_eval_can_return_soft_layout() -> None:
@@ -414,6 +526,12 @@ def test_unfold_valid_output_is_padding_invariant() -> None:
 def test_unfold_rejects_unknown_hard_backend() -> None:
     with pytest.raises(ValueError, match="hard_backend"):
         UnFold(dim=3, hard_backend="unknown")
+
+
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf")])
+def test_unfold_rejects_nonfinite_temperature(temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        UnFold(dim=3, temperature=temperature)
 
 
 def test_unfold_rejects_invalid_layout_configuration() -> None:

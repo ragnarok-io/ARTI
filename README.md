@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.5.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.6.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -122,6 +122,31 @@ optional guide tensors, autograd, CUDA, and `arti.st` serialization. `UnFold`
 is unrelated to `torch.nn.Unfold`, which extracts image patches. See the
 [UnFold guide](docs/unfold.md).
 
+One UnFold capacity can serve different runtime workspace sizes by passing
+`target_length`. Only the required prefix of exposed query parameters is active
+for that call.
+
+## Fuse Compact Workspaces With FusionPulse
+
+`FusionPulse` is an alpha layer for combining several already compact Pulse
+workspaces. It learns feature-wise salience in their joint context, applies
+`Half`, and lets one shared `UnFold` query a fixed-size fused workspace:
+
+```python
+left = arti.nn.Pulse(k=8, dim=64)(left_fragments)
+right = arti.nn.Pulse(k=8, dim=64)(right_fragments)
+
+fusion = arti.nn.FusionPulse(k=8, dim=64)
+z = fusion.concat(left, right)
+
+assert z.shape == (left.shape[0], 8, 64)
+```
+
+Inputs may have different slot counts and the number of sources may change
+between calls. For balanced consolidation during training, request diagnostics
+and add `info["structural_loss"]` to the task loss. See the
+[FusionPulse guide](docs/fusion-pulse.md).
+
 ## Attach To An Existing Model
 
 ARTI can discover and attach Recall branches without changing the model class:
@@ -171,7 +196,8 @@ publisher signatures. Obtain models and weights from trusted sources.
 
 ## Public Modules
 
-- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, `RecallRefiner`, and visual workspace modules.
+- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, alpha `FusionPulse`,
+  `RecallRefiner`, and visual workspace modules.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
 - `arti.torch`: backend-explicit aliases for PyTorch applications.
 - `arti.jax`: optional functional JAX subset with array-only parameter trees,

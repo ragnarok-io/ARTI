@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import lru_cache
 import math
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -12,6 +14,9 @@ from torch import Tensor
 
 from .functional import half
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
+
+if TYPE_CHECKING:
+    from .usage import Layer
 
 
 @lru_cache(maxsize=1)
@@ -132,8 +137,10 @@ class _HardLayoutSoftGradient(torch.autograd.Function):
 class UnFold(nn.Module):
     """Expand and rearrange a tensor while preserving every input value.
 
-    ``UnFold`` queries ``exposed`` new values from the input, combines them
-    with the original values, and learns a sample-conditioned layout. The
+    ``exposed`` declares the maximum trainable expansion capacity. A forward
+    call may request a smaller dynamic ``target_length``; only the required
+    prefix of independent query slots is active. UnFold combines those queried
+    values with the originals and learns a sample-conditioned layout. The
     forward path uses a hard gather: every original input instance appears
     exactly once, but its position and adjacency may change. A soft layout is
     used only as a surrogate gradient during training.
@@ -159,6 +166,7 @@ class UnFold(nn.Module):
         value_rank: int | None = None,
         query_chunk_size: int | None = None,
         operator_chunk_size: int | None = None,
+        validate_values: bool = False,
     ) -> None:
         super().__init__()
         if dim <= 0:
@@ -169,7 +177,7 @@ class UnFold(nn.Module):
             raise ValueError("guide_dim must be positive")
         if condition_dim is not None and condition_dim <= 0:
             raise ValueError("condition_dim must be positive")
-        if temperature <= 0:
+        if not math.isfinite(temperature) or temperature <= 0:
             raise ValueError("temperature must be positive")
         if sinkhorn_steps <= 0:
             raise ValueError("sinkhorn_steps must be positive")
@@ -210,6 +218,7 @@ class UnFold(nn.Module):
         self.value_rank = value_rank
         self.query_chunk_size = query_chunk_size
         self.operator_chunk_size = operator_chunk_size
+        self.validate_values = bool(validate_values)
         # Internal execution policy. Auto remains conservative and falls back
         # to the established differentiable slot path outside its measured gate.
         self._operator_schedule = "auto"
@@ -329,19 +338,27 @@ class UnFold(nn.Module):
             torch.finfo(weights.dtype).eps
         )
 
-    def _query_context(self, x: Tensor, mask: Tensor) -> Tensor:
+    def _query_context(
+        self,
+        x: Tensor,
+        mask: Tensor,
+        exposed_count: int | None = None,
+    ) -> Tensor:
+        active = self.exposed if exposed_count is None else exposed_count
         keys = self.content_key(x)
-        chunk_size = (
-            self.exposed if self.query_chunk_size is None else self.query_chunk_size
-        )
+        chunk_size = active if self.query_chunk_size is None else min(self.query_chunk_size, active)
         attended_chunks = []
-        for start in range(0, self.exposed, chunk_size):
-            stop = min(start + chunk_size, self.exposed)
+        for start in range(0, active, chunk_size):
+            stop = min(start + chunk_size, active)
             weights = self._query_weights(keys, mask, start, stop)
             attended_chunks.append(torch.bmm(weights, x))
         return torch.cat(attended_chunks, dim=1)
 
     def _form_exposed_values(self, attended: Tensor) -> Tensor:
+        active = attended.shape[1]
+        value_mix = self.exposed_value_mix[:active]
+        value_scale = self.exposed_scale[:active]
+        value_bias = self.exposed_bias[:active]
         if self.value_rank is not None:
             assert self.exposed_value_left is not None
             assert self.exposed_value_right is not None
@@ -350,18 +367,16 @@ class UnFold(nn.Module):
                 attended,
                 self.exposed_value_left,
             )
-            low_rank = low_rank * self.exposed_value_mix[None, :, :, None]
+            low_rank = low_rank * value_mix[None, :, :, None]
             values = torch.einsum(
                 "berp,rph->beh",
                 low_rank,
                 self.exposed_value_right,
             )
-            return values * self.exposed_scale + self.exposed_bias
+            return values * value_scale + value_bias
         assert self.exposed_value_operators is not None
         chunk_size = (
-            self.value_operators
-            if self.operator_chunk_size is None
-            else self.operator_chunk_size
+            self.value_operators if self.operator_chunk_size is None else self.operator_chunk_size
         )
         values = torch.zeros_like(attended)
         for start in range(0, self.value_operators, chunk_size):
@@ -371,16 +386,14 @@ class UnFold(nn.Module):
                 attended,
                 self.exposed_value_operators[start:stop],
             )
-            values = values + (
-                transformed
-                * self.exposed_value_mix[None, :, start:stop, None]
-            ).sum(dim=2)
-        return values * self.exposed_scale + self.exposed_bias
+            values = values + (transformed * value_mix[None, :, start:stop, None]).sum(dim=2)
+        return values * value_scale + value_bias
 
     def _form_exposed_values_effective(self, attended: Tensor) -> Tensor:
         """Apply the full operator bank after exact per-slot materialization."""
 
         assert self.exposed_value_operators is not None
+        active = attended.shape[1]
         # Bound the temporary [E_chunk, D, D] tensor to roughly 8 MiB. This is
         # an execution detail, not a persistent inference cache.
         bytes_per_value = attended.element_size()
@@ -388,10 +401,10 @@ class UnFold(nn.Module):
         effective_chunk = max(1, budget_elements // (self.dim * self.dim))
         if self.query_chunk_size is not None:
             effective_chunk = min(effective_chunk, self.query_chunk_size)
-        chunk_size = min(self.exposed, effective_chunk)
+        chunk_size = min(active, effective_chunk)
         chunks = []
-        for start in range(0, self.exposed, chunk_size):
-            stop = min(start + chunk_size, self.exposed)
+        for start in range(0, active, chunk_size):
+            stop = min(start + chunk_size, active)
             effective = torch.einsum(
                 "er,rdh->edh",
                 self.exposed_value_mix[start:stop],
@@ -402,39 +415,38 @@ class UnFold(nn.Module):
                 attended[:, start:stop],
                 effective,
             )
-            chunks.append(
-                values * self.exposed_scale[start:stop]
-                + self.exposed_bias[start:stop]
-            )
+            chunks.append(values * self.exposed_scale[start:stop] + self.exposed_bias[start:stop])
         return torch.cat(chunks, dim=1)
 
-    def _query_exposed_palette(self, x: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+    def _query_exposed_palette(
+        self,
+        x: Tensor,
+        mask: Tensor,
+        exposed_count: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Move the exact operator bank to the input workspace before emission."""
 
         assert self.exposed_value_operators is not None
+        active = self.exposed if exposed_count is None else exposed_count
         keys = self.content_key(x)
         transformed = torch.einsum(
             "bnd,rdh->bnrh",
             x,
             self.exposed_value_operators,
         ).permute(0, 2, 1, 3)
-        chunk_size = (
-            self.exposed if self.query_chunk_size is None else self.query_chunk_size
-        )
+        chunk_size = active if self.query_chunk_size is None else min(self.query_chunk_size, active)
         exposed_chunks = []
         attended_chunks = []
-        for start in range(0, self.exposed, chunk_size):
-            stop = min(start + chunk_size, self.exposed)
+        for start in range(0, active, chunk_size):
+            stop = min(start + chunk_size, active)
             weights = self._query_weights(keys, mask, start, stop)
             attended_chunks.append(torch.bmm(weights, x))
             operator_context = torch.matmul(weights[:, None], transformed)
             values = (
-                operator_context
-                * self.exposed_value_mix[start:stop].T[None, :, :, None]
+                operator_context * self.exposed_value_mix[start:stop].T[None, :, :, None]
             ).sum(dim=1)
             exposed_chunks.append(
-                values * self.exposed_scale[start:stop]
-                + self.exposed_bias[start:stop]
+                values * self.exposed_scale[start:stop] + self.exposed_bias[start:stop]
             )
         return torch.cat(exposed_chunks, dim=1), torch.cat(attended_chunks, dim=1)
 
@@ -442,24 +454,53 @@ class UnFold(nn.Module):
         self,
         x: Tensor,
         mask: Tensor,
+        exposed_count: int | None = None,
     ) -> tuple[Tensor, Tensor]:
         assert self.exposed_value_operators is not None
         from ._triton.unfold import _palette_values_unchecked
 
+        active = self.exposed if exposed_count is None else exposed_count
         keys = self.content_key(x)
-        weights = self._query_weights(keys, mask, 0, self.exposed)
+        weights = self._query_weights(keys, mask, 0, active)
         attended = torch.bmm(weights, x)
         exposed = _palette_values_unchecked(
             x,
             weights,
             self.exposed_value_operators,
-            self.exposed_value_mix,
-            self.exposed_scale,
-            self.exposed_bias,
+            self.exposed_value_mix[:active],
+            self.exposed_scale[:active],
+            self.exposed_bias[:active],
         )
         return exposed, attended
 
-    def _estimate_operator_schedule(self, batch: int, length: int) -> str:
+    def _query_exposed_triton_fused(
+        self,
+        x: Tensor,
+        mask: Tensor,
+        exposed_count: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        assert self.exposed_value_operators is not None
+        from ._triton.unfold import _query_slot_values_unchecked
+
+        active = self.exposed if exposed_count is None else exposed_count
+        keys = self.content_key(x)
+        return _query_slot_values_unchecked(
+            x,
+            keys,
+            self.exposed_queries[:active],
+            mask,
+            self.exposed_value_operators,
+            self.exposed_value_mix[:active],
+            self.exposed_scale[:active],
+            self.exposed_bias[:active],
+        )
+
+    def _estimate_operator_schedule(
+        self,
+        batch: int,
+        length: int,
+        exposed_count: int | None = None,
+    ) -> str:
         if self.value_rank is not None:
             return "slot"
 
@@ -467,16 +508,12 @@ class UnFold(nn.Module):
         # compares value aggregation and operator contractions only.
         b = batch
         n = length
-        e = self.exposed
+        e = self.exposed if exposed_count is None else exposed_count
         d = self.dim
         r = self.value_operators
         slot_cost = b * e * n * d + b * e * r * d * d
         effective_cost = b * e * n * d + e * r * d * d + b * e * d * d
-        palette_cost = (
-            b * n * r * d * d
-            + b * e * n * r * d
-            + b * e * n * d
-        )
+        palette_cost = b * n * r * d * d + b * e * n * r * d + b * e * n * d
         costs = {
             "slot": slot_cost,
             "palette": palette_cost,
@@ -488,7 +525,12 @@ class UnFold(nn.Module):
         # established slot path.
         return candidate if costs[candidate] * 4 <= slot_cost * 3 else "slot"
 
-    def _can_use_triton_palette(self, x: Tensor) -> bool:
+    def _can_use_triton_palette(
+        self,
+        x: Tensor,
+        exposed_count: int | None = None,
+    ) -> bool:
+        active = self.exposed if exposed_count is None else exposed_count
         compiler = getattr(torch, "compiler", None)
         is_compiling = bool(compiler is not None and compiler.is_compiling())
         if (
@@ -500,7 +542,7 @@ class UnFold(nn.Module):
             or self.value_rank is not None
             or self.query_chunk_size is not None
             or self.dim < 128
-            or self.exposed < 128
+            or active < 128
             or x.shape[1] > 128
             or self.value_operators > 16
         ):
@@ -512,29 +554,60 @@ class UnFold(nn.Module):
             return False
         return _triton_palette_is_available()
 
-    def _select_operator_schedule(self, x: Tensor) -> str:
+    def _can_use_triton_fused(
+        self,
+        x: Tensor,
+        exposed_count: int | None = None,
+    ) -> bool:
+        if not self._can_use_triton_palette(x, exposed_count) or self.dim > 256:
+            return False
+        # The fused query keeps a complete token-by-feature tile resident.
+        # FP32 N=128,D=256 exceeds the measured 101 KiB shared-memory limit
+        # on the RTX 5070 Ti; the established palette path remains available.
+        return x.dtype != torch.float32 or x.shape[1] <= 64
+
+    def _select_operator_schedule(
+        self,
+        x: Tensor,
+        exposed_count: int | None = None,
+    ) -> str:
         if self._operator_schedule == "auto":
-            return "palette_triton" if self._can_use_triton_palette(x) else "slot"
+            if self._can_use_triton_fused(x, exposed_count):
+                return "fused_triton"
+            return "palette_triton" if self._can_use_triton_palette(x, exposed_count) else "slot"
         if self._operator_schedule not in {
             "slot",
             "palette",
             "effective",
             "palette_triton",
+            "fused_triton",
         }:
-            raise RuntimeError(
-                f"invalid private operator schedule: {self._operator_schedule!r}"
-            )
-        if self._operator_schedule == "palette_triton" and not self._can_use_triton_palette(x):
+            raise RuntimeError(f"invalid private operator schedule: {self._operator_schedule!r}")
+        if self._operator_schedule == "palette_triton" and not self._can_use_triton_palette(
+            x, exposed_count
+        ):
             raise RuntimeError("private Triton palette schedule is unavailable for this input")
+        if self._operator_schedule == "fused_triton" and not self._can_use_triton_fused(
+            x, exposed_count
+        ):
+            raise RuntimeError("private fused Triton schedule is unavailable for this input")
         return self._operator_schedule
 
-    def _query_exposed(self, x: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
-        schedule = self._select_operator_schedule(x)
+    def _query_exposed(
+        self,
+        x: Tensor,
+        mask: Tensor,
+        exposed_count: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        active = self.exposed if exposed_count is None else exposed_count
+        schedule = self._select_operator_schedule(x, active)
+        if schedule == "fused_triton":
+            return self._query_exposed_triton_fused(x, mask, active)
         if schedule == "palette_triton":
-            return self._query_exposed_triton_palette(x, mask)
+            return self._query_exposed_triton_palette(x, mask, active)
         if schedule == "palette":
-            return self._query_exposed_palette(x, mask)
-        attended = self._query_context(x, mask)
+            return self._query_exposed_palette(x, mask, active)
+        attended = self._query_context(x, mask, active)
         if schedule == "effective":
             if self.value_rank is not None:
                 raise RuntimeError("effective schedule requires a full operator bank")
@@ -634,11 +707,31 @@ class UnFold(nn.Module):
             return self._auction_matching(logits)
         return self._greedy_matching(logits)
 
+    def _resolve_exposed_count(
+        self,
+        *,
+        length: int,
+        target_length: int | None,
+    ) -> int:
+        if target_length is None:
+            return self.exposed
+        if isinstance(target_length, bool) or not isinstance(target_length, int):
+            raise ValueError("target_length must be an integer")
+        active = target_length - length
+        if active <= 0:
+            raise ValueError("target_length must be greater than the input length")
+        if active > self.exposed:
+            raise ValueError(
+                f"target_length requires {active} exposed slots, but this UnFold "
+                f"was initialized with capacity exposed={self.exposed}"
+            )
+        return active
     def forward(
         self,
         x: Tensor,
         mask: Tensor | None = None,
         *,
+        target_length: int | None = None,
         guide: Tensor | None = None,
         exposed_guide: Tensor | None = None,
         exposed_mask: Tensor | None = None,
@@ -653,6 +746,10 @@ class UnFold(nn.Module):
         length, dim = x.shape[-2:]
         if length == 0:
             raise ValueError("x sequence length must be positive")
+        active_exposed = self._resolve_exposed_count(
+            length=length,
+            target_length=target_length,
+        )
         if dim != self.dim:
             raise ValueError(f"x feature dimension {dim} does not match dim={self.dim}")
         if x.device != self.exposed_bias.device or x.dtype != self.exposed_bias.dtype:
@@ -674,12 +771,12 @@ class UnFold(nn.Module):
                 raise ValueError("guide must be a floating-point tensor")
             if guide.device != x.device:
                 raise ValueError("guide and x must be on the same device")
-            if not torch.isfinite(guide).all():
+            if self.validate_values and not torch.isfinite(guide).all():
                 raise ValueError("guide must contain only finite values")
         if exposed_guide is not None:
             if self.layout_mode != "canonical":
                 raise ValueError("exposed_guide is only supported by canonical layout")
-            expected_exposed_guide_shape = (*leading_shape, self.exposed, 1)
+            expected_exposed_guide_shape = (*leading_shape, active_exposed, 1)
             if exposed_guide.shape != expected_exposed_guide_shape:
                 raise ValueError(
                     f"exposed_guide must have shape {list(expected_exposed_guide_shape)}"
@@ -688,10 +785,10 @@ class UnFold(nn.Module):
                 raise ValueError("exposed_guide must be a floating-point tensor")
             if exposed_guide.device != x.device:
                 raise ValueError("exposed_guide and x must be on the same device")
-            if not torch.isfinite(exposed_guide).all():
+            if self.validate_values and not torch.isfinite(exposed_guide).all():
                 raise ValueError("exposed_guide must contain only finite values")
         if exposed_mask is not None:
-            expected_exposed_mask_shape = (*leading_shape, self.exposed)
+            expected_exposed_mask_shape = (*leading_shape, active_exposed)
             if exposed_mask.shape != expected_exposed_mask_shape:
                 raise ValueError(
                     f"exposed_mask must have shape {list(expected_exposed_mask_shape)}"
@@ -713,7 +810,7 @@ class UnFold(nn.Module):
                 raise ValueError("condition must be a floating-point tensor")
             if condition.device != x.device:
                 raise ValueError("condition and x must be on the same device")
-            if not torch.isfinite(condition).all():
+            if self.validate_values and not torch.isfinite(condition).all():
                 raise ValueError("condition must contain only finite values")
 
         flat_x = x.reshape(-1, length, dim)
@@ -723,13 +820,17 @@ class UnFold(nn.Module):
             if mask is None
             else mask.reshape(batch, length)
         )
-        exposed, attended = self._query_exposed(flat_x, flat_mask)
+        exposed, attended = self._query_exposed(
+            flat_x,
+            flat_mask,
+            active_exposed,
+        )
         candidates = torch.cat((flat_x, exposed), dim=1)
         valid_sample = flat_mask.any(dim=1, keepdim=True)
         flat_exposed_mask = (
-            torch.ones(batch, self.exposed, dtype=torch.bool, device=x.device)
+            torch.ones(batch, active_exposed, dtype=torch.bool, device=x.device)
             if exposed_mask is None
-            else exposed_mask.reshape(batch, self.exposed)
+            else exposed_mask.reshape(batch, active_exposed)
         )
         flat_exposed_mask = flat_exposed_mask & valid_sample
         candidate_mask = torch.cat((flat_mask, flat_exposed_mask), dim=1)
@@ -754,21 +855,20 @@ class UnFold(nn.Module):
                 guide.reshape(batch, length, 1).to(x.dtype), flat_mask
             ).squeeze(-1)
             if exposed_guide is not None:
-                exposed_scores = exposed_guide.reshape(batch, self.exposed).to(x.dtype)
+                exposed_scores = exposed_guide.reshape(batch, active_exposed).to(x.dtype)
             else:
                 assert self.exposed_coordinate is not None
-                query_identity = self.exposed_queries.to(x.dtype).unsqueeze(0).expand(
-                    batch, -1, -1
+                query_identity = (
+                    self.exposed_queries[:active_exposed]
+                    .to(x.dtype)
+                    .unsqueeze(0)
+                    .expand(batch, -1, -1)
                 )
                 coordinate_parts = [attended, query_identity]
                 if flat_condition is not None:
-                    coordinate_parts.append(
-                        flat_condition[:, None].expand(-1, self.exposed, -1)
-                    )
+                    coordinate_parts.append(flat_condition[:, None].expand(-1, active_exposed, -1))
                 exposed_scores = 3.0 * torch.tanh(
-                    self.exposed_coordinate(
-                        torch.cat(coordinate_parts, dim=-1)
-                    ).squeeze(-1)
+                    self.exposed_coordinate(torch.cat(coordinate_parts, dim=-1)).squeeze(-1)
                 )
             rank_scores = torch.cat((original_scores, exposed_scores), dim=1)
             invalid_rank = (
@@ -779,9 +879,7 @@ class UnFold(nn.Module):
             rank_scores = torch.where(candidate_mask, rank_scores, invalid_rank)
             source = torch.argsort(rank_scores, dim=-1, stable=True)
             soft_layout = (
-                self._soft_rank_layout(rank_scores)
-                if self.training or return_soft_layout
-                else None
+                self._soft_rank_layout(rank_scores) if self.training or return_soft_layout else None
             )
         else:
             valid_weight = flat_mask.to(flat_x.dtype)
@@ -799,20 +897,17 @@ class UnFold(nn.Module):
                     normalized_guide = self._normalize_guide(flat_guide, flat_mask)
                     assert self.exposed_guide is not None
                     learned_exposed_guide = (
-                        self.exposed_guide.to(x.dtype)
+                        self.exposed_guide[:active_exposed]
+                        .to(x.dtype)
                         .unsqueeze(0)
                         .expand(batch, -1, -1)
                     )
-                    candidate_guide = torch.cat(
-                        (normalized_guide, learned_exposed_guide), dim=1
-                    )
+                    candidate_guide = torch.cat((normalized_guide, learned_exposed_guide), dim=1)
                 layout_parts.append(self.guide_proj(candidate_guide))
             if self.condition_proj is not None:
                 assert flat_condition is not None
                 projected_condition = self.condition_proj(flat_condition)
-                layout_parts.append(
-                    projected_condition[:, None].expand(-1, total, -1)
-                )
+                layout_parts.append(projected_condition[:, None].expand(-1, total, -1))
             layout_input = torch.cat(layout_parts, dim=-1)
             candidate_keys = F.normalize(self.layout_score(layout_input), dim=-1)
             if self.hard_backend == "sort":
@@ -837,9 +932,7 @@ class UnFold(nn.Module):
                 logits = torch.where(candidate_mask[:, None], logits, invalid_preference)
                 source = self._hard_matching(logits)
                 soft_layout = (
-                    self._soft_layout(logits)
-                    if self.training or return_soft_layout
-                    else None
+                    self._soft_layout(logits) if self.training or return_soft_layout else None
                 )
         gather_index = source[..., None].expand(-1, -1, dim)
         hard = candidates.gather(1, gather_index)
@@ -865,6 +958,7 @@ class UnFold(nn.Module):
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
     def extra_repr(self) -> str:
+        validation = ", validate_values=True" if self.validate_values else ""
         return (
             f"dim={self.dim}, exposed={self.exposed}, guide_dim={self.guide_dim}, "
             f"condition_dim={self.condition_dim}, hidden_dim={self.hidden_dim}, "
@@ -873,7 +967,7 @@ class UnFold(nn.Module):
             f"layout_mode={self.layout_mode!r}, value_operators={self.value_operators}, "
             f"value_rank={self.value_rank}, "
             f"query_chunk_size={self.query_chunk_size}, "
-            f"operator_chunk_size={self.operator_chunk_size}"
+            f"operator_chunk_size={self.operator_chunk_size}{validation}"
         )
 
 
@@ -1229,6 +1323,349 @@ class LearnedPulse(nn.Module):
         return ", ".join(args)
 
 
+class FusionPulse(nn.Module):
+    """Fuse several compact Pulse workspaces into one fixed-size workspace.
+
+    Inputs may be a uniform tensor ``[B, S, N, D]`` or a sequence of
+    ``[B, N_i, D]`` tensors. The module concatenates the source workspaces,
+    learns feature-wise salience in their joint context, applies ``Half``, and
+    queries one shared ``UnFold`` for ``k`` output pulses.
+
+    ``return_info=True`` exposes a label-free ``structural_loss`` that balances
+    redundancy pressure with neighborhood support and representative retention.
+    Add that scalar to the task loss when the balanced behavior is desired.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        dim: int,
+        *,
+        hidden_dim: int | None = None,
+        salience_heads: int = 1,
+        half_threshold: float = 4.0,
+        salience_scale: float = 8.0,
+        similarity_threshold: float = 0.8,
+        representative_target: float = 0.9,
+        redundancy_weight: float = 0.3,
+        support_weight: float = 0.5,
+        representative_weight: float = 1.0,
+        value_operators: int = 4,
+        value_rank: int | None = None,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        if k <= 0:
+            raise ValueError("k must be positive")
+        if dim <= 0:
+            raise ValueError("dim must be positive")
+        if salience_heads <= 0 or dim % salience_heads != 0:
+            raise ValueError("salience_heads must be positive and divide dim")
+        if half_threshold <= 0:
+            raise ValueError("half_threshold must be positive")
+        if salience_scale <= half_threshold:
+            raise ValueError("salience_scale must be greater than half_threshold")
+        if not 0.0 <= similarity_threshold < 1.0:
+            raise ValueError("similarity_threshold must be in the interval [0, 1)")
+        if not 0.0 < representative_target <= 1.0:
+            raise ValueError("representative_target must be in the interval (0, 1]")
+        weights = (redundancy_weight, support_weight, representative_weight)
+        if any(weight < 0 or not math.isfinite(weight) for weight in weights):
+            raise ValueError("structural loss weights must be finite and non-negative")
+        if eps <= 0 or not math.isfinite(eps):
+            raise ValueError("eps must be finite and positive")
+
+        hidden = 2 * dim if hidden_dim is None else int(hidden_dim)
+        if hidden <= 0:
+            raise ValueError("hidden_dim must be positive")
+        self.k = int(k)
+        self.dim = int(dim)
+        self.hidden_dim = hidden
+        self.salience_heads = int(salience_heads)
+        self.half_threshold = float(half_threshold)
+        self.salience_scale = float(salience_scale)
+        self.similarity_threshold = float(similarity_threshold)
+        self.representative_target = float(representative_target)
+        self.redundancy_weight = float(redundancy_weight)
+        self.support_weight = float(support_weight)
+        self.representative_weight = float(representative_weight)
+        self.eps = float(eps)
+
+        self.context = nn.MultiheadAttention(
+            dim,
+            num_heads=salience_heads,
+            batch_first=True,
+        )
+        self.source_projection = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+        )
+        self.salience = nn.Sequential(
+            nn.Linear(3 * dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, dim),
+        )
+        self.half_act = Half(threshold=half_threshold)
+        self.unfold = UnFold(
+            dim=dim,
+            exposed=k,
+            condition_dim=dim,
+            value_operators=value_operators,
+            value_rank=value_rank,
+            query_chunk_size=k,
+        )
+
+    def forward(
+        self,
+        pulses: Tensor | Sequence[Tensor],
+        *,
+        mask: Tensor | Sequence[Tensor] | None = None,
+        return_info: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        sources = self._normalize_sources(pulses)
+        source_masks = self._normalize_masks(mask, sources)
+        x = torch.cat(sources, dim=1)
+        input_mask = torch.cat(source_masks, dim=1)
+        source_index, source_position = self._source_layout(sources, x)
+
+        normalized = self._normalize_strength(x, input_mask)
+        safe_mask = input_mask.clone()
+        invalid_sample = ~safe_mask.any(dim=1)
+        if invalid_sample.any():
+            safe_mask[invalid_sample, 0] = True
+        context, _ = self.context(
+            normalized,
+            normalized,
+            normalized,
+            key_padding_mask=~safe_mask,
+            need_weights=False,
+        )
+        valid_weight = input_mask.unsqueeze(-1).to(x.dtype)
+        context = context * valid_weight
+        source_features = self.source_projection(source_position)
+        source_features = source_features.unsqueeze(0).expand(x.shape[0], -1, -1)
+        logits = self.salience(torch.cat((normalized, context, source_features), dim=-1))
+        salience = self.salience_scale * torch.sigmoid(logits) + self.eps
+        survival = self.half_act(salience) / salience
+        survival = survival * valid_weight
+        thinned = x * survival
+
+        count = valid_weight.sum(dim=1).clamp_min(1.0)
+        condition = (thinned * valid_weight).sum(dim=1) / count
+        unfolded = self.unfold(
+            thinned,
+            mask=input_mask,
+            target_length=x.shape[1] + self.k,
+            condition=condition,
+            return_exposed_mask=True,
+        )
+        workspace, workspace_mask, exposed_mask = unfolded
+        fused = workspace[exposed_mask].reshape(x.shape[0], self.k, self.dim)
+        fused_mask = workspace_mask[exposed_mask].reshape(x.shape[0], self.k)
+        fused = fused * fused_mask.unsqueeze(-1).to(fused.dtype)
+        if not return_info:
+            return fused
+
+        redundancy, support, representative = self._structural_losses(
+            x,
+            survival,
+            input_mask,
+        )
+        structural_loss = (
+            self.redundancy_weight * redundancy
+            + self.support_weight * support
+            + self.representative_weight * representative
+        )
+        survival_count = valid_weight.expand_as(survival).sum().clamp_min(1.0)
+        valid_survival = survival.sum() / survival_count
+        info = {
+            "survival": survival,
+            "source_index": source_index,
+            "input_mask": input_mask,
+            "pulse_mask": fused_mask,
+            "redundancy_loss": redundancy,
+            "support_loss": support,
+            "representative_loss": representative,
+            "structural_loss": structural_loss,
+            "survival_mean": valid_survival.detach(),
+            "input_norm": x.norm(dim=-1).mean().detach(),
+            "pulse_norm": fused.norm(dim=-1).mean().detach(),
+        }
+        return fused, info
+
+    def concat(
+        self,
+        *pulses: Tensor,
+        masks: Tensor | Sequence[Tensor] | None = None,
+        return_info: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        """Convenience path for Pulse tensors whose slot counts may differ."""
+
+        if not pulses:
+            raise ValueError("concat requires at least one Pulse tensor")
+        return self(pulses, mask=masks, return_info=return_info)
+
+    def _normalize_sources(
+        self,
+        pulses: Tensor | Sequence[Tensor],
+    ) -> tuple[Tensor, ...]:
+        if isinstance(pulses, Tensor):
+            if pulses.ndim == 3:
+                sources = (pulses,)
+            elif pulses.ndim == 4:
+                sources = tuple(pulses.unbind(dim=1))
+            else:
+                raise ValueError("pulses must have shape [B, N, D] or [B, S, N, D]")
+        else:
+            sources = tuple(pulses)
+            if not sources:
+                raise ValueError("pulses must contain at least one source")
+        first = sources[0]
+        if not isinstance(first, Tensor) or first.ndim != 3:
+            raise ValueError("each Pulse source must have shape [B, N, D]")
+        if not first.is_floating_point():
+            raise ValueError("Pulse sources must be floating-point tensors")
+        if first.shape[1] == 0:
+            raise ValueError("Pulse sources must contain at least one slot")
+        if first.shape[-1] != self.dim:
+            raise ValueError(f"Pulse feature dimension must equal dim={self.dim}")
+        for source in sources[1:]:
+            if not isinstance(source, Tensor) or source.ndim != 3:
+                raise ValueError("each Pulse source must have shape [B, N, D]")
+            if source.shape[0] != first.shape[0] or source.shape[-1] != self.dim:
+                raise ValueError("all Pulse sources must share batch and feature dimensions")
+            if source.shape[1] == 0:
+                raise ValueError("Pulse sources must contain at least one slot")
+            if source.device != first.device or source.dtype != first.dtype:
+                raise ValueError("all Pulse sources must share device and dtype")
+        if first.device != self.unfold.exposed_bias.device:
+            raise ValueError("Pulse sources and FusionPulse must share one device")
+        if first.dtype != self.unfold.exposed_bias.dtype:
+            raise ValueError("Pulse sources and FusionPulse must share one dtype")
+        return sources
+
+    def _normalize_masks(
+        self,
+        mask: Tensor | Sequence[Tensor] | None,
+        sources: tuple[Tensor, ...],
+    ) -> tuple[Tensor, ...]:
+        if mask is None:
+            return tuple(
+                torch.ones(source.shape[:2], dtype=torch.bool, device=source.device)
+                for source in sources
+            )
+        if isinstance(mask, Tensor):
+            if len(sources) == 1 and mask.ndim in {2, 3}:
+                masks = (mask,)
+            elif mask.ndim == 3 and mask.shape[1] == len(sources):
+                if len({source.shape[1] for source in sources}) != 1:
+                    raise ValueError("a stacked mask requires equal source lengths")
+                masks = tuple(mask.unbind(dim=1))
+            else:
+                raise ValueError("mask must match the stacked Pulse source dimensions")
+        else:
+            masks = tuple(mask)
+            if len(masks) != len(sources):
+                raise ValueError("mask must provide one tensor per Pulse source")
+
+        normalized = []
+        for source, source_mask in zip(sources, masks, strict=True):
+            if not isinstance(source_mask, Tensor):
+                raise ValueError("each Pulse mask must be a tensor")
+            if source_mask.ndim == 3 and source_mask.shape[-1] == 1:
+                source_mask = source_mask.squeeze(-1)
+            if source_mask.shape != source.shape[:2]:
+                raise ValueError("each Pulse mask must have shape [B, N] or [B, N, 1]")
+            if source_mask.device != source.device:
+                raise ValueError("Pulse masks and sources must share one device")
+            if source_mask.dtype == torch.bool:
+                normalized.append(source_mask)
+                continue
+            if not source_mask.is_floating_point() or not torch.isfinite(source_mask).all():
+                raise ValueError("Pulse masks must be boolean or finite floating point")
+            normalized.append(source_mask > 0)
+        return tuple(normalized)
+
+    @staticmethod
+    def _source_layout(
+        sources: tuple[Tensor, ...],
+        like: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        count = len(sources)
+        positions = torch.zeros(1, device=like.device, dtype=like.dtype)
+        if count > 1:
+            positions = torch.linspace(-1, 1, count, device=like.device, dtype=like.dtype)
+        source_index = torch.cat(
+            [
+                torch.full((source.shape[1],), index, device=like.device, dtype=torch.long)
+                for index, source in enumerate(sources)
+            ]
+        )
+        source_position = torch.cat(
+            [positions[index].expand(source.shape[1], 1) for index, source in enumerate(sources)],
+            dim=0,
+        )
+        return source_index, source_position
+
+    def _normalize_strength(self, x: Tensor, mask: Tensor) -> Tensor:
+        weight = mask.unsqueeze(-1).to(x.dtype)
+        count = weight.sum(dim=(1, 2), keepdim=True) * x.shape[-1]
+        rms = (x.square() * weight).sum(dim=(1, 2), keepdim=True)
+        rms = (rms / count.clamp_min(1.0)).sqrt().clamp_min(self.eps)
+        return x / rms * weight
+
+    def _structural_losses(
+        self,
+        x: Tensor,
+        survival: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        normalized = F.normalize(x, dim=-1)
+        similarity = torch.bmm(normalized, normalized.transpose(1, 2)).detach()
+        similarity = torch.relu(similarity - self.similarity_threshold)
+        similarity = similarity / (1.0 - self.similarity_threshold)
+        pair_mask = mask[:, :, None] & mask[:, None, :]
+        similarity = similarity * pair_mask.to(similarity.dtype)
+        diagonal = torch.eye(
+            x.shape[1],
+            dtype=torch.bool,
+            device=x.device,
+        )[None]
+        redundancy_graph = similarity.masked_fill(diagonal, 0.0)
+        support_graph = redundancy_graph + torch.diag_embed(mask.to(x.dtype))
+        token_survival = survival.mean(dim=-1)
+
+        pair_survival = token_survival[:, :, None] * token_survival[:, None, :]
+        redundancy_numerator = (redundancy_graph * pair_survival).sum(dim=(1, 2))
+        redundancy_denominator = redundancy_graph.sum(dim=(1, 2)).clamp_min(self.eps)
+        redundancy = (redundancy_numerator / redundancy_denominator).mean()
+
+        support_value = torch.bmm(
+            support_graph,
+            token_survival.unsqueeze(-1),
+        ).squeeze(-1)
+        valid_count = mask.sum().clamp_min(1)
+        support = (torch.relu(1.0 - support_value).square() * mask.to(x.dtype)).sum() / valid_count
+        neighborhood_peak = (support_graph * token_survival[:, None, :]).amax(dim=-1)
+        representative = (
+            torch.relu(self.representative_target - neighborhood_peak).square() * mask.to(x.dtype)
+        ).sum() / valid_count
+        return redundancy, support, representative
+
+    def extra_repr(self) -> str:
+        args = [f"k={self.k}", f"dim={self.dim}"]
+        if self.hidden_dim != 2 * self.dim:
+            args.append(f"hidden_dim={self.hidden_dim}")
+        if self.salience_heads != 1:
+            args.append(f"salience_heads={self.salience_heads}")
+        if self.half_threshold != 4.0:
+            args.append(f"half_threshold={self.half_threshold:g}")
+        if self.salience_scale != 8.0:
+            args.append(f"salience_scale={self.salience_scale:g}")
+        return ", ".join(args)
+
+
 class RecallRefiner(nn.Module):
     """Alpha iterative latent recall refinement.
 
@@ -1362,7 +1799,7 @@ Pulse = LearnedPulse
 
 from .stateful_recall import StatefulRecall
 from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
-__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
+__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 
 def __getattr__(name: str):

@@ -15,6 +15,25 @@ y = layer(x)
 assert y.shape == (4, 24, 64)
 ```
 
+`exposed` is the maximum trainable expansion capacity, not a required output
+increment for every call. Use `target_length` when one shared UnFold must serve
+workspaces of different sizes:
+
+```python
+layer = UnFold(dim=64, exposed=32)
+
+single = layer(torch.randn(4, 8, 64), target_length=12)
+combined = layer(torch.randn(4, 32, 64), target_length=48)
+
+assert single.shape == (4, 12, 64)
+assert combined.shape == (4, 48, 64)
+```
+
+The active exposed count is `target_length - N` and must not exceed the
+configured capacity. Only that prefix of independent query and modulation
+parameters participates in the call. Omitting `target_length` preserves the
+default `[B, N + exposed, D]` contract.
+
 The original values are transported with a hard gather. Every input instance
 therefore occurs exactly once in the output, without averaging, interpolation,
 or projection. Their positions and adjacency are not preserved.
@@ -65,6 +84,20 @@ Chunking trades additional kernel launches for smaller temporary tensors. It
 is disabled by default for eager latency. `torch.compile(mode="reduce-overhead")`
 can substantially reduce the launch overhead for fixed deployment shapes.
 
+For CUDA inference, ARTI can automatically use an internal fused Triton path
+for the measured compact-workspace region. It computes query attention without
+materializing `[B, exposed, N]` weights and applies the complete operator bank
+without materializing `[B, exposed, operators, D]`. The optimization does not
+change parameters or the state dict. Training, gradients, `torch.compile`,
+factorized operators, unsupported dtypes and unmeasured shapes automatically
+fall back to the ordinary PyTorch path.
+
+The current automatic gate requires CUDA compute capability 8.0 or newer,
+FP32 or BF16, `128 <= D <= 256`, at least 128 exposed slots, no query chunking,
+and at most 128 compact input slots. FP32 is additionally limited to 64 input
+slots because the larger tile exceeds the measured shared-memory budget. These
+are implementation boundaries, not tensor-contract restrictions.
+
 During training, the forward result remains the exact hard layout. A soft
 layout supplies an approximate gradient to the layout scorer. The default
 `hard_backend="sort"` learns one sample-conditioned rank per candidate and
@@ -114,6 +147,15 @@ permutation, future label, or other information unavailable to the deployed
 model. ARTI treats it as an anonymous tensor and cannot determine its external
 provenance.
 
+Like standard PyTorch layers, `UnFold` always validates tensor rank, shape,
+dtype, and device, but does not scan accelerator values for NaN or infinity on
+every forward. Such a scan synchronizes CUDA and is unsuitable for a hot path.
+Use `validate_values=True` while debugging untrusted tensor pipelines:
+
+```python
+layer = UnFold(dim=64, exposed=8, guide_dim=1, validate_values=True)
+```
+
 ### Canonical guide layout
 
 Use `layout_mode="canonical"` when a one-dimensional guide is the required
@@ -148,8 +190,9 @@ a general multidimensional tensor has no intrinsic total order.
 
 ### Dynamic valid expansion
 
-`exposed_mask` controls which of the statically allocated exposed candidates
-are valid for each sample:
+`exposed_mask` controls which active exposed candidates are valid for each
+sample. Its final dimension is `target_length - N`, or `exposed` when no target
+length is supplied:
 
 ```python
 requested = torch.rand(4, 8) > 0.5
@@ -161,9 +204,9 @@ y, output_mask = layer(
 )
 ```
 
-The output shape remains `[B, N + exposed, D]`, which keeps batching and GPU
-execution predictable. Disabled exposed candidates are marked invalid and
-sorted after valid candidates. They are not given separate parameters per
-batch sample.
+The output shape is fixed for a particular call and can therefore remain
+batch-friendly while varying between calls. Disabled exposed candidates are
+marked invalid and sorted after valid candidates. They are not given separate
+parameters per batch sample.
 
 `UnFold` is unrelated to `torch.nn.Unfold`, which extracts image patches.

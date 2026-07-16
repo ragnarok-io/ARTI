@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -68,11 +69,6 @@ def test_fold_accepts_q_with_trailing_dimension() -> None:
 
 def test_fold_accepts_mask_separately_from_q() -> None:
     fold = arti_nn.Fold(k=2, dim=3)
-    with torch.no_grad():
-        fold.assignment.weight.zero_()
-        fold.assignment.bias.zero_()
-        fold.salience.weight.zero_()
-        fold.salience.bias.zero_()
     x = torch.zeros(1, 4, 3)
     x[:, 0] = torch.tensor([9.0, 0.0, 0.0])
     mask_off = torch.tensor([[0.0, 1.0, 1.0, 1.0]])
@@ -137,6 +133,12 @@ def test_fold_works_with_conv1d_and_flatten_mlp() -> None:
     assert conv_out.shape == (2, 8, 4)
     assert mlp_out.shape == (2, 5)
     assert x.grad is not None
+
+
+@pytest.mark.parametrize("temperature", [float("nan"), float("inf")])
+def test_fold_rejects_nonfinite_temperature(temperature: float) -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        arti_nn.Fold(k=2, temperature=temperature)
 
 
 def test_fold_public_namespaces() -> None:

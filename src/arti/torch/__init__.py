@@ -51,7 +51,7 @@ from ..membrane import (
     membrane_public_emit_mask,
 )
 from ..models import ARTIClassifier
-from ..nn import Fold, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallRefiner, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from ..nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallRefiner, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
 from ..usage import FeatureConfig, features, layer_profiles, profile
 from ..inspection import InspectionReport, inspect
 from ..layered_recall import (
@@ -155,6 +155,7 @@ __all__ = [
     "UnFold",
     "Pulse",
     "LearnedPulse",
+    "FusionPulse",
     "RecallRefiner",
     "VisualField",
     "VisualFieldOutput",
