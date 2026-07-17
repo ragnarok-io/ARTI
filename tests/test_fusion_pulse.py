@@ -40,9 +40,43 @@ def test_fusion_pulse_accepts_variable_lengths_and_reports_layout() -> None:
     assert info["survival"].shape == (2, 10, 5)
     assert info["input_mask"].shape == (2, 10)
     assert info["pulse_mask"].shape == (2, 4)
+    assert info["workspace"].shape == (2, 14, 5)
+    assert info["workspace_mask"].shape == (2, 14)
+    assert info["unfold_source_index"].shape == (2, 14)
     assert info["source_index"].tolist() == [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
     invalid_survival = info["survival"][~info["input_mask"]]
     assert torch.equal(invalid_survival, torch.zeros_like(invalid_survival))
+
+
+def test_fusion_pulse_source_mask_and_input_change_affect_real_trace_mapping() -> None:
+    torch.manual_seed(3101)
+    fusion = FusionPulse(k=3, dim=4, hidden_dim=8).eval()
+    pulses = torch.randn(2, 4, 5, 4)
+    slot_mask = torch.ones(2, 4, 5, dtype=torch.bool)
+    source_mask = torch.tensor([[True, True, True, False], [True, False, True, True]])
+
+    _, first = fusion(
+        pulses,
+        mask=slot_mask,
+        source_mask=source_mask,
+        return_info=True,
+    )
+    changed = pulses.clone()
+    changed[:, 1] = changed[:, 1].flip(1) * 4.0
+    _, second = fusion(
+        changed,
+        mask=slot_mask,
+        source_mask=source_mask,
+        return_info=True,
+    )
+
+    assert not first["input_mask"][0, 15:].any()
+    assert not first["input_mask"][1, 5:10].any()
+    assert not torch.equal(first["survival"], second["survival"])
+    assert not torch.equal(
+        first["unfold_source_index"],
+        second["unfold_source_index"],
+    )
 
 
 def test_fusion_pulse_structural_loss_backpropagates() -> None:

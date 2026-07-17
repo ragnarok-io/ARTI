@@ -39,6 +39,33 @@ await layer.dispose();
 caller-owned preallocated buffers. Public failures use `ArtiWebError` with a
 stable code, stage, artifact URL, device, and tensor-contract context.
 
+## Inspectable Runs
+
+Python exports inspectable artifacts from the module's real
+`forward(..., return_info=True)` result. The manifest names each selected
+tensor and declares its dtype, logical type, role, dynamic axes, byte budget,
+and numerical tolerance. The browser runtime treats those fields as a generic
+contract; it does not reproduce ARTI mechanism logic.
+
+```ts
+const result = await layer.inspect(
+  {pulses, mask, source_mask},
+  {
+    outputs: ['fused', 'survival', 'workspace'],
+    signal: abortController.signal,
+  },
+);
+
+console.log(result.device, result.timings.inferenceMs);
+const {survival} = await result.download(['survival']);
+await result.dispose();
+```
+
+`inspect()` asks ONNX Runtime to fetch only the selected Python-declared
+outputs. On WebGPU, retained tensors remain GPU-resident until `download()` is
+called. Every result must be disposed explicitly; disposing the parent module
+also expires and releases all retained or in-flight inspect results.
+
 Each Python v2 export also writes `artifact.ts`. Its input and output property
 names come directly from the hashed manifest, so single-input artifacts expose
 a typed `forward()` client and named multi-input artifacts expose typed
@@ -86,18 +113,31 @@ with the current Python package.
 ## Module Worker
 
 A minimal native module Worker example starts at
-[`examples/worker/main.ts`](./examples/worker/main.ts). The main thread sends named float32
+[`examples/worker/main.ts`](https://github.com/ragnarok-io/ARTI/tree/main/packages/web/examples/worker). The main thread sends named float32
 inputs as `{data: ArrayBuffer, dims}` and includes each buffer in the
 `postMessage` transfer list. The Worker constructs `Tensor` values, loads an
 artifact with `loadArti`, calls `run`, downloads every result to CPU, and
 transfers the result buffers back.
 
-The protocol supports `load`, `run`, `dispose`, and `cancel`, with structured
-error responses. Cancellation is cooperative: ONNX Runtime inference already
-in progress may finish inside the Worker, but its late result is suppressed and
-disposed. Only CPU `ArrayBuffer` values cross the thread boundary. A WebGPU
-`Tensor` and its `GPUBuffer` remain Worker-owned and must never be posted to the
-main thread.
+The transferable protocol helpers are part of the npm API:
+
+```ts
+import {
+  requestTransfers,
+  tensorMessage,
+  type WorkerRequest,
+  type WorkerResponse,
+} from '@arti-fit/web';
+```
+
+The protocol supports `load`, `run`, `inspect`, `dispose`, and `cancel`, with
+structured error responses. `load` returns the Python-owned manifest so a UI
+can select outputs by their declared roles. `inspect` returns only the requested
+CPU `ArrayBuffer` values plus device and timing metadata; float32, bool, and
+int64 tensors retain their declared dtypes. Cancellation is cooperative: ONNX
+Runtime inference already in progress may finish inside the Worker, but its late
+result is suppressed and disposed. A WebGPU `Tensor`, `GPUBuffer`, and
+`OwnedRunResult` remain Worker-owned and must never be posted to the main thread.
 
 Create the Worker through a bundler that supports `new URL(..., import.meta.url)`:
 

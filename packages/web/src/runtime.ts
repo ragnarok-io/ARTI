@@ -2,10 +2,10 @@ import * as ort from 'onnxruntime-web/webgpu';
 
 import { parseLock, parseManifest, sha256, verifyFile } from './artifact.js';
 import {ArtiWebError, sanitizeArtifactUrl} from './errors.js';
-import type { ActiveARTIDevice, ARTIWebManifest, TensorContract } from './generated/contract.js';
+import type { ActiveARTIDevice, ARTIWebManifest, TensorContract, TensorDType } from './generated/contract.js';
 import {fromCPU, isCPUTensor, toCPU} from './tensor.js';
 import {summarizeDiagnosticError, type LoadAttemptDiagnostic, type LoadDiagnostics, type LoadProgressCallback, type LoadStage} from './diagnostics.js';
-import type {CPUTensor, LoadArtiOptions, OperationOptions, TensorInput, TensorMap} from './types.js';
+import type {CPUTensor, InspectedCPUTensor, InspectOptions, LoadArtiOptions, OperationOptions, RunTimings, TensorInput, TensorMap} from './types.js';
 
 const MANIFEST = 'arti-web.json';
 const MODEL = 'model.onnx';
@@ -14,6 +14,59 @@ const LOCK = 'arti-web.lock.json';
 const MAX_METADATA_BYTES = 1024 * 1024;
 const DEFAULT_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
+/** Owns the tensors produced by one inspectable ORT run. */
+export class OwnedRunResult {
+  readonly outputs: Readonly<TensorMap>;
+  readonly timings: Readonly<RunTimings>;
+  readonly device: ActiveARTIDevice;
+  private readonly contracts: ReadonlyMap<string, TensorContract>;
+  private readonly downloads = new Set<Promise<unknown>>();
+  private readonly onDisposed: () => void;
+  private disposing = false;
+  private disposePromise: Promise<void> | null = null;
+
+  /** @internal */
+  constructor(outputs: TensorMap, contracts: TensorContract[], device: ActiveARTIDevice, timings: RunTimings, onDisposed: () => void) {
+    this.outputs = Object.freeze({...outputs});
+    this.contracts = new Map(contracts.map((contract) => [contract.name, contract]));
+    this.device = device;
+    this.timings = Object.freeze({...timings});
+    this.onDisposed = onDisposed;
+  }
+
+  /** Download only the named retained outputs. Omit names to download all retained outputs. */
+  async download(outputs?: readonly string[]): Promise<Record<string, InspectedCPUTensor>> {
+    if (this.disposing) throw new ArtiWebError('ARTI inspect result has expired', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+    const names = selectNames(outputs, [...this.contracts.keys()], 'retained inspect output');
+    const operation = (async () => {
+      const result: Record<string, InspectedCPUTensor> = {};
+      for (const name of names) {
+        const tensor = this.outputs[name];
+        const contract = this.contracts.get(name);
+        if (!tensor || !contract) throw new ArtiWebError(`${name} is not retained by this inspect result`, {code: 'CONTRACT_MISMATCH', stage: 'output', tensorName: name, device: this.device});
+        result[name] = await downloadTensor(tensor, contract.dtype);
+      }
+      if (this.disposing) throw new ArtiWebError('ARTI inspect result expired while downloading', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+      return result;
+    })();
+    this.downloads.add(operation);
+    try { return await operation; }
+    finally { this.downloads.delete(operation); }
+  }
+
+  /** Release every retained ORT tensor. Calling it more than once is safe. */
+  async dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposing = true;
+    this.disposePromise = (async () => {
+      await Promise.allSettled([...this.downloads]);
+      disposeUnique(this.outputs as TensorMap);
+      this.onDisposed();
+    })();
+    return this.disposePromise;
+  }
+}
+
 /** A generic executor for a Python-exported ARTI graph. */
 export class ARTIWebModule {
   readonly manifest: ARTIWebManifest;
@@ -21,8 +74,10 @@ export class ARTIWebModule {
   readonly diagnostics: LoadDiagnostics;
   private session: ort.InferenceSession | null;
   private readonly inFlight = new Set<Promise<unknown>>();
+  private readonly ownedResults = new Set<OwnedRunResult>();
   private disposing = false;
   private disposePromise: Promise<void> | null = null;
+  private lifecycleEpoch = 0;
 
   /** @internal */
   constructor(session: ort.InferenceSession, manifest: ARTIWebManifest, device: ActiveARTIDevice, diagnostics?: LoadDiagnostics) {
@@ -52,6 +107,58 @@ export class ARTIWebModule {
     this.inFlight.add(operation);
     try { return await operation; }
     finally { this.inFlight.delete(operation); }
+  }
+
+  /** Execute Python-exported outputs and retain them until the result is disposed. */
+  async inspect(inputs: TensorMap, options: InspectOptions = {}): Promise<OwnedRunResult> {
+    throwIfOperationAborted(options.signal, this.device);
+    if (this.disposing || !this.session) throw new ArtiWebError('ARTI Web module has been disposed', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+    const session = this.session;
+    const epoch = this.lifecycleEpoch;
+    const symbols = new Map<string, number>();
+    const feeds = validateTensorMap(inputs, this.manifest.inputs, symbols, 'input');
+    const outputNames = selectNames(options.outputs, this.manifest.outputs.map((contract) => contract.name), 'artifact output');
+    const contracts = outputNames.map((name) => this.manifest.outputs.find((contract) => contract.name === name)!);
+    const operation = this.inspectOperation(session, feeds, contracts, symbols, options.signal, epoch);
+    this.inFlight.add(operation);
+    try { return await operation; }
+    finally { this.inFlight.delete(operation); }
+  }
+
+  private async inspectOperation(
+    session: ort.InferenceSession,
+    feeds: TensorMap,
+    contracts: TensorContract[],
+    symbols: Map<string, number>,
+    signal: AbortSignal | undefined,
+    epoch: number,
+  ): Promise<OwnedRunResult> {
+    const startedAt = now();
+    let results: TensorMap | undefined;
+    try {
+      results = await session.run(feeds, contracts.map((contract) => contract.name));
+      const finishedAt = now();
+      if (signal?.aborted) throw operationAbortError(signal, this.device);
+      if (this.disposing || this.lifecycleEpoch !== epoch || !this.session) throw new ArtiWebError('ARTI inspect run expired before ownership transfer', {code: 'DISPOSED', stage: 'disposed', device: this.device});
+      validateSelectedOutputs(results, contracts, symbols, this.device);
+      let owned!: OwnedRunResult;
+      owned = new OwnedRunResult(
+        results,
+        contracts,
+        this.device,
+        {startedAt, finishedAt, inferenceMs: finishedAt - startedAt},
+        () => this.ownedResults.delete(owned),
+      );
+      this.ownedResults.add(owned);
+      results = undefined;
+      return owned;
+    } catch (error) {
+      if (signal?.aborted && !(error instanceof ArtiWebError && error.code === 'ABORTED')) throw operationAbortError(signal, this.device, error);
+      if (error instanceof ArtiWebError) throw error;
+      throw new ArtiWebError('ARTI inspect inference failed', {code: 'INFERENCE_FAILED', stage: 'execution', device: this.device, cause: error});
+    } finally {
+      if (results) disposeUnique(results);
+    }
   }
 
   /** Convenience path for artifacts with exactly one input and one output. */
@@ -113,10 +220,12 @@ export class ARTIWebModule {
   async dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposing = true;
+    this.lifecycleEpoch += 1;
     const session = this.session;
     this.session = null;
     this.disposePromise = (async () => {
       await Promise.allSettled([...this.inFlight]);
+      await Promise.allSettled([...this.ownedResults].map((result) => result.dispose()));
       if (session) await session.release();
     })();
     return this.disposePromise;
@@ -271,6 +380,24 @@ export function requireMatchingFileSets(manifestFiles: Record<string, unknown>, 
 }
 function disposeUnique(values: TensorMap): void { for (const tensor of new Set(Object.values(values))) tensor.dispose(); }
 
+function selectNames(requested: readonly string[] | undefined, available: readonly string[], kind: string): string[] {
+  if (requested === undefined) return [...available];
+  if (requested.length === 0) throw new ArtiWebError(`inspect ${kind} selection cannot be empty`, {code: 'CONTRACT_MISMATCH', stage: 'output', expected: available, actual: requested});
+  const names = [...requested];
+  if (new Set(names).size !== names.length) throw new ArtiWebError(`inspect ${kind} selection contains duplicates`, {code: 'CONTRACT_MISMATCH', stage: 'output', expected: available, actual: names});
+  const known = new Set(available);
+  for (const name of names) if (!known.has(name)) throw new ArtiWebError(`${name} is not a declared ${kind}`, {code: 'CONTRACT_MISMATCH', stage: 'output', tensorName: name, expected: available, actual: name});
+  return names;
+}
+
+function validateSelectedOutputs(outputs: TensorMap, contracts: TensorContract[], symbols: Map<string, number>, device: ActiveARTIDevice): void {
+  for (const contract of contracts) {
+    const tensor = outputs[contract.name];
+    if (!tensor) throw new ArtiWebError(`ARTI Web runtime did not produce ${contract.name}`, {code: 'CONTRACT_MISMATCH', stage: 'output', tensorName: contract.name, device});
+    validateTensor(tensor, contract, symbols, 'output');
+  }
+}
+
 function validateTensorMap(values: TensorMap, contracts: TensorContract[], symbols: Map<string, number>, kind: string): TensorMap {
   const expected = new Set(contracts.map((contract) => contract.name));
   for (const name of Object.keys(values)) if (!expected.has(name)) throw tensorContractError(`${name} is not declared as an ARTI Web ${kind}`, name, [...expected], name, kind);
@@ -278,25 +405,56 @@ function validateTensorMap(values: TensorMap, contracts: TensorContract[], symbo
   for (const contract of contracts) {
     const tensor = values[contract.name];
     if (!tensor) throw tensorContractError(`${contract.name} is required by this ARTI Web artifact`, contract.name, contract, undefined, kind);
-    validateTensor(tensor, contract, symbols);
+    validateTensor(tensor, contract, symbols, kind);
     resolved[contract.name] = tensor;
   }
   return resolved;
 }
 
-function validateTensor(tensor: ort.Tensor, contract: TensorContract, symbols: Map<string, number>): void {
-  if (tensor.type !== contract.dtype) throw tensorContractError(`${contract.name} must use ${contract.dtype}, got ${tensor.type}`, contract.name, contract.dtype, tensor.type, 'input');
-  if (tensor.dims.length !== contract.shape.length) throw tensorContractError(`${contract.name} rank does not match its artifact contract`, contract.name, contract.shape.length, tensor.dims.length, 'input');
+function validateTensor(tensor: ort.Tensor, contract: TensorContract, symbols: Map<string, number>, kind: string): void {
+  if (tensor.type !== contract.dtype) throw tensorContractError(`${contract.name} must use ${contract.dtype}, got ${tensor.type}`, contract.name, contract.dtype, tensor.type, kind);
+  if (tensor.dims.length !== contract.shape.length) throw tensorContractError(`${contract.name} rank does not match its artifact contract`, contract.name, contract.shape.length, tensor.dims.length, kind);
   contract.shape.forEach((expected, index) => {
     const actual = tensor.dims[index];
-    if (actual === undefined) throw tensorContractError(`${contract.name} is missing dimension ${index}`, contract.name, expected, actual, 'input');
-    if (typeof expected === 'number' && expected !== actual) throw tensorContractError(`${contract.name} dimension ${index} must be ${expected}, got ${actual}`, contract.name, expected, actual, 'input');
+    if (actual === undefined) throw tensorContractError(`${contract.name} is missing dimension ${index}`, contract.name, expected, actual, kind);
+    if (typeof expected === 'number' && expected !== actual) throw tensorContractError(`${contract.name} dimension ${index} must be ${expected}, got ${actual}`, contract.name, expected, actual, kind);
     if (typeof expected === 'string') {
       const previous = symbols.get(expected);
-      if (previous !== undefined && previous !== actual) throw tensorContractError(`${contract.name} dimension ${index} conflicts with dynamic axis ${expected}`, contract.name, previous, actual, 'input');
+      if (previous !== undefined && previous !== actual) throw tensorContractError(`${contract.name} dimension ${index} conflicts with dynamic axis ${expected}`, contract.name, previous, actual, kind);
       symbols.set(expected, actual);
     }
   });
+  const bytes = tensorBytes(tensor, contract.dtype, kind);
+  if (contract.max_bytes !== undefined && bytes > contract.max_bytes) throw tensorContractError(`${contract.name} requires ${bytes} bytes, exceeding its declared budget`, contract.name, contract.max_bytes, bytes, kind);
+}
+
+function tensorBytes(tensor: ort.Tensor, dtype: TensorDType, kind: string): number {
+  let elements = 1;
+  for (const dim of tensor.dims) {
+    elements *= dim;
+    if (!Number.isSafeInteger(elements)) throw tensorContractError('tensor element count exceeds safe integer bounds', '', 'safe integer', elements, kind);
+  }
+  const bytes = elements * (dtype === 'int64' ? 8 : dtype === 'bool' ? 1 : 4);
+  if (!Number.isSafeInteger(bytes)) throw tensorContractError('tensor byte size exceeds safe integer bounds', '', 'safe integer', bytes, kind);
+  return bytes;
+}
+
+async function downloadTensor(tensor: ort.Tensor, dtype: TensorDType): Promise<InspectedCPUTensor> {
+  const raw = await tensor.getData();
+  let data: InspectedCPUTensor['data'];
+  if (dtype === 'float32' && raw instanceof Float32Array) data = Float32Array.from(raw);
+  else if (dtype === 'bool' && raw instanceof Uint8Array) data = Uint8Array.from(raw);
+  else if (dtype === 'int64' && raw instanceof BigInt64Array) data = BigInt64Array.from(raw);
+  else throw new ArtiWebError(`ORT returned an unexpected ${dtype} data representation`, {code: 'CONTRACT_MISMATCH', stage: 'output', expected: dtype, actual: raw.constructor.name});
+  return {type: dtype, data, dims: [...tensor.dims]};
+}
+
+function now(): number { return globalThis.performance?.now() ?? Date.now(); }
+function operationAbortError(signal: AbortSignal, device: ActiveARTIDevice, cause: unknown = signal.reason): ArtiWebError {
+  return new ArtiWebError('ARTI inspect operation was aborted', {code: 'ABORTED', stage: 'execution', device, cause});
+}
+function throwIfOperationAborted(signal: AbortSignal | undefined, device: ActiveARTIDevice): void {
+  if (signal?.aborted) throw operationAbortError(signal, device);
 }
 
 function requireSingle(contracts: TensorContract[], kind: string): [TensorContract] {

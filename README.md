@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.6.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.7.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -224,6 +224,13 @@ tensor factories, structured errors, cancellable loading, Python-generated
 artifact-specific TypeScript clients, and a native module Worker example.
 The low-level `run()` API remains available for GPU-resident and preallocated
 tensor workflows.
+
+Inspectable exports flatten tensors from the module's real
+`forward(..., return_info=True)` result into Python-declared ONNX outputs.
+`module.inspect(...)` selectively retains and downloads those outputs while
+reporting device and timing metadata through an explicitly disposable result.
+JavaScript treats workspace, diagnostic, mask, and index labels as contract
+metadata; it does not implement their ARTI semantics.
 
 Stateful Recall can be exported as paired read/update artifact v3 graphs and
 loaded with `loadArtiStateful(...)`. Model parameters remain read-only;

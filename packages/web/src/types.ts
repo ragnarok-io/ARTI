@@ -1,5 +1,5 @@
 import type { Tensor } from 'onnxruntime-web';
-import type { ActiveARTIDevice } from './generated/contract.js';
+import type { ActiveARTIDevice, TensorDType } from './generated/contract.js';
 import type {LoadProgressCallback} from './diagnostics.js';
 
 export type ARTIDevice = 'auto' | ActiveARTIDevice;
@@ -18,6 +18,25 @@ export type TensorOutput = CPUTensor;
 
 export interface OperationOptions {
   signal?: AbortSignal;
+}
+
+export interface InspectOptions extends OperationOptions {
+  /** Python-declared output names to fetch. Omit to retain every output. */
+  outputs?: readonly string[];
+}
+
+export interface RunTimings {
+  startedAt: number;
+  finishedAt: number;
+  inferenceMs: number;
+}
+
+export type InspectTensorData = Float32Array | Uint8Array | BigInt64Array;
+
+export interface InspectedCPUTensor {
+  type: TensorDType;
+  data: InspectTensorData;
+  dims: number[];
 }
 
 export interface LoadArtiOptions extends OperationOptions {

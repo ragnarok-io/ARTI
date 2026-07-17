@@ -6,11 +6,13 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
+import onnxruntime as ort
 import torch
 import torch.nn as nn
 
-from arti.nn import Fold, Half, LearnedPulse, StatefulRecall
-from arti.web import export, export_stateful_recall
+from arti.nn import Fold, FusionPulse, Half, LearnedPulse, StatefulRecall
+from arti.web import ARTIWebTensorMetadata, export, export_stateful_recall
 
 
 class GenericAffine(nn.Module):
@@ -21,8 +23,15 @@ class GenericAffine(nn.Module):
 
 
 def _tensor_payload(tensor: torch.Tensor) -> dict[str, object]:
-    value = tensor.detach().cpu().to(torch.float32).contiguous()
-    return {"dims": list(value.shape), "data": value.flatten().tolist()}
+    value = tensor.detach().cpu().contiguous()
+    dtype = {
+        torch.float32: "float32",
+        torch.bool: "bool",
+        torch.int64: "int64",
+    }.get(value.dtype)
+    if dtype is None:
+        raise ValueError(f"unsupported fixture dtype {value.dtype}")
+    return {"dtype": dtype, "dims": list(value.shape), "data": value.flatten().tolist()}
 
 
 def _run(module, inputs):
@@ -65,7 +74,131 @@ def generate(root: Path) -> None:
     _write_fixture(root, "fold-q", Fold(k=3, dim=4).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
     _write_fixture(root, "learned-pulse", LearnedPulse(k=3, dim=4, hidden_dim=6).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
     _write_fixture(root, "generic-affine", GenericAffine().eval(), {"signal": x5, "gate": q5}, {"signal": x7, "gate": q7}, {"atol": 1e-5, "rtol": 1e-5})
+    _write_fusion_pulse_fixture(root)
     _write_stateful_fixture(root)
+
+
+def _write_fusion_pulse_fixture(root: Path) -> None:
+    torch.manual_seed(240717)
+    module = FusionPulse(k=3, dim=4, hidden_dim=8).eval()
+    pulses = torch.randn(2, 4, 5, 4)
+    slot_mask = torch.ones(2, 4, 5, dtype=torch.bool)
+    slot_mask[0, 2, -1] = False
+    source_mask = torch.tensor(
+        [[True, True, True, False], [True, False, True, True]],
+        dtype=torch.bool,
+    )
+    changed = pulses.clone()
+    changed[:, 1] = changed[:, 1].flip(1) * 4.0
+    first = {"pulses": pulses, "mask": slot_mask, "source_mask": source_mask}
+    second = {"pulses": changed, "mask": slot_mask, "source_mask": source_mask}
+    with torch.inference_mode():
+        _, info = module(**first, return_info=True)
+    output_names = ["fused", *info]
+    inspect_outputs = (
+        "fused",
+        "survival",
+        "source_index",
+        "input_mask",
+        "pulse_mask",
+        "workspace",
+        "workspace_mask",
+        "unfold_source_index",
+    )
+    batch_outputs = {
+        "pulses",
+        "mask",
+        "source_mask",
+        "fused",
+        "survival",
+        "input_mask",
+        "pulse_mask",
+        "workspace",
+        "workspace_mask",
+        "unfold_source_index",
+    }
+    dynamic_axes = {name: {0: "batch"} for name in batch_outputs}
+    output_metadata = {
+        name: ARTIWebTensorMetadata(
+            role=("primary" if name == "fused" else "workspace" if name == "workspace" else "diagnostic"),
+            atol=(1e-4 if name not in {"source_index", "input_mask", "pulse_mask", "workspace_mask", "unfold_source_index"} else 0.0),
+            rtol=(1e-3 if name not in {"source_index", "input_mask", "pulse_mask", "workspace_mask", "unfold_source_index"} else 0.0),
+            max_bytes=8 * 1024 * 1024,
+        )
+        for name in output_names
+    }
+    target = root / "fusion-pulse-inspect"
+    result = export(
+        module,
+        target,
+        example_inputs=first,
+        forward_kwargs={"return_info": True},
+        output_names=output_names,
+        include_outputs=inspect_outputs,
+        input_metadata={
+            "pulses": ARTIWebTensorMetadata(max_bytes=8 * 1024 * 1024),
+            "mask": ARTIWebTensorMetadata(logical_type="mask", max_bytes=1024 * 1024),
+            "source_mask": ARTIWebTensorMetadata(logical_type="mask", max_bytes=1024 * 1024),
+        },
+        output_metadata=output_metadata,
+        dynamic_axes=dynamic_axes,
+        dynamic_batch=False,
+        dynamic_tokens=False,
+    )
+    cases = [
+        _case_with_info(module, first, inspect_outputs),
+        _case_with_info(module, second, inspect_outputs),
+    ]
+    _verify_python_ort(result.model_path, cases)
+    first_outputs = cases[0]["outputs"]
+    second_outputs = cases[1]["outputs"]
+    if first_outputs["survival"]["data"] == second_outputs["survival"]["data"]:
+        raise RuntimeError("FusionPulse fixture does not change real survival")
+    if first_outputs["unfold_source_index"]["data"] == second_outputs["unfold_source_index"]["data"]:
+        raise RuntimeError("FusionPulse fixture does not change the real UnFold source mapping")
+    payload = {"name": "fusion-pulse-inspect", "cases": cases}
+    (target / "case.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _case_with_info(
+    module: FusionPulse,
+    inputs: dict[str, torch.Tensor],
+    include_outputs: tuple[str, ...],
+) -> dict[str, object]:
+    with torch.inference_mode():
+        fused, info = module(**inputs, return_info=True)
+    all_outputs = {"fused": fused, **info}
+    return {
+        "inputs": {name: _tensor_payload(value) for name, value in inputs.items()},
+        "outputs": {
+            name: _tensor_payload(all_outputs[name]) for name in include_outputs
+        },
+    }
+
+
+def _verify_python_ort(model_path: Path, cases: list[dict[str, object]]) -> None:
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    for case in cases:
+        inputs = case["inputs"]
+        expected = case["outputs"]
+        feeds = {
+            name: _payload_numpy(payload)
+            for name, payload in inputs.items()
+        }
+        names = list(expected)
+        actual = session.run(names, feeds)
+        for name, value in zip(names, actual, strict=True):
+            payload = expected[name]
+            reference = _payload_numpy(payload)
+            if payload["dtype"] == "float32":
+                np.testing.assert_allclose(value, reference, atol=1e-4, rtol=1e-3)
+            else:
+                np.testing.assert_array_equal(value, reference)
+
+
+def _payload_numpy(payload: dict[str, object]) -> np.ndarray:
+    dtype = {"float32": np.float32, "bool": np.bool_, "int64": np.int64}[payload["dtype"]]
+    return np.asarray(payload["data"], dtype=dtype).reshape(payload["dims"])
 
 
 def _write_stateful_fixture(root: Path) -> None:

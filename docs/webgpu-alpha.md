@@ -74,6 +74,30 @@ Self-hosted and offline applications can pass `wasmPaths` or `wasmBinary` to
 `loadArti`. Applications remain responsible for serving the matching ONNX
 Runtime Web control binary.
 
+## Inspectable Runs
+
+Modules exported from `forward(..., return_info=True)` can expose selected
+nested tensor leaves without duplicating their computation in JavaScript:
+
+```ts
+const result = await layer.inspect(inputs, {
+  outputs: ["y", "workspace", "survival"],
+  signal: abortController.signal,
+});
+const { workspace } = await result.download(["workspace"]);
+await result.dispose();
+```
+
+The manifest declares each tensor's dtype, logical type, role, dynamic axes,
+byte budget, and numerical tolerance. JavaScript treats these as generic
+contract labels. It does not assign ARTI meaning to masks, indices, workspaces,
+or diagnostics. Selected WebGPU outputs remain device-resident until explicitly
+downloaded, and disposing the parent module expires all retained runs.
+
+The public Worker protocol supports `load`, `run`, `inspect`, `dispose`, and
+`cancel`. It transfers only selected float32, bool, or int64 CPU buffers across
+the Worker boundary together with device and timing metadata.
+
 ## Python-Owned Contract
 
 - Python accepts supported CPU float32 tensor inputs and calls

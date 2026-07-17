@@ -1,6 +1,6 @@
 [project]
 name = "arti-fit"
-version = "1.6.0"
+version = "1.7.0"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,7 @@ dev = [
     "numpy>=2.0",
     "onnx>=1.16",
     "onnxscript>=0.3",
+    "onnxruntime>=1.22",
     "pytest>=8.0",
     "torch>=2.2",
 ]
@@ -80,6 +81,7 @@ all = [
     "numpy>=2.0",
     "onnx>=1.16",
     "onnxscript>=0.3",
+    "onnxruntime>=1.22",
     "pillow>=10.0",
     "accelerate>=0.33",
     "diffusers>=0.30",

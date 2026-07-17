@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 
-import {decodeTensor, requestTransfers, responseTransfers, tensorMessage} from '../examples/worker/protocol.js';
-import type {WorkerRequest, WorkerResponse} from '../examples/worker/protocol.js';
+import {decodeTensor, requestTransfers, responseTransfers, tensorMessage} from '../src/worker.js';
+import type {WorkerRequest, WorkerResponse} from '../src/worker.js';
 
 describe('worker protocol', () => {
   it('transfers run input ownership with dimensions intact', () => {
@@ -26,6 +26,28 @@ describe('worker protocol', () => {
       },
     };
     expect(responseTransfers(response)).toEqual([response.outputs.y?.data, response.outputs.score?.data]);
+  });
+
+  it('supports inspect selections and every inspectable tensor dtype', () => {
+    const inputs = {
+      x: tensorMessage(new Float32Array([1, 2]), [1, 2]),
+      mask: tensorMessage(new Uint8Array([1, 0]), [1, 2]),
+      index: tensorMessage(new BigInt64Array([0n, 1n]), [2]),
+    };
+    const request: WorkerRequest = {id: 9, type: 'inspect', inputs, outputs: ['workspace', 'index']};
+    expect(requestTransfers(request)).toEqual([inputs.x.data, inputs.mask.data, inputs.index.data]);
+    expect(decodeTensor(inputs.x)).toBeInstanceOf(Float32Array);
+    expect(decodeTensor(inputs.mask)).toBeInstanceOf(Uint8Array);
+    expect(decodeTensor(inputs.index)).toBeInstanceOf(BigInt64Array);
+
+    const response: WorkerResponse = {
+      id: 9,
+      type: 'inspected',
+      outputs: {index: inputs.index},
+      timings: {startedAt: 1, finishedAt: 2, inferenceMs: 1},
+      device: 'webgpu',
+    };
+    expect(responseTransfers(response)).toEqual([inputs.index.data]);
   });
 
   it('keeps control messages cloneable and transfer-free', () => {

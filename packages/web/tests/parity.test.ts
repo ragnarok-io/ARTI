@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Tensor, loadArti, loadArtiStateful } from '../src/index.js';
 
-interface TensorPayload { dims: number[]; data: number[] }
+interface TensorPayload { dtype?: 'float32' | 'bool' | 'int64'; dims: number[]; data: number[] }
 interface FixtureCase { inputs: Record<string, TensorPayload>; outputs: Record<string, TensorPayload> }
 interface Fixture { name: string; tolerance: {atol: number; rtol: number}; cases: FixtureCase[] }
 
@@ -64,6 +64,38 @@ run('Python graph to ONNX Runtime Web parity', () => {
     const generic = await loadArti('http://arti.local/generic-affine/', {device: 'wasm', fetch: fetcher, wasmBinary, wasmNumThreads: 1});
     await expect(generic.forward(tensor(halfFixture.cases[0]!.inputs.x!))).rejects.toThrow(/use run/);
     await generic.dispose();
+  });
+
+  it('inspects real FusionPulse workspaces through ORT selective outputs', async () => {
+    const name = 'fusion-pulse-inspect';
+    const fixture = JSON.parse(await readFile(path.join(root, name, 'case.json'), 'utf8')) as Fixture;
+    wasmBinary ??= new Uint8Array(await readFile(wasmPath));
+    const module = await loadArti(`http://arti.local/${name}/`, {device: 'wasm', fetch: fixtureFetch(root), wasmBinary, wasmNumThreads: 1});
+    const selected = ['fused', 'survival', 'source_index', 'pulse_mask', 'unfold_source_index', 'workspace'];
+    const observations: Record<string, Array<number | bigint>>[] = [];
+    for (const item of fixture.cases) {
+      const inputs = tensors(item.inputs);
+      const result = await module.inspect(inputs, {outputs: selected});
+      expect(result.device).toBe('wasm');
+      expect(result.timings.inferenceMs).toBeGreaterThanOrEqual(0);
+      expect(Object.keys(result.outputs)).toEqual(selected);
+      const downloaded = await result.download();
+      const observation: Record<string, Array<number | bigint>> = {};
+      for (const name of selected) {
+        const actual = downloaded[name]!;
+        const expected = item.outputs[name]!;
+        expect(actual.dims).toEqual(expected.dims);
+        const values = Array.from(actual.data as Iterable<number | bigint>);
+        observation[name] = values;
+        expectPayload(values, expected, module.manifest.outputs.find((contract) => contract.name === name)!.tolerance ?? {atol: 0, rtol: 0});
+      }
+      observations.push(observation);
+      await result.dispose();
+      for (const value of Object.values(inputs)) value.dispose();
+    }
+    expect(observations[0]!.survival).not.toEqual(observations[1]!.survival);
+    expect(observations[0]!.unfold_source_index).not.toEqual(observations[1]!.unfold_source_index);
+    await module.dispose();
   });
 
   it('enforces Python-declared names, shapes, and model hashes', async () => {
@@ -142,7 +174,11 @@ run('Python graph to ONNX Runtime Web parity', () => {
   });
 });
 
-function tensor(value: TensorPayload): Tensor { return new Tensor('float32', Float32Array.from(value.data), value.dims); }
+function tensor(value: TensorPayload): Tensor {
+  if (value.dtype === 'bool') return new Tensor('bool', Uint8Array.from(value.data.map((item) => item ? 1 : 0)), value.dims);
+  if (value.dtype === 'int64') return new Tensor('int64', BigInt64Array.from(value.data.map((item) => BigInt(Number(item)))), value.dims);
+  return new Tensor('float32', Float32Array.from(value.data.map(Number)), value.dims);
+}
 function tensors(values: Record<string, TensorPayload>): Record<string, Tensor> { return Object.fromEntries(Object.entries(values).map(([name, value]) => [name, tensor(value)])); }
 function dispose(values: Record<string, Tensor>): void { for (const value of Object.values(values)) value.dispose(); }
 async function expectTensor(actual: Tensor, expected: TensorPayload, tolerance: {atol: number; rtol: number}): Promise<void> {
@@ -170,4 +206,12 @@ function expectError(actual: number[], expected: number[], tolerance: {atol: num
   }
   expect(maxAbsolute).toBeLessThanOrEqual(tolerance.atol);
   expect(maxRelative).toBeLessThanOrEqual(tolerance.rtol);
+}
+
+function expectPayload(actual: Array<number | bigint>, expected: TensorPayload, tolerance: {atol: number; rtol: number}): void {
+  if ((expected.dtype ?? 'float32') === 'float32') {
+    expectError(actual.map(Number), expected.data.map(Number), tolerance);
+  } else {
+    expect(actual.map(String)).toEqual(expected.data.map((value) => String(Number(value))));
+  }
 }

@@ -707,6 +707,12 @@ class UnFold(nn.Module):
             return self._auction_matching(logits)
         return self._greedy_matching(logits)
 
+    @staticmethod
+    def _sort_source_index(rank_scores: Tensor) -> Tensor:
+        if torch.jit.is_tracing():
+            return torch.argsort(rank_scores, dim=-1)
+        return torch.argsort(rank_scores, dim=-1, stable=True)
+
     def _resolve_exposed_count(
         self,
         *,
@@ -726,6 +732,7 @@ class UnFold(nn.Module):
                 f"was initialized with capacity exposed={self.exposed}"
             )
         return active
+
     def forward(
         self,
         x: Tensor,
@@ -802,7 +809,10 @@ class UnFold(nn.Module):
                 raise ValueError("condition was provided but condition_dim is disabled")
             compact_shape = (*leading_shape, self.condition_dim)
             singleton_shape = (*leading_shape, 1, self.condition_dim)
-            if condition.shape not in {compact_shape, singleton_shape}:
+            if not torch.jit.is_tracing() and condition.shape not in {
+                compact_shape,
+                singleton_shape,
+            }:
                 raise ValueError(
                     f"condition must have shape {list(compact_shape)} or {list(singleton_shape)}"
                 )
@@ -877,7 +887,7 @@ class UnFold(nn.Module):
                 + positions / max(total, 1)
             )
             rank_scores = torch.where(candidate_mask, rank_scores, invalid_rank)
-            source = torch.argsort(rank_scores, dim=-1, stable=True)
+            source = self._sort_source_index(rank_scores)
             soft_layout = (
                 self._soft_rank_layout(rank_scores) if self.training or return_soft_layout else None
             )
@@ -918,7 +928,7 @@ class UnFold(nn.Module):
                     + positions / max(total, 1)
                 )
                 rank_scores = torch.where(candidate_mask, rank_scores, invalid_rank)
-                source = torch.argsort(rank_scores, dim=-1, stable=True)
+                source = self._sort_source_index(rank_scores)
                 soft_layout = (
                     self._soft_rank_layout(rank_scores)
                     if self.training or return_soft_layout
@@ -1421,13 +1431,22 @@ class FusionPulse(nn.Module):
         pulses: Tensor | Sequence[Tensor],
         *,
         mask: Tensor | Sequence[Tensor] | None = None,
+        source_mask: Tensor | None = None,
         return_info: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
-        sources = self._normalize_sources(pulses)
-        source_masks = self._normalize_masks(mask, sources)
-        x = torch.cat(sources, dim=1)
-        input_mask = torch.cat(source_masks, dim=1)
-        source_index, source_position = self._source_layout(sources, x)
+        if isinstance(pulses, Tensor):
+            x, input_mask, source_index, source_position = self._normalize_stacked(
+                pulses,
+                mask,
+                source_mask,
+            )
+        else:
+            sources = self._normalize_sources(pulses)
+            source_masks = self._normalize_masks(mask, sources)
+            source_masks = self._apply_source_mask(source_masks, source_mask)
+            x = torch.cat(sources, dim=1)
+            input_mask = torch.cat(source_masks, dim=1)
+            source_index, source_position = self._source_layout(sources, x)
 
         normalized = self._normalize_strength(x, input_mask)
         safe_mask = input_mask.clone()
@@ -1456,11 +1475,11 @@ class FusionPulse(nn.Module):
         unfolded = self.unfold(
             thinned,
             mask=input_mask,
-            target_length=x.shape[1] + self.k,
             condition=condition,
             return_exposed_mask=True,
+            return_source_index=True,
         )
-        workspace, workspace_mask, exposed_mask = unfolded
+        workspace, workspace_mask, exposed_mask, unfold_source_index = unfolded
         fused = workspace[exposed_mask].reshape(x.shape[0], self.k, self.dim)
         fused_mask = workspace_mask[exposed_mask].reshape(x.shape[0], self.k)
         fused = fused * fused_mask.unsqueeze(-1).to(fused.dtype)
@@ -1484,6 +1503,9 @@ class FusionPulse(nn.Module):
             "source_index": source_index,
             "input_mask": input_mask,
             "pulse_mask": fused_mask,
+            "workspace": workspace,
+            "workspace_mask": workspace_mask,
+            "unfold_source_index": unfold_source_index,
             "redundancy_loss": redundancy,
             "support_loss": support,
             "representative_loss": representative,
@@ -1498,13 +1520,134 @@ class FusionPulse(nn.Module):
         self,
         *pulses: Tensor,
         masks: Tensor | Sequence[Tensor] | None = None,
+        source_mask: Tensor | None = None,
         return_info: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         """Convenience path for Pulse tensors whose slot counts may differ."""
 
         if not pulses:
             raise ValueError("concat requires at least one Pulse tensor")
-        return self(pulses, mask=masks, return_info=return_info)
+        return self(
+            pulses,
+            mask=masks,
+            source_mask=source_mask,
+            return_info=return_info,
+        )
+
+    def _normalize_stacked(
+        self,
+        pulses: Tensor,
+        mask: Tensor | Sequence[Tensor] | None,
+        source_mask: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if pulses.ndim == 3:
+            pulses = pulses.unsqueeze(1)
+        elif pulses.ndim != 4:
+            raise ValueError("pulses must have shape [B, N, D] or [B, S, N, D]")
+        if not pulses.is_floating_point():
+            raise ValueError("Pulse sources must be floating-point tensors")
+        if pulses.shape[2] == 0:
+            raise ValueError("Pulse sources must contain at least one slot")
+        if pulses.shape[-1] != self.dim:
+            raise ValueError(f"Pulse feature dimension must equal dim={self.dim}")
+        if pulses.device != self.unfold.exposed_bias.device:
+            raise ValueError("Pulse sources and FusionPulse must share one device")
+        if pulses.dtype != self.unfold.exposed_bias.dtype:
+            raise ValueError("Pulse sources and FusionPulse must share one dtype")
+
+        batch, source_count, slots, _ = pulses.shape
+        if mask is None:
+            slot_mask = torch.ones(
+                batch,
+                source_count,
+                slots,
+                dtype=torch.bool,
+                device=pulses.device,
+            )
+        elif not isinstance(mask, Tensor):
+            raise ValueError("a stacked Pulse tensor requires a stacked mask tensor")
+        else:
+            if mask.ndim == 4 and mask.shape[-1] == 1:
+                mask = mask.squeeze(-1)
+            if mask.shape != pulses.shape[:-1]:
+                raise ValueError("a stacked Pulse mask must have shape [B, S, N] or [B, S, N, 1]")
+            if mask.device != pulses.device:
+                raise ValueError("Pulse masks and sources must share one device")
+            if mask.dtype == torch.bool:
+                slot_mask = mask
+            elif mask.is_floating_point() and torch.isfinite(mask).all():
+                slot_mask = mask > 0
+            else:
+                raise ValueError("Pulse masks must be boolean or finite floating point")
+
+        normalized_source_mask = self._normalize_stacked_source_mask(
+            source_mask,
+            batch=batch,
+            source_count=source_count,
+            like=pulses,
+        )
+        slot_mask = slot_mask & normalized_source_mask.unsqueeze(-1)
+        x = pulses.reshape(batch, source_count * slots, self.dim)
+        input_mask = slot_mask.reshape(batch, source_count * slots)
+        source_index = (
+            torch.arange(source_count, device=pulses.device, dtype=torch.long)
+            .reshape(source_count, 1)
+            .expand(source_count, slots)
+            .reshape(source_count * slots)
+        )
+        positions = torch.zeros(1, device=pulses.device, dtype=pulses.dtype)
+        if source_count > 1:
+            positions = torch.linspace(
+                -1,
+                1,
+                source_count,
+                device=pulses.device,
+                dtype=pulses.dtype,
+            )
+        source_position = (
+            positions.reshape(source_count, 1, 1)
+            .expand(source_count, slots, 1)
+            .reshape(source_count * slots, 1)
+        )
+        return x, input_mask, source_index, source_position
+
+    @staticmethod
+    def _normalize_stacked_source_mask(
+        source_mask: Tensor | None,
+        *,
+        batch: int,
+        source_count: int,
+        like: Tensor,
+    ) -> Tensor:
+        if source_mask is None:
+            return torch.ones(batch, source_count, dtype=torch.bool, device=like.device)
+        if source_mask.ndim == 3 and source_mask.shape[-1] == 1:
+            source_mask = source_mask.squeeze(-1)
+        if source_mask.shape != (batch, source_count):
+            raise ValueError("source_mask must have shape [B, S] or [B, S, 1]")
+        if source_mask.device != like.device:
+            raise ValueError("source_mask and Pulse sources must share one device")
+        if source_mask.dtype == torch.bool:
+            return source_mask
+        if not source_mask.is_floating_point() or not torch.isfinite(source_mask).all():
+            raise ValueError("source_mask must be boolean or finite floating point")
+        return source_mask > 0
+
+    @staticmethod
+    def _apply_source_mask(
+        masks: tuple[Tensor, ...],
+        source_mask: Tensor | None,
+    ) -> tuple[Tensor, ...]:
+        if source_mask is None:
+            return masks
+        first = masks[0]
+        normalized = FusionPulse._normalize_stacked_source_mask(
+            source_mask,
+            batch=first.shape[0],
+            source_count=len(masks),
+            like=first,
+        )
+        return tuple(mask & normalized[:, index : index + 1] for index, mask in enumerate(masks))
 
     def _normalize_sources(
         self,

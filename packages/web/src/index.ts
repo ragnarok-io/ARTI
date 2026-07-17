@@ -1,12 +1,14 @@
 export { Tensor } from 'onnxruntime-web/webgpu';
-export { ARTIWebModule, loadArti } from './runtime.js';
+export { ARTIWebModule, OwnedRunResult, loadArti } from './runtime.js';
 export {ARTIStatefulWebModule, loadArtiStateful} from './stateful.js';
 export type {ARTIStateSnapshot} from './stateful.js';
-export type {ActiveARTIDevice, ARTIStatefulWebLock, ARTIStatefulWebManifest, ARTIWebLock, ARTIWebManifest, StatefulEntrypoint, StatefulTensorContract, TensorContract} from './generated/contract.js';
-export type {ARTIDevice, LoadArtiOptions, TensorMap} from './types.js';
+export type {ActiveARTIDevice, ARTIStatefulWebLock, ARTIStatefulWebManifest, ARTIWebLock, ARTIWebManifest, OutputRole, StatefulEntrypoint, StatefulTensorContract, TensorContract, TensorDType, TensorLogicalType, TensorTolerance} from './generated/contract.js';
+export type {ARTIDevice, InspectOptions, InspectedCPUTensor, InspectTensorData, LoadArtiOptions, RunTimings, TensorMap} from './types.js';
 export {ArtiWebError} from './errors.js';
 export type {ArtiWebErrorCode, ArtiWebErrorOptions, ArtiWebErrorStage} from './errors.js';
 export {fromCPU, isCPUTensor, tensor, toCPU, zeros} from './tensor.js';
 export type {DynamicDimensions, Float32TensorData, TensorDimensions} from './tensor.js';
 export type {CPUTensor, OperationOptions, TensorInput, TensorOutput} from './types.js';
 export type {LoadAttemptDiagnostic, LoadDiagnostics, LoadProgress, LoadProgressCallback, LoadStage} from './diagnostics.js';
+export {decodeTensor, requestTransfers, responseTransfers, tensorMessage} from './worker.js';
+export type {SerializedError, SerializedTensor, SerializedTensorData, SerializedTensorDType, WorkerRequest, WorkerRequestWithoutId, WorkerResponse, WorkerRunTimings} from './worker.js';

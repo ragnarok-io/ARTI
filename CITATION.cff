@@ -5,7 +5,7 @@ type: software
 authors:
   - name: Thiocy
     website: "https://github.com/Thiocy"
-version: 1.6.0
+version: 1.7.0
 date-released: 2026-07-17
 repository-code: "https://github.com/ragnarok-io/ARTI"
 url: "https://github.com/ragnarok-io/ARTI"
