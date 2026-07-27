@@ -1,6 +1,6 @@
 [project]
 name = "arti-fit"
-version = "1.7.0"
+version = "1.8.0"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -110,6 +110,7 @@ include = [
     "/src/arti",
     "/tests",
     "/docs/reference/*.schema.json",
+    "/docs/custom-recall-formulas.md",
     "/docs/webgpu-alpha.md",
     "/examples",
     "/README.md",

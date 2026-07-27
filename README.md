@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.7.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.8.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -75,29 +75,36 @@ recall_layer = arti.nn.Layer(dim=32, profile="recall")
 multisource = arti.nn.Layer(dim=32, profile="multisource", coord_dim=4)
 ```
 
-## Compose Recall, Half, And Fold
+## Use Recall As A Layer
 
 ARTI mechanisms are also available as standalone modules:
 
 ```python
 import arti
+import torch
 
-recall = arti.ARTILatentRecallField(hidden_dim=64, slots=8)
-half = arti.nn.Half()
+recall = arti.nn.Recall(dim=64, slots=8, formula="delta-v1")
 fold = arti.nn.Fold(k=16, dim=64)
-```
 
-The common Recall branch pattern is deliberately small:
+h = torch.randn(2, 32, 64)
+mask = torch.ones(2, 32, dtype=torch.bool)
 
-```python
-delta = recall(h, mask, recall=None)[0]
-h = h + half(delta)
+h = recall(h, mask=mask)
 workspace = fold(h, mask=mask)
 ```
 
-`Recall` proposes latent traces, `Half` applies feature-strength survival, and
-`Fold` compacts surviving information into a fixed-size workspace. Each module
-can be used independently.
+`Recall` routes trainable Bank factors and applies a versioned formula to the
+current state. Its deterministic default uses `Half` on each proposed update.
+Built-in formulas are `delta-v1`, `affine-v1`, and `state-v1`; legacy names
+`single`, `product`, and `state` remain accepted.
+
+Applications can also pass a trusted local `torch.nn.Module` as a custom
+formula. Custom formulas run independently for each latent vector and return
+the complete next state. Explicit process-local registration is available for
+stable application identities, but third-party formula code is never imported
+from an artifact. See [Custom Recall formulas](docs/custom-recall-formulas.md).
+
+`Half`, `Fold`, and `Recall` remain independently usable tensor layers.
 
 ## Expand And Rearrange With UnFold
 
@@ -196,8 +203,8 @@ publisher signatures. Obtain models and weights from trusted sources.
 
 ## Public Modules
 
-- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, alpha `FusionPulse`,
-  `RecallRefiner`, and visual workspace modules.
+- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, alpha `Recall`,
+  alpha `FusionPulse`, `RecallRefiner`, and visual workspace modules.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
 - `arti.torch`: backend-explicit aliases for PyTorch applications.
 - `arti.jax`: optional functional JAX subset with array-only parameter trees,

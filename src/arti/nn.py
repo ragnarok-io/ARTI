@@ -16,6 +16,7 @@ from .functional import half
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
 
 if TYPE_CHECKING:
+    from .recall_manifest import RecallFormulaManifest
     from .usage import Layer
 
 
@@ -1809,6 +1810,445 @@ class FusionPulse(nn.Module):
         return ", ".join(args)
 
 
+def _recall_formula_probe(module: nn.Module, dim: int) -> Tensor:
+    reference = next(module.parameters(), None)
+    if reference is None:
+        reference = next(module.buffers(), None)
+    kwargs = {}
+    if reference is not None:
+        kwargs["device"] = reference.device
+        if reference.is_floating_point():
+            kwargs["dtype"] = reference.dtype
+    return torch.zeros(dim, **kwargs)
+
+
+class _DenseRecallBank(nn.Module):
+    """Dense factor-bank implementation used by the public Recall wrapper."""
+
+    def __init__(
+        self,
+        dim: int,
+        slots: int,
+        *,
+        contract,
+        composition: str,
+        formula: nn.Module | None,
+        recognition: str,
+        identity_init: bool,
+    ) -> None:
+        super().__init__()
+        factor_count = contract.factor_count
+        if slots <= 0:
+            raise ValueError("slots must be positive")
+        if slots % factor_count:
+            raise ValueError(
+                f"Recall formula requires slots divisible by {factor_count}"
+            )
+        if recognition not in {"explicit", "alignment", "none"}:
+            raise ValueError("recognition must be 'explicit', 'alignment', or 'none'")
+
+        self.dim = int(dim)
+        self.slots = int(slots)
+        self.factor_names = contract.factor_names
+        self.factor_count = factor_count
+        self.composition = composition
+        self.formula = formula
+        self.recognition = recognition
+        self.scale = dim**-0.5
+        self.bank = nn.Parameter(torch.randn(slots, dim) * self.scale)
+        self.key_bank = nn.Parameter(torch.randn(slots, dim) * self.scale)
+        self.query = nn.Linear(dim, dim, bias=False)
+        self.alignment_recognizer = (
+            nn.Linear(dim * 2, 1) if recognition == "alignment" else None
+        )
+
+        slots_per_factor = slots // factor_count
+        self.factor_slices = tuple(
+            (index * slots_per_factor, (index + 1) * slots_per_factor)
+            for index in range(factor_count)
+        )
+        if identity_init or formula is not None:
+            with torch.no_grad():
+                for factor, (start, stop) in zip(
+                    contract.factors,
+                    self.factor_slices,
+                    strict=True,
+                ):
+                    factor_bank = self.bank[start:stop]
+                    if identity_init or factor.init == "zero":
+                        factor_bank.fill_(factor.identity)
+                    else:
+                        scale = dim**-0.5 if factor.init_scale is None else factor.init_scale
+                        factor_bank.normal_(mean=factor.identity, std=scale)
+            if identity_init and composition == "state":
+                coarse_start, coarse_stop = self.factor_slices[0]
+                direction_start, direction_stop = self.factor_slices[-2]
+                opacity_start, opacity_stop = self.factor_slices[-1]
+                with torch.no_grad():
+                    self.bank[coarse_start:coarse_stop].normal_(
+                        mean=0.0,
+                        std=self.scale,
+                    )
+                    self.bank[direction_start:direction_stop].normal_(
+                        mean=0.0,
+                        std=0.01,
+                    )
+                    self.bank[opacity_start:opacity_stop].normal_(
+                        mean=0.0,
+                        std=0.01,
+                    )
+
+    def forward(
+        self,
+        state: Tensor,
+        mask: Tensor,
+        recall: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        if recall is not None and (
+            recall.ndim != 3
+            or recall.shape[0] != state.shape[0]
+            or recall.shape[2] != state.shape[2]
+        ):
+            raise ValueError("recall must have shape [B, K, D]")
+
+        query = self.query(state)
+        factors: list[Tensor] = []
+        factor_weights: list[Tensor] = []
+        recognition_key: Tensor | None = None
+        for index, (start, stop) in enumerate(self.factor_slices):
+            factor_bank = self.bank[start:stop].to(dtype=state.dtype)
+            factor_keys = self.key_bank[start:stop].to(dtype=state.dtype)
+            if recall is not None and index == 0:
+                routed_bank = torch.cat(
+                    [
+                        factor_bank.unsqueeze(0).expand(state.shape[0], -1, -1),
+                        recall.to(state),
+                    ],
+                    dim=1,
+                )
+                routed_keys = torch.cat(
+                    [
+                        factor_keys.unsqueeze(0).expand(state.shape[0], -1, -1),
+                        recall.to(state),
+                    ],
+                    dim=1,
+                )
+                logits = (
+                    torch.einsum("bnd,bkd->bnk", query, routed_keys) * self.scale
+                )
+                weights = torch.softmax(logits, dim=-1)
+                factor = torch.einsum("bnk,bkd->bnd", weights, routed_bank)
+                key_context = torch.einsum("bnk,bkd->bnd", weights, routed_keys)
+            else:
+                logits = torch.einsum("bnd,kd->bnk", query, factor_keys) * self.scale
+                weights = torch.softmax(logits, dim=-1)
+                factor = torch.einsum("bnk,kd->bnd", weights, factor_bank)
+                key_context = torch.einsum("bnk,kd->bnd", weights, factor_keys)
+            if recognition_key is None:
+                recognition_key = key_context
+            factors.append(factor)
+            factor_weights.append(weights)
+
+        factor_tensor = torch.stack(factors, dim=-2)
+        candidate = self._compose(state, factor_tensor)
+        if self.recognition == "explicit":
+            assert recognition_key is not None
+            similarity = torch.cosine_similarity(query, recognition_key, dim=-1, eps=1e-6)
+            recognition = torch.sigmoid((similarity - 0.5) / 0.1)
+        elif self.recognition == "alignment":
+            assert self.alignment_recognizer is not None
+            recognition = torch.sigmoid(
+                self.alignment_recognizer(torch.cat([state, candidate], dim=-1))
+            ).squeeze(-1)
+        else:
+            recognition = torch.ones(state.shape[:2], device=state.device, dtype=state.dtype)
+
+        recognition = recognition * mask.to(state.dtype)
+        candidate = state + recognition.unsqueeze(-1) * (candidate - state)
+        candidate = torch.where(mask.unsqueeze(-1), candidate, state)
+        return candidate, torch.cat(factor_weights, dim=-1), recognition
+
+    def _compose(self, state: Tensor, factors: Tensor) -> Tensor:
+        if self.composition == "single":
+            return state + factors[..., 0, :]
+        if self.composition == "product":
+            scale, shift = factors.unbind(dim=-2)
+            return (1.0 + torch.tanh(scale)) * (state + shift)
+        if self.composition == "state":
+            coarse = factors[..., 0, :]
+            fine = factors[..., 1, :]
+            content = coarse + coarse.detach().abs().clamp_min(1.0) * torch.tanh(fine)
+            modulation = 1.0 + torch.tanh(factors[..., 2:15, :]) / 13.0
+            recalled = content * modulation.prod(dim=-2)
+            direction = torch.tanh(factors[..., 15, :])
+            opacity = torch.tanh(factors[..., 16, :]).square()
+            return (1.0 - opacity) * state + opacity * direction * recalled
+
+        if self.formula is None:
+            raise RuntimeError("custom Recall composition requires a formula")
+        flat_state = state.reshape(-1, state.shape[-1])
+        flat_factors = factors.reshape(
+            -1,
+            self.factor_count,
+            factors.shape[-1],
+        )
+        candidate = torch.vmap(self.formula)(flat_state, flat_factors).reshape_as(state)
+        if not isinstance(candidate, Tensor) or candidate.shape != state.shape:
+            raise ValueError("Recall formula must return one next-state Tensor")
+        if candidate.device != state.device or candidate.dtype != state.dtype:
+            raise ValueError("Recall formula must preserve state device and dtype")
+        return candidate
+
+
+class _DenseRecallState(nn.Module):
+    def __init__(
+        self,
+        recall: _DenseRecallBank,
+        *,
+        steps: int,
+        min_steps: int,
+        tolerance: float | None,
+        activation: str,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        if steps <= 0:
+            raise ValueError("steps must be positive")
+        if min_steps <= 0 or min_steps > steps:
+            raise ValueError("min_steps must be in [1, steps]")
+        if tolerance is not None and tolerance < 0:
+            raise ValueError("tolerance must be non-negative")
+        if activation not in {"half", "none"}:
+            raise ValueError("activation must be 'half' or 'none'")
+        self.recall = recall
+        self.steps = int(steps)
+        self.min_steps = int(min_steps)
+        self.tolerance = tolerance
+        self.activation = Half() if activation == "half" else nn.Identity()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        state: Tensor,
+        mask: Tensor,
+        recall: Tensor | None,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        initial = state
+        active = mask.any(dim=1)
+        steps_executed = torch.zeros(state.shape[0], device=state.device, dtype=state.dtype)
+        last_weights = torch.empty(
+            state.shape[0],
+            state.shape[1],
+            0,
+            device=state.device,
+            dtype=state.dtype,
+        )
+        last_recognition = torch.zeros(
+            state.shape[:2],
+            device=state.device,
+            dtype=state.dtype,
+        )
+
+        for step in range(self.steps):
+            if not bool(torch.any(active)):
+                break
+            candidate, last_weights, last_recognition = self.recall(state, mask, recall)
+            raw_delta = candidate - state
+            delta = self.dropout(self.activation(raw_delta))
+            active_tokens = active.unsqueeze(-1) & mask
+            previous = state
+            state = torch.where(
+                active_tokens.unsqueeze(-1),
+                state + delta,
+                state,
+            )
+            steps_executed = steps_executed + active.to(state.dtype)
+            if self.tolerance is not None and step + 1 >= self.min_steps:
+                valid = mask.unsqueeze(-1).to(torch.float32)
+                update_ratio = (
+                    ((state - previous).float() * valid).flatten(1).norm(dim=-1)
+                    / (previous.float() * valid)
+                    .flatten(1)
+                    .norm(dim=-1)
+                    .clamp_min(1e-12)
+                )
+                active = active & (update_ratio.detach() > self.tolerance)
+                if not bool(torch.any(active)):
+                    break
+
+        write = state - initial
+        diagnostics = {
+            "recall_bank_weights": last_weights,
+            "recall_recognition": last_recognition,
+            "recall_steps_executed": steps_executed,
+            "recall_effect_norm": write.norm(dim=-1),
+            "recall_write_norm": write.norm(dim=-1),
+        }
+        return state, write, diagnostics
+
+
+class Recall(nn.Module):
+    """Tensor-in/tensor-out Recall with versioned or local custom formulas."""
+
+    def __init__(
+        self,
+        dim: int,
+        slots: int,
+        *,
+        formula: str | nn.Module = "delta-v1",
+        steps: int = 1,
+        min_steps: int = 1,
+        tolerance: float | None = None,
+        activation: str = "half",
+        recognition: str = "none",
+        dropout: float = 0.0,
+        identity_init: bool = False,
+    ) -> None:
+        super().__init__()
+        if dim <= 0:
+            raise ValueError("dim must be positive")
+        from .recall_formula import (
+            BUILTIN_RECALL_FORMULA_ALIASES,
+            BUILTIN_RECALL_FORMULAS,
+            check_recall_formula,
+        )
+
+        if isinstance(formula, str):
+            formula_id = BUILTIN_RECALL_FORMULA_ALIASES.get(formula, formula)
+            builtin = BUILTIN_RECALL_FORMULAS.get(formula_id)
+            if builtin is None:
+                from .recall_registry import resolve_formula
+
+                registration = resolve_formula(formula_id)
+                formula_module = registration.instantiate()
+                contract = check_recall_formula(
+                    formula_module,
+                    _recall_formula_probe(formula_module, dim),
+                )
+                composition = "custom"
+                formula_id = registration.reference
+                formula_origin = registration.origin
+                formula_portable = registration.portable
+                manifest_id = registration.identity.base_id
+                manifest_version = str(registration.identity.version)
+            else:
+                formula_module = None
+                contract = builtin.contract
+                assert builtin.legacy_value_composition is not None
+                composition = builtin.legacy_value_composition
+                formula_origin = "builtin"
+                formula_portable = True
+                assert contract.identity is not None
+                manifest_id = contract.identity.name
+                manifest_version = str(contract.identity.version)
+        elif isinstance(formula, nn.Module):
+            formula_module = formula
+            contract = check_recall_formula(
+                formula_module,
+                _recall_formula_probe(formula_module, dim),
+            )
+            formula_id = "custom"
+            composition = "custom"
+            formula_origin = "custom"
+            formula_portable = False
+            manifest_id = "custom"
+            manifest_version = "1"
+        else:
+            raise TypeError("formula must be a versioned formula ID or torch.nn.Module")
+
+        bank = _DenseRecallBank(
+            dim,
+            slots,
+            contract=contract,
+            composition=composition,
+            formula=formula_module,
+            recognition=recognition,
+            identity_init=identity_init,
+        )
+        self.dim = int(dim)
+        self.slots = int(slots)
+        self.formula_id = formula_id
+        self.formula_origin = formula_origin
+        self.formula_portable = formula_portable
+        self._manifest_id = manifest_id
+        self._manifest_version = manifest_version
+        self.state = _DenseRecallState(
+            bank,
+            steps=steps,
+            min_steps=min_steps,
+            tolerance=tolerance,
+            activation=activation,
+            dropout=dropout,
+        )
+
+    @property
+    def formula(self) -> nn.Module | None:
+        """Return the local custom or registered formula, when present."""
+
+        return self.state.recall.formula
+
+    @property
+    def factor_names(self) -> tuple[str, ...]:
+        """Return factor names in stable Bank layout order."""
+
+        return self.state.recall.factor_names
+
+    def formula_manifest(self) -> RecallFormulaManifest:
+        """Return passive formula and factor-layout metadata."""
+
+        from .recall_manifest import RecallFormulaManifest, RecallLayoutManifest
+
+        layout = RecallLayoutManifest(factor_order=self.factor_names)
+        return RecallFormulaManifest(
+            id=self._manifest_id,
+            version=self._manifest_version,
+            factor_names=self.factor_names,
+            origin=self.formula_origin,
+            portable=self.formula_portable,
+            layout=layout,
+            capabilities=("torch.eager",),
+        )
+
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        mask: Tensor | None = None,
+        recall: Tensor | None = None,
+        return_info: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        if not isinstance(x, Tensor) or not x.is_floating_point():
+            raise TypeError("x must be a floating-point Tensor")
+        if x.ndim not in {2, 3}:
+            raise ValueError("x must have shape [B, D] or [B, N, D]")
+        if x.shape[-1] != self.dim:
+            raise ValueError(f"x last dim must be {self.dim}, got {x.shape[-1]}")
+
+        was_vector = x.ndim == 2
+        sequence = x.unsqueeze(1) if was_vector else x
+        if was_vector and mask is not None and mask.shape == x.shape[:1]:
+            mask = mask.unsqueeze(1)
+        from .functional import ensure_mask
+
+        token_mask = ensure_mask(
+            mask,
+            sequence.shape[0],
+            sequence.shape[1],
+            sequence.device,
+        )
+        output, _write, diagnostics = self.state(sequence, token_mask, recall)
+        output = output.squeeze(1) if was_vector else output
+        if return_info:
+            return output, diagnostics
+        return output
+
+    def extra_repr(self) -> str:
+        return (
+            f"dim={self.dim}, slots={self.slots}, formula={self.formula_id!r}, "
+            f"factors={len(self.factor_names)}"
+        )
+
+
 class RecallRefiner(nn.Module):
     """Alpha iterative latent recall refinement.
 
@@ -1940,9 +2380,9 @@ class RecallRefiner(nn.Module):
 
 Pulse = LearnedPulse
 
-from .stateful_recall import StatefulRecall
-from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
-__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
+from .stateful_recall import StatefulRecall  # noqa: E402
+from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput  # noqa: E402
+__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "Recall", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 
 def __getattr__(name: str):

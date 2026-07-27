@@ -71,7 +71,9 @@ from .membrane import (
     membrane_public_emit_mask,
 )
 from .models import ARTIClassifier
-from .nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallRefiner, StatefulRecall, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from .nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, Recall, RecallRefiner, StatefulRecall, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from .recall_formula import FactorSpec, FormulaIdentity, RecallFormulaContract, check_recall_formula
+from .recall_registry import describe_formula, list_formulas, register_formula
 from .visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
 from .outputs import ARTIOutput
 from .pulse import PulseCompressor, PulseOutput, assert_pulse_distinct, fixed_width_pulse_ids, pulse_compress, pulse_distinctness_report
@@ -154,7 +156,15 @@ __all__ = [
     "Pulse",
     "LearnedPulse",
     "FusionPulse",
+    "Recall",
     "RecallRefiner",
+    "FactorSpec",
+    "FormulaIdentity",
+    "RecallFormulaContract",
+    "check_recall_formula",
+    "register_formula",
+    "list_formulas",
+    "describe_formula",
     "StatefulRecall",
     "VisualField",
     "VisualFieldOutput",

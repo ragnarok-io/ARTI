@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.7.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.8.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
@@ -23,6 +23,11 @@ process below.
 `FusionPulse` is introduced as an alpha API in 1.6.0. Its tensor-in/tensor-out
 contract is documented, but its structural-loss defaults are not part of the
 frozen core surface yet.
+
+`arti.nn.Recall` and the Recall Formula contract are introduced as alpha APIs
+in 1.8.0. Built-in formula identifiers and tensor shape rules are documented,
+but custom-formula serialization and third-party provider portability are not
+part of the frozen core surface.
 
 ## Compatibility
 
