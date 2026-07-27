@@ -46,6 +46,34 @@ The alpha browser runtime is published separately:
 pnpm add @arti-fit/web@alpha
 ```
 
+## What Is New In 1.8
+
+ARTI 1.8 introduces `arti.nn.Recall`, a standalone tensor-in/tensor-out layer
+with an extensible Formula API:
+
+```text
+current state + routed Bank factors -> Formula -> next state
+```
+
+The Bank owns trainable tensors and routing. The Formula only defines how the
+current state and a fixed, named set of factors produce the next state. This
+separation lets applications change Recall mathematics without rebuilding
+routing, serialization, masking, or iterative execution.
+
+The release includes:
+
+- versioned `delta-v1`, `affine-v1`, and `state-v1` formulas;
+- local custom formulas implemented as ordinary `torch.nn.Module` objects;
+- explicit process-local registration for trusted application formulas;
+- stable factor ordering and passive manifest metadata;
+- masked `[B, D]` and `[B, N, D]` execution, optional iterative steps, and
+  diagnostics.
+
+Recall formulas do not own optimizers, gradient policy, files, network access,
+or training schedules. Third-party formula code is never imported from an
+artifact. `Recall` and the Formula API are alpha surfaces in 1.8; the rest of
+the supported 1.x surface retains its existing stability level.
+
 ## Use ARTI As A Layer
 
 The smallest API behaves like a normal PyTorch layer:
@@ -77,20 +105,26 @@ multisource = arti.nn.Layer(dim=32, profile="multisource", coord_dim=4)
 
 ## Use Recall As A Layer
 
-ARTI mechanisms are also available as standalone modules:
+`Recall` can be inserted anywhere a shape-preserving PyTorch layer is useful:
 
 ```python
 import arti
 import torch
 
-recall = arti.nn.Recall(dim=64, slots=8, formula="delta-v1")
-fold = arti.nn.Fold(k=16, dim=64)
+recall = arti.nn.Recall(
+    dim=64,
+    slots=32,
+    formula="affine-v1",
+    steps=2,
+)
 
 h = torch.randn(2, 32, 64)
 mask = torch.ones(2, 32, dtype=torch.bool)
 
-h = recall(h, mask=mask)
-workspace = fold(h, mask=mask)
+h, info = recall(h, mask=mask, return_info=True)
+
+assert h.shape == (2, 32, 64)
+print(info["recall_steps_executed"])
 ```
 
 `Recall` routes trainable Bank factors and applies a versioned formula to the
@@ -98,11 +132,56 @@ current state. Its deterministic default uses `Half` on each proposed update.
 Built-in formulas are `delta-v1`, `affine-v1`, and `state-v1`; legacy names
 `single`, `product`, and `state` remain accepted.
 
-Applications can also pass a trusted local `torch.nn.Module` as a custom
-formula. Custom formulas run independently for each latent vector and return
-the complete next state. Explicit process-local registration is available for
-stable application identities, but third-party formula code is never imported
-from an artifact. See [Custom Recall formulas](docs/custom-recall-formulas.md).
+| Formula | Bank factors | Minimum slot multiple |
+| --- | --- | --- |
+| `delta-v1` | `content` | 1 |
+| `affine-v1` | `scale`, `shift` | 2 |
+| `state-v1` | coarse/fine content, modulation, direction, opacity | 17 |
+
+`slots` is the total Bank slot count and must be divisible by the selected
+formula's factor count. `steps`, `min_steps`, and `tolerance` control bounded
+iterative execution. Set `activation="none"` when a Recall application should
+not use the default `Half` survival activation.
+
+### Define A Local Formula
+
+Applications can pass a trusted local `torch.nn.Module`. A custom Formula
+receives one state vector `[D]` and its ordered factors `[F, D]`, then returns
+the complete next state `[D]`:
+
+```python
+import torch
+import arti
+
+
+class SignedGate(torch.nn.Module):
+    factor_names = ("content", "gate")
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        factors: torch.Tensor,
+    ) -> torch.Tensor:
+        content, gate = factors.unbind(dim=0)
+        return state + torch.tanh(gate) * content
+
+
+recall = arti.nn.Recall(
+    dim=64,
+    slots=32,
+    formula=SignedGate(),
+)
+output = recall(torch.randn(2, 16, 64))
+```
+
+Custom formulas run independently for every latent vector, so Formula-side
+reductions cannot couple batch items or tokens. Their parameters participate in
+normal autograd and `state_dict()` handling. For reusable process-local names,
+register a trusted factory explicitly with `arti.register_formula(...)`.
+
+See [Custom Recall formulas](docs/custom-recall-formulas.md) for the complete
+contract, initialization rules, validation checklist, registration model, and
+portability boundaries.
 
 `Half`, `Fold`, and `Recall` remain independently usable tensor layers.
 
