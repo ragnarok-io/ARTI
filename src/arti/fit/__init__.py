@@ -5,7 +5,7 @@ from .batch_schema import BatchSchema, TensorField, attention_mask_to_visibility
 from .config import FitProjectConfig, MechanismOverrides, apply_mechanism_overrides, load_fit_config, resolve_fit_config_mechanism, template_fit_config, validate_fit_config, write_fit_config_template
 from .doctor import BackendCapabilities, backend_capabilities, doctor_report, doctor_report_markdown, validate_backend_capabilities, write_doctor_report
 from .docs import check_fit_config_schema, check_generated_docs, check_task_graph_schema, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, packaged_fit_config_schema_json, packaged_task_graph_schema_json, write_fit_config_schema, write_generated_docs, write_task_graph_schema
-from .insertion import AdapterInsertionPlan
+from .insertion import AdapterInsertionPlan, set_recall_refine_schedule, set_recall_refine_steps
 from .metadata import capabilities, list_plugins, list_profiles, list_scales
 from .objectives import infer_objectives, resolve_objectives
 from .plugins import FitPlugin, get_plugin
@@ -82,4 +82,6 @@ __all__ = [
     "fit",
     "project",
     "apply_adapter",
+    "set_recall_refine_schedule",
+    "set_recall_refine_steps",
 ]

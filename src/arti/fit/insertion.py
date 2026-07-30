@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterator
 
 import torch
@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from ..blocks import ARTIResidualBlock
+from ..config import ARTIConfig
 from .profiles import AdapterProfile
 from .runtime import current_context
 from .scales import AdapterScale
@@ -158,6 +159,116 @@ def iter_adapter_wrappers(model: nn.Module) -> Iterator[ARTIAdapterWrapper]:
     for module in model.modules():
         if isinstance(module, ARTIAdapterWrapper):
             yield module
+
+
+def _validate_recall_refine_depth(steps: int) -> int:
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+        raise ValueError("Recall refine steps must be a non-negative integer")
+    return steps
+
+
+def _set_wrapper_recall_refine_depth(
+    wrapper: ARTIAdapterWrapper,
+    steps: int,
+) -> int:
+    layer = getattr(wrapper.adapter, "layer", None)
+    state = getattr(layer, "state", None)
+    layer_config = getattr(layer, "config", None)
+    state_config = getattr(state, "config", None)
+    if not isinstance(layer_config, ARTIConfig) or not isinstance(
+        state_config,
+        ARTIConfig,
+    ):
+        return 0
+    layer.config = replace(layer_config, recall_steps=steps)
+    state.config = replace(state_config, recall_steps=steps)
+    return 1
+
+
+def _validate_wrapper_recall_refine_depth(
+    wrapper: ARTIAdapterWrapper,
+    steps: int,
+) -> None:
+    layer = getattr(wrapper.adapter, "layer", None)
+    state = getattr(layer, "state", None)
+    layer_config = getattr(layer, "config", None)
+    state_config = getattr(state, "config", None)
+    if not isinstance(layer_config, ARTIConfig) or not isinstance(
+        state_config,
+        ARTIConfig,
+    ):
+        return
+    if steps > 0 and getattr(state, "recall", None) is None:
+        raise ValueError(
+            "cannot enable Recall refinement on an adapter initialized without Recall"
+        )
+
+
+def set_recall_refine_steps(model: nn.Module, steps: int) -> int:
+    """Set one exact Recall refinement depth for every attached adapter."""
+
+    depth = _validate_recall_refine_depth(steps)
+    wrappers = tuple(iter_adapter_wrappers(model))
+    for wrapper in wrappers:
+        _validate_wrapper_recall_refine_depth(wrapper, depth)
+    return sum(
+        _set_wrapper_recall_refine_depth(wrapper, depth)
+        for wrapper in wrappers
+    )
+
+
+def set_recall_refine_schedule(
+    model: nn.Module,
+    steps: Sequence[int] | Mapping[str, int],
+) -> int:
+    """Set an exact Recall refinement depth for each attached adapter.
+
+    A sequence follows ``model.named_modules()`` registration order. A mapping
+    addresses adapters by full module path and must cover every attached
+    adapter exactly. The complete schedule is validated before any update.
+    """
+
+    named_wrappers = tuple(
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, ARTIAdapterWrapper)
+    )
+    if isinstance(steps, Mapping):
+        expected = {name for name, _wrapper in named_wrappers}
+        provided = set(steps)
+        missing = sorted(expected - provided)
+        unexpected = sorted(provided - expected)
+        if missing or unexpected:
+            raise ValueError(
+                "Recall refine schedule paths must match attached adapters exactly; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        depths = tuple(steps[name] for name, _wrapper in named_wrappers)
+    else:
+        if isinstance(steps, (str, bytes)):
+            raise TypeError("Recall refine schedule must be a sequence of integers")
+        depths = tuple(steps)
+        if len(depths) != len(named_wrappers):
+            raise ValueError(
+                "Recall refine schedule length must match attached adapters; "
+                f"expected {len(named_wrappers)}, found {len(depths)}"
+            )
+
+    validated = tuple(_validate_recall_refine_depth(depth) for depth in depths)
+    for (_name, wrapper), depth in zip(
+        named_wrappers,
+        validated,
+        strict=True,
+    ):
+        _validate_wrapper_recall_refine_depth(wrapper, depth)
+    return sum(
+        _set_wrapper_recall_refine_depth(wrapper, depth)
+        for (_name, wrapper), depth in zip(
+            named_wrappers,
+            validated,
+            strict=True,
+        )
+    )
 
 
 def replace_mapping_value(output: Mapping, key: str, value: Tensor):

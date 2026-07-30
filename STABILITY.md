@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 1.8.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 1.9.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 1.x Surface
@@ -28,6 +28,10 @@ frozen core surface yet.
 in 1.8.0. Built-in formula identifiers and tensor shape rules are documented,
 but custom-formula serialization and third-party provider portability are not
 part of the frozen core surface.
+
+Runtime Recall refinement controls are introduced as alpha APIs in 1.9.0.
+Their exact-depth semantics and atomic schedule validation are documented, but
+automatic schedule selection is not part of the supported surface.
 
 ## Compatibility
 

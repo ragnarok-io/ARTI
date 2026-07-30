@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.8.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 1.9.0 is a **Stable Candidate**. The supported 1.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -46,7 +46,37 @@ The alpha browser runtime is published separately:
 pnpm add @arti-fit/web@alpha
 ```
 
-## What Is New In 1.8
+## What Is New In 1.9
+
+ARTI 1.9 adds runtime control over the exact number of Recall refinement steps
+without changing or rewriting adapter weights:
+
+```python
+arti.set_recall_refine_steps(model, 6)
+arti.set_recall_refine_steps(model, 0)  # exact Recall bypass
+
+arti.set_recall_refine_schedule(model, [1, 1, 3, 3, 6, 6])
+arti.set_recall_refine_schedule(
+    model,
+    {
+        "model.layers.0": 1,
+        "model.layers.1": 3,
+        "model.layers.2": 6,
+    },
+)
+```
+
+Sequence schedules follow `model.named_modules()` registration order. Named
+schedules must cover every attached adapter exactly and are recommended for
+persistent configuration. ARTI validates the complete schedule before changing
+any layer, so an invalid depth cannot leave a partially updated model.
+
+The controls only change runtime refinement depth. They do not change adapter
+parameters, artifact format, optimizer state, or the separately versioned Web
+runtime. A positive depth cannot enable an adapter that was initialized without
+a Recall field.
+
+## What Was New In 1.8
 
 ARTI 1.8 introduces `arti.nn.Recall`, a standalone tensor-in/tensor-out layer
 with an extensible Formula API:

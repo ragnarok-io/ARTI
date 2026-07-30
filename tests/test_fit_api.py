@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import arti
 from arti.fit import ARTIProject
+from arti.fit import set_recall_refine_schedule as fit_set_recall_refine_schedule
 from arti.fit.artifacts import hash_tensor_state_dict, stable_json_sha256
 from arti.fit.insertion import ARTIAdapterWrapper
 from arti.fit.scanner import run_model
@@ -15,6 +16,100 @@ from arti.fit.scanner import run_model
 
 def tiny_model() -> nn.Module:
     return nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
+
+
+def test_runtime_recall_refine_schedule_is_atomic_and_public():
+    def make_wrapper(base: nn.Module) -> ARTIAdapterWrapper:
+        return ARTIAdapterWrapper(
+            base,
+            arti.ARTIResidualBlock(
+                dim=4,
+                recall_slots=2,
+                recall_steps=1,
+                use_phase_mixer=False,
+                use_virtual_interface=False,
+            ),
+            freeze_base=False,
+        )
+
+    wrappers = [make_wrapper(nn.Identity()) for _ in range(3)]
+    model = nn.Sequential(*wrappers)
+
+    assert arti.set_recall_refine_schedule is fit_set_recall_refine_schedule
+    assert arti.set_recall_refine_steps(model, 3) == 3
+    assert arti.set_recall_refine_schedule(model, (0, 2, 4)) == 3
+    assert [
+        wrapper.adapter.layer.config.recall_steps for wrapper in wrappers
+    ] == [0, 2, 4]
+
+    before = [
+        wrapper.adapter.layer.config.recall_steps for wrapper in wrappers
+    ]
+    with pytest.raises(ValueError, match="non-negative integer"):
+        arti.set_recall_refine_schedule(model, (5, -1, 7))
+    assert [
+        wrapper.adapter.layer.config.recall_steps for wrapper in wrappers
+    ] == before
+
+    assert arti.set_recall_refine_schedule(
+        model,
+        {"0": 5, "1": 3, "2": 1},
+    ) == 3
+    assert [
+        wrapper.adapter.layer.config.recall_steps for wrapper in wrappers
+    ] == [5, 3, 1]
+
+
+def test_runtime_recall_refine_schedule_updates_nested_wrappers_once():
+    def make_wrapper(base: nn.Module) -> ARTIAdapterWrapper:
+        return ARTIAdapterWrapper(
+            base,
+            arti.ARTIResidualBlock(
+                dim=4,
+                recall_slots=2,
+                recall_steps=1,
+                use_phase_mixer=False,
+                use_virtual_interface=False,
+            ),
+            freeze_base=False,
+        )
+
+    inner = make_wrapper(nn.Identity())
+    outer = make_wrapper(inner)
+
+    assert arti.set_recall_refine_schedule(outer, {"": 2, "base": 4}) == 2
+    assert outer.adapter.layer.config.recall_steps == 2
+    assert inner.adapter.layer.config.recall_steps == 4
+    assert arti.set_recall_refine_schedule(nn.Identity(), ()) == 0
+
+
+def test_runtime_recall_refine_controls_cannot_enable_unallocated_recall():
+    def make_wrapper(recall_steps: int) -> ARTIAdapterWrapper:
+        return ARTIAdapterWrapper(
+            nn.Identity(),
+            arti.ARTIResidualBlock(
+                dim=4,
+                recall_slots=2,
+                recall_steps=recall_steps,
+                use_phase_mixer=False,
+                use_virtual_interface=False,
+            ),
+            freeze_base=False,
+        )
+
+    active = make_wrapper(1)
+    absent = make_wrapper(0)
+    model = nn.Sequential(active, absent)
+
+    with pytest.raises(ValueError, match="initialized without Recall"):
+        arti.set_recall_refine_steps(model, 2)
+    assert active.adapter.layer.config.recall_steps == 1
+    assert absent.adapter.layer.config.recall_steps == 0
+
+    with pytest.raises(ValueError, match="initialized without Recall"):
+        arti.set_recall_refine_schedule(model, (3, 2))
+    assert active.adapter.layer.config.recall_steps == 1
+    assert absent.adapter.layer.config.recall_steps == 0
 
 
 class TinyTransformerBlock(nn.Module):

@@ -22,7 +22,7 @@ from .blocks import ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
 from .config import ARTIConfig
 from .conversation import ParticipantContextTensors, build_participant_context, last_non_assistant_participant
 from .distinctness import LatentDistinctnessReport, assert_latent_distinct, latent_distinctness_report
-from .fit import ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, resolve_fit_config_mechanism, resolve_objectives, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
+from .fit import ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, resolve_fit_config_mechanism, resolve_objectives, set_recall_refine_schedule, set_recall_refine_steps, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from .layers import (
     ARTIDynamicStateLayer,
     ARTILatentRecallField,
@@ -309,6 +309,8 @@ __all__ = [
     "project",
     "fit",
     "apply_adapter",
+    "set_recall_refine_schedule",
+    "set_recall_refine_steps",
     "get_plugin",
     "load_fit_config",
     "template_fit_config",

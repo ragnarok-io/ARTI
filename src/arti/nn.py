@@ -563,8 +563,8 @@ class UnFold(nn.Module):
         if not self._can_use_triton_palette(x, exposed_count) or self.dim > 256:
             return False
         # The fused query keeps a complete token-by-feature tile resident.
-        # FP32 N=128,D=256 exceeds the measured 101 KiB shared-memory limit
-        # on the RTX 5070 Ti; the established palette path remains available.
+        # Larger FP32 tiles can exceed per-block shared-memory limits on
+        # consumer GPUs; the established palette path remains available.
         return x.dtype != torch.float32 or x.shape[1] <= 64
 
     def _select_operator_schedule(
