@@ -11,7 +11,17 @@ class AdapterScale:
     interface_slots: int = 8
     recall_slots: int = 4
     recall_steps: int = 0
+    recall_min_steps: int = 1
+    recall_tolerance: float | None = None
     recall_activation: str = "half"
+    recall_recognition_mode: str = "none"
+    recall_bank_fraction: float | None = 0.6
+    recall_routing: str = "grouped"
+    recall_key_dim: int = 32
+    recall_group_size: int = 128
+    recall_group_topk: int = 2
+    recall_value_composition: str = "single"
+    recall_formula: str | None = None
     operator_count: int = 4
 
 

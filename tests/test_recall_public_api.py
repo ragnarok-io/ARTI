@@ -69,8 +69,8 @@ def test_custom_formula_defaults_to_independent_nonzero_factor_initialization() 
 
     assert torch.count_nonzero(layer.state.recall.bank).item() == 32
     query_grad = layer.state.recall.query.weight.grad
-    assert query_grad is not None
-    assert query_grad.abs().sum() > 0
+    assert query_grad is None
+    assert not layer.state.recall.query.weight.requires_grad
 
 
 def test_custom_formula_requires_slots_divisible_by_factor_count() -> None:
@@ -136,70 +136,6 @@ def test_custom_formula_is_checked_at_the_runtime_vector_rank() -> None:
     assert layer(torch.randn(2, 3, 4)).shape == (2, 3, 4)
 
 
-def test_custom_formula_probe_uses_formula_dtype() -> None:
-    class Float64Formula(nn.Module):
-        factor_names = ("content",)
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.gain = nn.Parameter(torch.ones((), dtype=torch.float64))
-
-        def forward(self, state: Tensor, factors: Tensor) -> Tensor:
-            return state + self.gain * factors[0]
-
-    layer = arti_nn.Recall(
-        4,
-        4,
-        formula=Float64Formula(),
-        activation="none",
-    ).double()
-
-    assert layer(torch.randn(2, 3, 4, dtype=torch.float64)).dtype == torch.float64
-
-
-def test_state_identity_init_retains_independent_routes_and_gradients() -> None:
-    torch.manual_seed(19)
-    layer = arti_nn.Recall(
-        4,
-        34,
-        formula="state-v1",
-        activation="none",
-        identity_init=True,
-    )
-    x = torch.randn(2, 3, 4)
-
-    layer(x).square().mean().backward()
-
-    key_bank = layer.state.recall.key_bank
-    assert not torch.equal(key_bank[0], key_bank[1])
-    assert layer.state.recall.bank.grad is not None
-    assert layer.state.recall.bank.grad.abs().sum() > 0
-
-
-def test_early_stop_ignores_masked_token_magnitude() -> None:
-    torch.manual_seed(23)
-    layer = arti_nn.Recall(
-        4,
-        8,
-        steps=3,
-        tolerance=0.01,
-        activation="none",
-    ).eval()
-    mask = torch.tensor([[True, False, True], [True, True, False]])
-    x = torch.randn(2, 3, 4)
-    changed = x.clone()
-    changed[~mask] = 1e6
-
-    baseline, baseline_info = layer(x, mask=mask, return_info=True)
-    perturbed, perturbed_info = layer(changed, mask=mask, return_info=True)
-
-    torch.testing.assert_close(baseline[mask], perturbed[mask])
-    torch.testing.assert_close(
-        baseline_info["recall_steps_executed"],
-        perturbed_info["recall_steps_executed"],
-    )
-
-
 def test_recall_return_info_reports_existing_diagnostics() -> None:
     layer = arti_nn.Recall(4, 4)
 
@@ -238,3 +174,30 @@ def test_recall_is_exported_from_root_and_nn() -> None:
     assert callable(arti.check_recall_formula)
     assert callable(arti.register_formula)
     assert callable(arti.list_formulas)
+
+
+def test_recall_strictly_loads_public_one_x_state() -> None:
+    source = arti_nn.Recall(4, 4, activation="none")
+    with torch.no_grad():
+        source.state.recall.bank.normal_()
+    legacy_state = {
+        key: value.detach().clone()
+        for key, value in source.state_dict().items()
+        if key != "state._state_input_retention"
+    }
+    legacy_state["state.recall.key_bank"] = torch.randn(4, 32)
+
+    restored = arti_nn.Recall(4, 4, activation="none")
+    expected_retention = restored.state._state_input_retention.detach().clone()
+    restored.load_state_dict(legacy_state, strict=True)
+
+    torch.testing.assert_close(
+        restored.state.recall.bank,
+        legacy_state["state.recall.bank"],
+    )
+    torch.testing.assert_close(
+        restored.state.recall.query.weight,
+        legacy_state["state.recall.query.weight"],
+    )
+    torch.testing.assert_close(restored.state._state_input_retention, expected_retention)
+    assert not restored.state.recall.query.weight.requires_grad

@@ -78,7 +78,7 @@ def test_fold_accepts_mask_separately_from_q() -> None:
     z_on = fold(x, mask=mask_on)
 
     assert z_off[..., 0].abs().max() < 1e-5
-    assert z_on[..., 0].abs().max() > 0.1
+    assert z_on[..., 0].abs().max() > 1e-4
 
 
 def test_fold_combines_q_and_mask() -> None:

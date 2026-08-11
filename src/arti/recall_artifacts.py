@@ -1,4 +1,4 @@
-"""Scoped Recall artifacts and label-free episodic test-time adaptation."""
+"""Scoped Recall expert artifacts, registries, and composition helpers."""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import copy
 import hashlib
 import json
 import threading
-import time
 import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Mapping
 
 import torch
 import torch.nn as nn
@@ -20,15 +19,14 @@ from .serialization import ARTILoadResult, ARTISaveResult, load, save
 
 
 RECALL_ARTIFACT_KIND = "arti.recall-expert"
-RECALL_ARTIFACT_VERSION = 1
-DEFAULT_ALLOWED_SIGNALS = ("masked_reconstruction", "next_token", "consistency")
-_FORBIDDEN_SUPPORT_FIELDS = ("label", "target", "answer", "query")
+RECALL_ARTIFACT_VERSION = 2
+_SUPPORTED_RECALL_ARTIFACT_VERSIONS = frozenset({1, RECALL_ARTIFACT_VERSION})
 _OVERFLOW_POLICIES = ("abstain", "shard", "allow")
 
 
 @dataclass(frozen=True)
 class RecallCapacityDecision:
-    """A deterministic routing decision for one Recall support episode."""
+    """A deterministic allocation decision for bounded Recall artifacts."""
 
     requested_items: int
     accepted_items: int
@@ -40,13 +38,7 @@ class RecallCapacityDecision:
 
 @dataclass(frozen=True)
 class RecallCapacityPlan:
-    """Declare bounded Recall capacity and a deterministic overflow policy.
-
-    ``abstain`` rejects an episode that does not fit. ``shard`` assigns the
-    fitting prefix across the declared experts and rejects the remainder.
-    ``allow`` is intentionally unprotected and is useful only as a control
-    control for measuring interference beyond the declared capacity.
-    """
+    """Declare bounded Recall storage without prescribing a training loop."""
 
     slots_per_expert: int
     experts: int = 1
@@ -64,7 +56,7 @@ class RecallCapacityPlan:
         return self.slots_per_expert * self.experts
 
     def decide(self, item_count: int) -> RecallCapacityDecision:
-        """Route a support count without inspecting labels or query state."""
+        """Allocate an item count without inspecting tensor contents."""
 
         self.validate()
         if item_count < 0:
@@ -96,7 +88,6 @@ class RecallArtifactSpec:
     capability: str
     base_model_fingerprint: str
     injection_fingerprint: str
-    allowed_signals: tuple[str, ...] = DEFAULT_ALLOWED_SIGNALS
     visibility_policy: str = "caller_supplied"
     capacity_plan: RecallCapacityPlan | None = None
     training_metadata: Mapping[str, Any] | None = None
@@ -108,8 +99,6 @@ class RecallArtifactSpec:
             raise ValueError("Recall artifact base_model_fingerprint must be a SHA-256 value")
         if not _is_sha256(self.injection_fingerprint):
             raise ValueError("Recall artifact injection_fingerprint must be a SHA-256 value")
-        if not self.allowed_signals or any(signal not in DEFAULT_ALLOWED_SIGNALS for signal in self.allowed_signals):
-            raise ValueError(f"Recall artifact allowed_signals must be chosen from {DEFAULT_ALLOWED_SIGNALS}")
         if not self.visibility_policy:
             raise ValueError("Recall artifact visibility_policy must be non-empty")
         if self.capacity_plan is not None:
@@ -118,27 +107,9 @@ class RecallArtifactSpec:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        payload["allowed_signals"] = list(self.allowed_signals)
         if self.capacity_plan is not None:
             payload["capacity_plan"] = asdict(self.capacity_plan)
         return payload
-
-
-@dataclass(frozen=True)
-class RecallTTTRecord:
-    """Auditable result of one label-free Recall adaptation transaction."""
-
-    steps: int
-    allowed_signal: str
-    support_examples: int
-    initial_weights_sha256: str
-    final_weights_sha256: str
-    backbone_sha256_before: str
-    backbone_sha256_after: str
-    final_loss: float
-    elapsed_seconds: float
-    trainable_parameters: tuple[str, ...] = ()
-    rolled_back: bool = False
 
 
 def module_structure_fingerprint(module: nn.Module) -> str:
@@ -192,7 +163,10 @@ def load_recall_artifact(
     # Validate package and compatibility before mutating the active expert.
     loaded = load(target, map_location=map_location)
     config = loaded.manifest.get("architecture", {}).get("config", {})
-    if config.get("artifact_kind") != RECALL_ARTIFACT_KIND or config.get("artifact_version") != RECALL_ARTIFACT_VERSION:
+    if (
+        config.get("artifact_kind") != RECALL_ARTIFACT_KIND
+        or config.get("artifact_version") not in _SUPPORTED_RECALL_ARTIFACT_VERSIONS
+    ):
         raise ValueError("artifact is not a Recall expert package")
     recorded = config.get("recall_expert")
     if not isinstance(recorded, Mapping):
@@ -201,7 +175,6 @@ def load_recall_artifact(
         capability=str(recorded.get("capability", "")),
         base_model_fingerprint=str(recorded.get("base_model_fingerprint", "")),
         injection_fingerprint=str(recorded.get("injection_fingerprint", "")),
-        allowed_signals=tuple(recorded.get("allowed_signals", ())),
         visibility_policy=str(recorded.get("visibility_policy", "")),
         capacity_plan=_capacity_plan_from_payload(recorded.get("capacity_plan")),
         training_metadata=recorded.get("training_metadata"),
@@ -390,150 +363,8 @@ class RecallExpertPool(nn.Module):
         return _mix_outputs(outputs, weights)
 
 
-class RecallTTTSession:
-    """An episodic transaction that updates only a Recall expert from support input.
-
-    The public API has no query argument. Support mappings containing label,
-    target, answer, or query fields are rejected before the user-supplied
-    self-supervised objective runs.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        expert: nn.Module,
-        support_loss: Callable[[nn.Module, Mapping[str, Any]], torch.Tensor],
-        *,
-        allowed_signals: Iterable[str] = DEFAULT_ALLOWED_SIGNALS,
-        trainable_parameters: Iterable[str] | None = None,
-    ) -> None:
-        self.model = model
-        self.expert = expert
-        self.support_loss = support_loss
-        self.allowed_signals = tuple(allowed_signals)
-        if not self.allowed_signals or any(signal not in DEFAULT_ALLOWED_SIGNALS for signal in self.allowed_signals):
-            raise ValueError(f"allowed_signals must be chosen from {DEFAULT_ALLOWED_SIGNALS}")
-        named_expert_parameters = dict(expert.named_parameters())
-        if not named_expert_parameters:
-            raise ValueError("Recall TTT expert must have trainable parameters")
-        if trainable_parameters is None:
-            self.trainable_parameter_names = tuple(named_expert_parameters)
-        else:
-            self.trainable_parameter_names = tuple(trainable_parameters)
-            unknown = set(self.trainable_parameter_names) - set(named_expert_parameters)
-            if unknown:
-                raise ValueError(f"unknown Recall TTT trainable parameters: {sorted(unknown)}")
-            if not self.trainable_parameter_names:
-                raise ValueError("Recall TTT trainable_parameters must not be empty")
-        self._trainable_parameters = [named_expert_parameters[name] for name in self.trainable_parameter_names]
-        expert_ids = {id(parameter) for parameter in self._trainable_parameters}
-        for parameter in model.parameters():
-            parameter.requires_grad_(id(parameter) in expert_ids)
-        self._initial_expert = _clone_state(expert)
-        self._backbone_before = _state_hash(model, exclude_parameter_ids=expert_ids)
-        self._last_record: RecallTTTRecord | None = None
-
-    @property
-    def last_record(self) -> RecallTTTRecord | None:
-        return self._last_record
-
-    def adapt(
-        self,
-        support_batches: Iterable[Mapping[str, Any]],
-        *,
-        steps: int,
-        learning_rate: float,
-        allowed_signal: str = "consistency",
-        reset: bool = True,
-    ) -> RecallTTTRecord:
-        if steps <= 0 or learning_rate <= 0:
-            raise ValueError("steps and learning_rate must be positive")
-        if allowed_signal not in self.allowed_signals:
-            raise ValueError(f"allowed_signal {allowed_signal!r} is not permitted by this Recall session")
-        batches = list(support_batches)
-        if not batches:
-            raise ValueError("Recall TTT requires at least one support batch")
-        for batch in batches:
-            _validate_support_batch(batch)
-        if reset:
-            self.expert.load_state_dict(self._initial_expert, strict=True)
-        initial_hash = _state_hash(self.expert)
-        optimizer = torch.optim.AdamW(self._trainable_parameters, lr=learning_rate)
-        started = time.perf_counter()
-        final_loss = 0.0
-        self.model.train()
-        for index in range(steps):
-            loss = self.support_loss(self.model, batches[index % len(batches)])
-            if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
-                raise ValueError("Recall TTT support_loss must return a scalar Tensor")
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            final_loss = float(loss.detach().cpu())
-        self.model.eval()
-        backbone_after = _state_hash(self.model, exclude_parameter_ids={id(parameter) for parameter in self._trainable_parameters})
-        if backbone_after != self._backbone_before:
-            self.rollback()
-            raise RuntimeError("Recall TTT changed frozen backbone state; transaction rolled back")
-        record = RecallTTTRecord(
-            steps=steps,
-            allowed_signal=allowed_signal,
-            support_examples=_support_example_count(batches),
-            initial_weights_sha256=initial_hash,
-            final_weights_sha256=_state_hash(self.expert),
-            backbone_sha256_before=self._backbone_before,
-            backbone_sha256_after=backbone_after,
-            final_loss=final_loss,
-            elapsed_seconds=time.perf_counter() - started,
-            trainable_parameters=self.trainable_parameter_names,
-        )
-        self._last_record = record
-        return record
-
-    def rollback(self) -> RecallTTTRecord | None:
-        self.expert.load_state_dict(self._initial_expert, strict=True)
-        if self._last_record is None:
-            return None
-        self._last_record = RecallTTTRecord(**{**asdict(self._last_record), "rolled_back": True})
-        return self._last_record
-
-
-def _validate_support_batch(batch: Mapping[str, Any]) -> None:
-    for key, value in batch.items():
-        lowered = str(key).lower()
-        if any(marker in lowered for marker in _FORBIDDEN_SUPPORT_FIELDS):
-            raise ValueError(f"Recall TTT support batch may not contain label-bearing field {key!r}")
-        if isinstance(value, Mapping):
-            _validate_support_batch(value)
-
-
-def _support_example_count(batches: list[Mapping[str, Any]]) -> int:
-    total = 0
-    for batch in batches:
-        for value in batch.values():
-            if isinstance(value, torch.Tensor) and value.ndim > 0:
-                total += int(value.shape[0])
-                break
-    return total
-
-
 def _clone_state(module: nn.Module) -> dict[str, torch.Tensor]:
     return {name: tensor.detach().clone() for name, tensor in module.state_dict().items()}
-
-
-def _state_hash(module: nn.Module, *, exclude_parameter_ids: set[int] | None = None) -> str:
-    excluded = exclude_parameter_ids or set()
-    parameter_ids = {name: id(parameter) for name, parameter in module.named_parameters()}
-    digest = hashlib.sha256()
-    for name, tensor in module.state_dict().items():
-        if parameter_ids.get(name) in excluded:
-            continue
-        contiguous = tensor.detach().to("cpu").contiguous()
-        digest.update(name.encode("utf-8"))
-        digest.update(str(contiguous.dtype).encode("ascii"))
-        digest.update(json.dumps(list(contiguous.shape)).encode("ascii"))
-        digest.update(contiguous.view(torch.uint8).numpy().tobytes())
-    return digest.hexdigest()
 
 
 def _sha256_json(value: Any) -> str:

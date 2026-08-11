@@ -12,7 +12,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from .fit import MechanismOverrides, MechanismSummary, apply_adapter, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, doctor_report, fit, generate_capabilities_markdown, generate_fit_config_schema_json, generate_task_graph_schema_json, list_plugins, list_profiles, list_scales, load_fit_config, plan_provenance_fingerprint, resolve_fit_config_mechanism, validate_artifact, validate_build_lock, validate_deployment_manifest, validate_plan, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
+from .fit import MechanismOverrides, MechanismSummary, apply_adapter, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, doctor_report, fit, generate_capabilities_markdown, generate_fit_config_schema_json, generate_task_graph_schema_json, list_plugins, list_profiles, list_scales, load_fit_config, plan_provenance_fingerprint, resolve_fit_config_mechanism, validate_artifact, validate_build_lock, validate_deployment_manifest, validate_plan, validate_task_graph, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from .fit.artifacts import hash_tensor_state_dict
 from .pretrained_cli import pretrained_cli_report
 
@@ -28,7 +28,16 @@ MECHANISM_FIELDS = {
     "interface_slots",
     "recall_slots",
     "recall_steps",
+    "recall_min_steps",
+    "recall_tolerance",
     "recall_activation",
+    "recall_recognition_mode",
+    "recall_bank_fraction",
+    "recall_routing",
+    "recall_key_dim",
+    "recall_group_size",
+    "recall_group_topk",
+    "recall_value_composition",
     "hidden_multiplier",
 }
 
@@ -118,7 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     plan_build_parser.add_argument("--mechanism-interface-slots", type=int, default=None, help="Override virtual interface slot count.")
     plan_build_parser.add_argument("--mechanism-recall-slots", type=int, default=None, help="Override private recall slot count.")
     plan_build_parser.add_argument("--mechanism-recall-steps", type=int, default=None, help="Override private recall update steps.")
+    plan_build_parser.add_argument("--mechanism-recall-min-steps", type=int, default=None, help="Minimum Recall micro-cycle steps before adaptive stopping.")
+    plan_build_parser.add_argument("--mechanism-recall-tolerance", type=float, default=None, help="Relative Recall update tolerance for adaptive stopping.")
     plan_build_parser.add_argument("--mechanism-recall-activation", choices=("half", "none"), default=None, help="Override Recall trace-survival activation.")
+    plan_build_parser.add_argument("--mechanism-recall-recognition-mode", choices=("none", "explicit", "alignment"), default=None, help="Optionally enable Recall recognition after trace acquisition.")
+    plan_build_parser.add_argument("--mechanism-recall-bank-fraction", type=float, default=None, help="Target fraction of adapter parameters allocated to Recall bank assets.")
+    plan_build_parser.add_argument("--mechanism-recall-routing", choices=("dense", "grouped"), default=None, help="Override Recall bank routing mode.")
+    plan_build_parser.add_argument("--mechanism-recall-key-dim", type=int, default=None, help="Grouped Recall routing key width.")
+    plan_build_parser.add_argument("--mechanism-recall-group-size", type=int, default=None, help="Number of independent Recall slots per routing group.")
+    plan_build_parser.add_argument("--mechanism-recall-group-topk", type=int, default=None, help="Number of Recall groups selected per read.")
+    plan_build_parser.add_argument("--mechanism-recall-value-composition", choices=("single", "product", "state"), default=None, help="Read one Recall delta, one affine write, or a complete recalled state.")
     plan_build_parser.add_argument("--mechanism-hidden-multiplier", type=float, default=None, help="Override adapter hidden width multiplier.")
     plan_build_parser.add_argument("--max-adapters", type=int, default=None)
     plan_build_parser.add_argument("--max-extra-params", default=None)
@@ -149,7 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
     artifact_build_parser.add_argument("--mechanism-interface-slots", type=int, default=None, help="Override virtual interface slot count.")
     artifact_build_parser.add_argument("--mechanism-recall-slots", type=int, default=None, help="Override private recall slot count.")
     artifact_build_parser.add_argument("--mechanism-recall-steps", type=int, default=None, help="Override private recall update steps.")
+    artifact_build_parser.add_argument("--mechanism-recall-min-steps", type=int, default=None, help="Minimum Recall micro-cycle steps before adaptive stopping.")
+    artifact_build_parser.add_argument("--mechanism-recall-tolerance", type=float, default=None, help="Relative Recall update tolerance for adaptive stopping.")
     artifact_build_parser.add_argument("--mechanism-recall-activation", choices=("half", "none"), default=None, help="Override Recall trace-survival activation.")
+    artifact_build_parser.add_argument("--mechanism-recall-recognition-mode", choices=("none", "explicit", "alignment"), default=None, help="Optionally enable Recall recognition after trace acquisition.")
+    artifact_build_parser.add_argument("--mechanism-recall-bank-fraction", type=float, default=None, help="Target fraction of adapter parameters allocated to Recall bank assets.")
+    artifact_build_parser.add_argument("--mechanism-recall-routing", choices=("dense", "grouped"), default=None, help="Override Recall bank routing mode.")
+    artifact_build_parser.add_argument("--mechanism-recall-key-dim", type=int, default=None, help="Grouped Recall routing key width.")
+    artifact_build_parser.add_argument("--mechanism-recall-group-size", type=int, default=None, help="Number of independent Recall slots per routing group.")
+    artifact_build_parser.add_argument("--mechanism-recall-group-topk", type=int, default=None, help="Number of Recall groups selected per read.")
+    artifact_build_parser.add_argument("--mechanism-recall-value-composition", choices=("single", "product", "state"), default=None, help="Read one Recall delta, one affine write, or a complete recalled state.")
     artifact_build_parser.add_argument("--mechanism-hidden-multiplier", type=float, default=None, help="Override adapter hidden width multiplier.")
     artifact_build_parser.add_argument("--max-adapters", type=int, default=None)
     artifact_build_parser.add_argument("--max-extra-params", default=None)
@@ -983,7 +1010,16 @@ def cli_mechanism_overrides(args: argparse.Namespace) -> MechanismOverrides | No
         "interface_slots": args.mechanism_interface_slots,
         "recall_slots": args.mechanism_recall_slots,
         "recall_steps": args.mechanism_recall_steps,
+        "recall_min_steps": args.mechanism_recall_min_steps,
+        "recall_tolerance": args.mechanism_recall_tolerance,
         "recall_activation": args.mechanism_recall_activation,
+        "recall_recognition_mode": args.mechanism_recall_recognition_mode,
+        "recall_bank_fraction": args.mechanism_recall_bank_fraction,
+        "recall_routing": args.mechanism_recall_routing,
+        "recall_key_dim": args.mechanism_recall_key_dim,
+        "recall_group_size": args.mechanism_recall_group_size,
+        "recall_group_topk": args.mechanism_recall_group_topk,
+        "recall_value_composition": args.mechanism_recall_value_composition,
         "hidden_multiplier": args.mechanism_hidden_multiplier,
     }
     overrides = MechanismOverrides.from_mapping({key: value for key, value in payload.items() if value is not None}).validate()

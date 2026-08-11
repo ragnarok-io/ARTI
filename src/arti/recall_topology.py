@@ -172,8 +172,12 @@ def estimate_layered_recall_cost(
         if dim is None:
             raise ValueError(f"candidate layer {spec.path!r} needs dim for static cost estimation")
         recognizer = 2 * spec.rank + 1 if spec.recognition_mode == "alignment" else 0
-        parameters += spec.copies * (spec.slots * spec.rank + 2 * dim * spec.rank + (2 * spec.rank + 1) + recognizer)
-        per_token += spec.copies * (2 * dim * spec.rank + 2 * spec.slots * spec.rank + 4 * spec.rank)
+        parameters += spec.copies * (spec.slots * spec.rank + 2 * dim * spec.rank + recognizer)
+        per_token += spec.copies * (
+            2 * dim * spec.rank
+            + 2 * spec.slots * spec.rank
+            + (2 * spec.rank if spec.recognition_mode == "alignment" else 0)
+        )
     return LayeredRecallCost(parameters=parameters, token_multiply_adds=per_token * tokens, layer_count=len(specs))
 
 

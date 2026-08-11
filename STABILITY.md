@@ -1,11 +1,11 @@
 # Stability Policy
 
-ARTI 1.9.0 is published as a Stable Candidate. This label is a release stage,
+ARTI 2.0.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
-## Supported 1.x Surface
+## Supported 2.x Surface
 
-The following contracts are frozen across compatible 1.x releases:
+The following contracts are frozen across compatible 2.x releases:
 
 - Core tensor contracts for `[B, D]` and `[B, N, D]` inputs.
 - `arti.nn` core layers: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, and
@@ -29,19 +29,24 @@ in 1.8.0. Built-in formula identifiers and tensor shape rules are documented,
 but custom-formula serialization and third-party provider portability are not
 part of the frozen core surface.
 
-Runtime Recall refinement controls are introduced as alpha APIs in 1.9.0.
+Runtime Recall refinement controls were introduced as alpha APIs in 1.9.0.
 Their exact-depth semantics and atomic schedule validation are documented, but
 automatic schedule selection is not part of the supported surface.
+
+ARTI 2.0 removes the experimental `RecallTTTSession` API. Current Recall,
+Formula, artifact, policy, and workspace APIs do not own an optimizer or an
+implicit online-training session.
 
 ## Compatibility
 
 - Patch releases fix defects without intentionally breaking supported APIs.
-- Minor 1.x releases may add optional parameters and APIs with compatible
+- Minor 2.x releases may add optional parameters and APIs with compatible
   defaults.
 - Breaking supported APIs requires a new major release.
-- ARTI 1.x reads valid format-version 1 `arti.st` artifacts produced by the
-  pre-public 0.x line. Artifact format compatibility is independent of the
-  package version.
+- ARTI 2.x reads valid format-version 1 `arti.st` artifacts produced by the
+  pre-public 0.x and public 1.x lines. Recall state migration preserves the
+  value Bank and query basis but does not promise identical routing behavior.
+  Artifact format compatibility is independent of the package version.
 - Serialized artifacts must not depend on Python pickle for normal `.arti.st`
   loading.
 

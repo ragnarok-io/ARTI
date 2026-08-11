@@ -12,6 +12,8 @@ def init_arti_module(module: nn.Module) -> nn.Module:
 
     for child in module.modules():
         if isinstance(child, nn.Linear):
+            if bool(getattr(child, "_arti_fixed_query", False)):
+                continue
             nn.init.xavier_uniform_(child.weight)
             if child.bias is not None:
                 nn.init.zeros_(child.bias)

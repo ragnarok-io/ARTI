@@ -5,15 +5,16 @@ New PyTorch-specific code may import from ``arti.torch`` to make backend intent
 explicit and to leave room for future ``arti.jax`` modules.
 """
 
-from ..blocks import ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
-from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTILayerInfo, discover_layers
+from ..blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
+from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIExpertSet, ARTILayerInfo, discover_layers
 from ..attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
 from ..attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, recall_alignment_objective, resolve_attachment_objective
 from ..attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from ..config import ARTIConfig
 from ..conversation import ParticipantContextTensors, build_participant_context, last_non_assistant_participant
 from ..distinctness import LatentDistinctnessReport, assert_latent_distinct, latent_distinctness_report
-from ..fit import ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, resolve_fit_config_mechanism, resolve_objectives, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
+from ..fit import ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, reset_recall_queries, resolve_fit_config_mechanism, resolve_objectives, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
+from ..fit import concatenate_adapter_banks, set_adapter_bank_influences, set_adapter_bank_weights
 from .cuda import cuda_device_report, cuda_runtime_available, cuda_smoke_report, require_cuda
 from ..functional import (
     apply_coord_frame_inverse,
@@ -82,13 +83,14 @@ from ..outputs import ARTIOutput
 from ..pulse import PulseCompressor, PulseOutput, assert_pulse_distinct, fixed_width_pulse_ids, pulse_compress, pulse_distinctness_report
 from ..pretrained import ARTIPlan, ARTIPretrained, ComponentPlan, PretrainedExportResult, PretrainedFitResult, TrainingSpec, from_pretrained, model_structure_fingerprint, pretrained, validate_pretrained_lock
 from ..providers import ARTIProviderError, DiffusersProvider, PEFTProvider, PretrainedProvider, ProviderInspection, TorchProvider, TransformersProvider, get_provider as get_pretrained_provider, provider_report, register_provider
-from ..recall_ttt import DEFAULT_ALLOWED_SIGNALS, RECALL_ARTIFACT_KIND, RECALL_ARTIFACT_VERSION, RecallArtifactSpec, RecallCapacityDecision, RecallCapacityPlan, RecallExpertPool, RecallExpertRegistry, RecallTTTRecord, RecallTTTSession, export_recall_artifact, load_recall_artifact, module_structure_fingerprint, recall_artifact_path
+from ..recall_artifacts import RECALL_ARTIFACT_KIND, RECALL_ARTIFACT_VERSION, RecallArtifactSpec, RecallCapacityDecision, RecallCapacityPlan, RecallExpertPool, RecallExpertRegistry, export_recall_artifact, load_recall_artifact, module_structure_fingerprint, recall_artifact_path
+from ..recall_experts import RECALL_BANK_ARTIFACT_KIND, RECALL_BANK_ARTIFACT_VERSION, RecallBankSpec, RecallExpertAsset, RecallExpertAssembly, RecallExpertContract, RecallExpertLayout, canonical_tensor_state_sha256, create_recall_expert_contract, export_recall_expert_bank, freeze_for_recall_expert, inspect_recall_expert_bank, load_recall_expert_bank, module_value_sha256, recall_bank_parameter_names, validate_recall_expert_contract
 from ..runtime_vocab import LiteralInput, LiteralOutputHead, LiteralVocabCache, LiteralVocabModel, OutputLexiconContext, RuntimeVocabEncoder, RuntimeVocabHead, RuntimeVocabInput, RuntimeVocabModel, RuntimeVocabPulseAdapter, attach_runtime_vocab_semantics, flatten_vocab_tensor, gather_runtime_vocab, permute_runtime_vocab, remap_token_ids
 from ..source_integrity import SOURCE_INTEGRITY_MODES, SourceIntegrityBasis, SourceIntegrityCarrier, SourceIntegrityReport, assert_source_integrity, decode_source_tokens, encode_source_tokens, make_source_integrity_basis, read_sources, source_basis_orthogonality_loss, source_integrity_loss, source_integrity_report, superpose_sources
 from ..serialization import ARTI_ST_FORMAT, ARTI_ST_FORMAT_VERSION, ARTILoadResult, ARTISaveResult, load, migrate_pt, save
 from ..text_bitmap import BitmapTextConfig, BitmapTextRenderer, BitmapVocabReport, assert_bitmap_vocab_distinct, bitmap_vocab_report, render_text_bitmap, render_text_vocab
 from ..text_tensor import TEXT_CONTROL_CHANNELS, TEXT_IDENTITY_MODES, TextControlKind, TextTensorConfig, TextTensorLayout, TextTensorRenderer, render_text_layout, render_text_tensor
-from ..training import experiential_recall_alignment_loss, experiential_recall_selectivity_loss, virtual_recall_alignment_loss
+from ..training import experiential_recall_alignment_loss, experiential_recall_selectivity_loss, recall_route_exterior_penalty, virtual_recall_alignment_loss
 
 __all__ = [
     "ARTI",
@@ -96,6 +98,7 @@ __all__ = [
     "ARTIAttachTrainingConfig",
     "ARTIAttachment",
     "ARTIAttachmentSummary",
+    "ARTIExpertSet",
     "ARTILayerInfo",
     "discover_layers",
     "load_attach_config",
@@ -122,9 +125,11 @@ __all__ = [
     "ARTILatentRecallField",
     "ARTIPhaseMixer",
     "ARTIResidualBlock",
+    "ARTIHostBridge",
     "ARTISequenceBlock",
     "ARTIPooledBlock",
     "Half",
+    "UnFold",
     "Layer",
     "FeatureConfig",
     "features",
@@ -152,12 +157,11 @@ __all__ = [
     "pareto_layered_recall",
     "screen_layered_recall_candidate",
     "Fold",
-    "UnFold",
     "Pulse",
     "LearnedPulse",
     "FusionPulse",
-    "Recall",
     "RecallRefiner",
+    "Recall",
     "VisualField",
     "VisualFieldOutput",
     "concat_visual_fields",
@@ -190,18 +194,31 @@ __all__ = [
     "provider_report",
     "RECALL_ARTIFACT_KIND",
     "RECALL_ARTIFACT_VERSION",
-    "DEFAULT_ALLOWED_SIGNALS",
     "RecallArtifactSpec",
     "RecallCapacityPlan",
     "RecallCapacityDecision",
-    "RecallTTTRecord",
-    "RecallTTTSession",
     "RecallExpertRegistry",
     "RecallExpertPool",
     "module_structure_fingerprint",
     "recall_artifact_path",
     "export_recall_artifact",
     "load_recall_artifact",
+    "RECALL_BANK_ARTIFACT_KIND",
+    "RECALL_BANK_ARTIFACT_VERSION",
+    "RecallBankSpec",
+    "RecallExpertAsset",
+    "RecallExpertAssembly",
+    "RecallExpertContract",
+    "RecallExpertLayout",
+    "canonical_tensor_state_sha256",
+    "create_recall_expert_contract",
+    "export_recall_expert_bank",
+    "freeze_for_recall_expert",
+    "inspect_recall_expert_bank",
+    "load_recall_expert_bank",
+    "module_value_sha256",
+    "recall_bank_parameter_names",
+    "validate_recall_expert_contract",
     "ARTIProject",
     "ARTIFitResult",
     "AdapterArtifactManifest",
@@ -222,8 +239,12 @@ __all__ = [
     "BatchSchema",
     "TensorField",
     "project",
+    "reset_recall_queries",
     "fit",
     "apply_adapter",
+    "concatenate_adapter_banks",
+    "set_adapter_bank_influences",
+    "set_adapter_bank_weights",
     "cuda_device_report",
     "cuda_runtime_available",
     "cuda_smoke_report",
@@ -351,6 +372,7 @@ __all__ = [
     "source_basis_orthogonality_loss",
     "virtual_recall_alignment_loss",
     "experiential_recall_alignment_loss",
+    "recall_route_exterior_penalty",
     "experiential_recall_selectivity_loss",
     "as_sequence",
     "restore_input_rank",

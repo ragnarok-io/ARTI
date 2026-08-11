@@ -14,10 +14,13 @@ import arti.torch.training as torch_training
 def test_torch_backend_namespace_matches_root_api():
     assert arti_torch.ARTILayer is arti.ARTILayer
     assert arti_torch.ARTIResidualBlock is arti.ARTIResidualBlock
+    assert arti_torch.ARTIHostBridge is arti.ARTIHostBridge
     assert arti_torch.virtual_recall_alignment_loss is arti.virtual_recall_alignment_loss
     assert arti_torch.experiential_recall_alignment_loss is arti.experiential_recall_alignment_loss
+    assert arti_torch.recall_route_exterior_penalty is arti.recall_route_exterior_penalty
     assert torch_layers.ARTILayer is arti.ARTILayer
     assert torch_blocks.ARTIResidualBlock is arti.ARTIResidualBlock
+    assert torch_blocks.ARTIHostBridge is arti.ARTIHostBridge
     assert torch_training.virtual_recall_alignment_loss is arti.virtual_recall_alignment_loss
     assert torch_functional.apply_coord_frame_inverse is arti_torch.apply_coord_frame_inverse
     assert arti_torch.cuda_runtime_available is arti.cuda_runtime_available
@@ -82,8 +85,8 @@ def test_jax_namespace_reports_optional_backend_status():
 
 
 def test_jax_functional_smoke_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
@@ -111,8 +114,8 @@ def test_jax_functional_smoke_when_available():
 
 
 def test_jax_mask_helpers_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
@@ -132,8 +135,8 @@ def test_jax_mask_helpers_when_available():
 
 
 def test_jax_visibility_helpers_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
@@ -161,8 +164,8 @@ def test_jax_visibility_helpers_when_available():
 
 
 def test_jax_coord_frame_inverse_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
@@ -185,13 +188,12 @@ def test_jax_coord_frame_inverse_when_available():
 
 
 def test_jax_operator_bank_observer_frame_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
 
     identity = jnp.eye(2)
-    rotate_ccw = jnp.array([[0.0, -1.0], [1.0, 0.0]])
     rotate_cw = jnp.array([[0.0, 1.0], [-1.0, 0.0]])
     inverse = jnp.stack([identity, rotate_cw])
     observed = jnp.array([[[1.0, 0.0], [0.0, 1.0]]])
@@ -223,8 +225,8 @@ def test_jax_operator_bank_observer_frame_when_available():
 
 
 def test_jax_functional_helpers_match_torch_when_available():
-    if arti_jax.backend_status() == "unavailable":
-        pytest.skip("JAX optional dependency is not installed")
+    if arti_jax.backend_status() != "available":
+        pytest.skip("JAX optional backend is not available")
     jnp = pytest.importorskip("jax.numpy")
 
     x_torch = torch.tensor(

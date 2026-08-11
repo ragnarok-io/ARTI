@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Mapping
 
@@ -25,8 +26,10 @@ class FeatureConfig:
     recall: bool = False
     recall_slots: int = 4
     recall_steps: int = 1
+    recall_min_steps: int = 1
+    recall_tolerance: float | None = None
     recall_activation: str = "half"
-    recall_recognition_mode: str = "explicit"
+    recall_recognition_mode: str = "none"
     virtual_recall: bool = False
     layer_norm: bool = True
     dropout: float = 0.0
@@ -44,6 +47,14 @@ class FeatureConfig:
             raise ValueError("fallback context requires coord_dim > 0")
         if self.recall_steps < 0:
             raise ValueError("recall_steps must be non-negative")
+        if self.recall_min_steps < 0:
+            raise ValueError("recall_min_steps must be non-negative")
+        if self.recall_steps > 0 and not 1 <= self.recall_min_steps <= self.recall_steps:
+            raise ValueError("recall_min_steps must be in [1, recall_steps] when recall is enabled")
+        if self.recall_tolerance is not None and (
+            not math.isfinite(self.recall_tolerance) or self.recall_tolerance < 0
+        ):
+            raise ValueError("recall_tolerance must be finite and non-negative")
         if self.visibility and not (self.pairwise_context or self.virtual_interface):
             raise ValueError("visibility=True requires pairwise_context or virtual_interface")
 
@@ -73,6 +84,8 @@ class FeatureConfig:
             interface_slots=self.interface_slots if self.virtual_interface else 0,
             recall_slots=self.recall_slots if recall_enabled else 0,
             recall_steps=self.recall_steps if recall_enabled else 0,
+            recall_min_steps=self.recall_min_steps if recall_enabled else 0,
+            recall_tolerance=self.recall_tolerance if recall_enabled else None,
             recall_activation=self.recall_activation,
             recall_recognition_mode=self.recall_recognition_mode,
             dropout=self.dropout,
@@ -127,8 +140,10 @@ def features(
     recall: bool = False,
     recall_slots: int = 4,
     recall_steps: int = 1,
+    recall_min_steps: int = 1,
+    recall_tolerance: float | None = None,
     recall_activation: str = "half",
-    recall_recognition_mode: str = "explicit",
+    recall_recognition_mode: str = "none",
     virtual_recall: bool = False,
     layer_norm: bool = True,
     dropout: float = 0.0,
@@ -148,6 +163,8 @@ def features(
         recall=recall,
         recall_slots=recall_slots,
         recall_steps=recall_steps,
+        recall_min_steps=recall_min_steps,
+        recall_tolerance=recall_tolerance,
         recall_activation=recall_activation,
         recall_recognition_mode=recall_recognition_mode,
         virtual_recall=virtual_recall,

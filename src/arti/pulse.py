@@ -77,10 +77,6 @@ def pulse_compress(
         pulse_count = int(ids[valid].max().item()) + 1 if bool(valid.any()) else 0
     if pulse_count < 0:
         raise ValueError("pulse_count must be non-negative")
-    if pulse_count > tokens:
-        raise ValueError("pulse_count cannot exceed the input token count")
-    if bool(valid.any()) and int(ids[valid].max().item()) >= pulse_count:
-        raise ValueError("valid pulse_ids must be smaller than pulse_count")
 
     weights = torch.ones(batch, tokens, device=device, dtype=x.dtype) if token_weight is None else token_weight.to(device=device, dtype=x.dtype)
     if weights.shape != x.shape[:2]:

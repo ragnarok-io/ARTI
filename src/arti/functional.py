@@ -44,15 +44,21 @@ def half(
     elif not math.isfinite(threshold):
         raise ValueError("threshold must be finite")
 
-    threshold_t = torch.as_tensor(threshold, device=x.device, dtype=x.dtype)
-    base_t = torch.as_tensor(base, device=x.device, dtype=x.dtype)
-    scale_t = torch.as_tensor(scale, device=x.device, dtype=x.dtype)
-    deficit = torch.relu((threshold_t - x.abs()) / scale_t)
+    threshold_value = (
+        threshold.to(device=x.device, dtype=x.dtype)
+        if isinstance(threshold, Tensor)
+        else threshold
+    )
+    scale_value = scale.to(device=x.device, dtype=x.dtype) if isinstance(scale, Tensor) else scale
+    deficit = torch.relu((threshold_value - x.abs()) / scale_value)
     if not isinstance(base, Tensor) and base == 1.0:
         survival = torch.ones_like(deficit)
+    elif not isinstance(base, Tensor) and base == 0.5:
+        survival = torch.exp(-math.log(2.0) * deficit)
     elif not isinstance(base, Tensor):
         survival = torch.exp(deficit * math.log(base))
     else:
+        base_t = base.to(device=x.device, dtype=x.dtype)
         survival = torch.pow(base_t, deficit)
     if stochastic and training:
         try:

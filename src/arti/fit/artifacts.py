@@ -7,7 +7,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -74,8 +74,20 @@ class MechanismSummary:
     interface_slots: int
     recall_slots: int
     recall_steps: int
+    recall_min_steps: int
+    recall_tolerance: float | None
     recall_activation: str
+    recall_recognition_mode: str
+    recall_bank_fraction: float | None
+    recall_routing: str
+    recall_key_dim: int
+    recall_group_size: int
+    recall_group_topk: int
     hidden_multiplier: float
+    recall_value_composition: str = "single"
+    recall_formula: str | None = None
+    recall_formula_contract: dict[str, Any] | None = None
+    recall_formula_contract_fingerprint: str | None = None
 
     @classmethod
     def from_config(cls, profile: AdapterProfile, scale: AdapterScale, *, scale_name: str) -> "MechanismSummary":
@@ -90,8 +102,18 @@ class MechanismSummary:
             interface_slots=scale.interface_slots,
             recall_slots=scale.recall_slots,
             recall_steps=scale.recall_steps,
+            recall_min_steps=scale.recall_min_steps,
+            recall_tolerance=scale.recall_tolerance,
             recall_activation=scale.recall_activation,
+            recall_recognition_mode=scale.recall_recognition_mode,
+            recall_bank_fraction=scale.recall_bank_fraction,
+            recall_routing=scale.recall_routing,
+            recall_key_dim=scale.recall_key_dim,
+            recall_group_size=scale.recall_group_size,
+            recall_group_topk=scale.recall_group_topk,
             hidden_multiplier=scale.hidden_multiplier,
+            recall_value_composition=scale.recall_value_composition,
+            recall_formula=scale.recall_formula,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,8 +128,22 @@ class MechanismSummary:
             "interface_slots": self.interface_slots,
             "recall_slots": self.recall_slots,
             "recall_steps": self.recall_steps,
+            "recall_min_steps": self.recall_min_steps,
+            "recall_tolerance": self.recall_tolerance,
             "recall_activation": self.recall_activation,
+            "recall_recognition_mode": self.recall_recognition_mode,
+            "recall_bank_fraction": self.recall_bank_fraction,
+            "recall_routing": self.recall_routing,
+            "recall_key_dim": self.recall_key_dim,
+            "recall_group_size": self.recall_group_size,
+            "recall_group_topk": self.recall_group_topk,
             "hidden_multiplier": self.hidden_multiplier,
+            "recall_value_composition": self.recall_value_composition,
+            "recall_formula": self.recall_formula,
+            "recall_formula_contract": self.recall_formula_contract,
+            "recall_formula_contract_fingerprint": (
+                self.recall_formula_contract_fingerprint
+            ),
         }
 
 
@@ -152,6 +188,8 @@ class FitReportSummary:
     candidate_count: int
     inserted_count: int
     adapter_parameters: int
+    recall_bank_parameters: int
+    recall_bank_parameter_ratio: float
     total_parameters: int
     adapter_parameter_ratio: float
     frozen_base: bool
@@ -167,6 +205,8 @@ class FitReportSummary:
             "candidate_count": self.candidate_count,
             "inserted_count": self.inserted_count,
             "adapter_parameters": self.adapter_parameters,
+            "recall_bank_parameters": self.recall_bank_parameters,
+            "recall_bank_parameter_ratio": self.recall_bank_parameter_ratio,
             "total_parameters": self.total_parameters,
             "adapter_parameter_ratio": self.adapter_parameter_ratio,
             "frozen_base": self.frozen_base,
@@ -265,10 +305,17 @@ class ARTIFitReport:
         total_parameters = self.scanned.total_parameters
         budget_limit = None if self.insertion is None else self.insertion.max_extra_params
         budget_used = self.adapter_parameters
+        recall_bank_parameters = sum(
+            adapter.recall_bank_parameters for adapter in self.inserted
+        )
         return FitReportSummary(
             candidate_count=len(self.scanned.candidates),
             inserted_count=len(self.inserted),
             adapter_parameters=budget_used,
+            recall_bank_parameters=recall_bank_parameters,
+            recall_bank_parameter_ratio=0.0
+            if budget_used <= 0
+            else recall_bank_parameters / budget_used,
             total_parameters=total_parameters,
             adapter_parameter_ratio=0.0 if total_parameters <= 0 else budget_used / total_parameters,
             frozen_base=self.frozen_base,
@@ -295,9 +342,18 @@ class ARTIFitReport:
             if self.insertion is None
             else {
                 "where": list(self.insertion.where),
+                "exclude": list(self.insertion.exclude),
+                "positions": list(self.insertion.positions),
+                "scale_pattern": dict(self.insertion.scale_pattern),
                 "every": self.insertion.every,
+                "freeze_base": self.insertion.freeze_base,
                 "max_adapters": self.insertion.max_adapters,
                 "max_extra_params": self.insertion.max_extra_params,
+                "identity_gate": self.insertion.identity_gate,
+                "zero_init_output": self.insertion.zero_init_output,
+                "bridge_mode": self.insertion.bridge_mode,
+                "boundary_mask_key": self.insertion.boundary_mask_key,
+                "require_runtime_context": self.insertion.require_runtime_context,
             },
             "steps": self.steps,
             "objective_plan": list(self.objective_plan),
@@ -328,7 +384,15 @@ class ARTIFitReport:
             f"Runtime causal: `{self.runtime_causal}`",
             f"Mechanism: `{self.mechanism.to_dict() if self.mechanism is not None else None}`",
             f"Where: `{list(self.insertion.where) if self.insertion is not None else []}`",
+            f"Exclude: `{list(self.insertion.exclude) if self.insertion is not None else []}`",
+            f"Positions: `{list(self.insertion.positions) if self.insertion is not None else []}`",
+            f"Scale pattern: `{dict(self.insertion.scale_pattern) if self.insertion is not None else {}}`",
             f"Every: `{self.insertion.every if self.insertion is not None else 1}`",
+            f"Identity gate: `{self.insertion.identity_gate if self.insertion is not None else False}`",
+            f"Zero-init output: `{self.insertion.zero_init_output if self.insertion is not None else False}`",
+            f"Bridge mode: `{self.insertion.bridge_mode if self.insertion is not None else 'radial'}`",
+            f"Boundary mask key: `{self.insertion.boundary_mask_key if self.insertion is not None else None}`",
+            f"Require runtime context: `{self.insertion.require_runtime_context if self.insertion is not None else False}`",
             f"Max adapters: `{self.insertion.max_adapters if self.insertion is not None else None}`",
             f"Max extra params: `{self.insertion.max_extra_params if self.insertion is not None else None}`",
             f"Fit steps: `{self.steps}`",
@@ -358,11 +422,29 @@ class ARTIFitReport:
                     f"`{list(profile.output_shape)}` | `{profile.output_device}` | `{profile.output_dtype}` |"
                 )
         if self.insertion_plan is not None:
-            lines.extend(["", "## Insertion Plan", "", "| Module | Dim | Planned Params | Profile | Scale |", "| --- | ---: | ---: | --- | --- |"])
+            lines.extend(
+                [
+                    "",
+                    "## Insertion Plan",
+                    "",
+                    "| Boundary | Side | Tensor Path | Dim | Hidden | Recall Slots | Bank Params | Bank Ratio | Routing | Planned Params | Profile | Scale |",
+                    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- |",
+                ]
+            )
             for adapter in self.insertion_plan.selected:
-                lines.append(f"| `{adapter.name}` | {adapter.dim} | {adapter.parameters} | `{adapter.profile}` | `{adapter.scale}` |")
+                lines.append(
+                    f"| `{adapter.name}` | `{adapter.position}` | `{list(adapter.tensor_path)}` | "
+                    f"{adapter.dim} | {adapter.hidden_dim} | {adapter.recall_slots} | "
+                    f"{adapter.recall_bank_parameters} | {adapter.recall_bank_fraction:.6f} | "
+                    f"`{adapter.recall_routing}` | {adapter.parameters} | "
+                    f"`{adapter.profile}` | `{adapter.scale}` |"
+                )
             if not self.insertion_plan.selected:
-                lines.append("| _none_ |  |  |  |  |")
+                lines.append("| _none_ |  |  |  |  |  |  |  |  |  |  |  |")
+            if self.insertion_plan.excluded:
+                lines.extend(["", "Explicitly excluded boundaries:", ""])
+                for name in self.insertion_plan.excluded:
+                    lines.append(f"- `{name}`")
             if self.insertion_plan.skipped_budget:
                 lines.extend(["", "Budget-skipped modules:", ""])
                 for adapter in self.insertion_plan.skipped_budget:
@@ -412,14 +494,19 @@ class ARTIFitReport:
                 "",
                 "## Inserted Adapters",
                 "",
-                "| Module | Dim | Adapter Params | Profile | Scale |",
-                "| --- | ---: | ---: | --- | --- |",
+                "| Module | Dim | Hidden | Recall Slots | Bank Params | Bank Ratio | Routing | Adapter Params | Profile | Scale |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- |",
             ]
         )
         for adapter in self.inserted:
-            lines.append(f"| `{adapter.name}` | {adapter.dim} | {adapter.parameters} | `{adapter.profile}` | `{adapter.scale}` |")
+            lines.append(
+                f"| `{adapter.name}` | {adapter.dim} | {adapter.hidden_dim} | "
+                f"{adapter.recall_slots} | {adapter.recall_bank_parameters} | "
+                f"{adapter.recall_bank_fraction:.6f} | `{adapter.recall_routing}` | "
+                f"{adapter.parameters} | `{adapter.profile}` | `{adapter.scale}` |"
+            )
         if not self.inserted:
-            lines.append("| _none_ |  |  |  |  |")
+            lines.append("| _none_ |  |  |  |  |  |  |  |  |  |")
         if self.validation_history:
             lines.extend(["", "## Validation", "", "| Run | Mean Metric | Batches |", "| ---: | ---: | ---: |"])
             for index, row in enumerate(self.validation_history, start=1):
@@ -449,13 +536,7 @@ class ARTIFitResult:
     ) -> Path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        adapter_items = [
-            (key, value)
-            for key, value in self.model.state_dict().items()
-            if ".adapter." in key or key.startswith("adapter.") or key.endswith(".output_gate") or key == "output_gate"
-        ]
-        adapter_items.sort(key=lambda item: (torch.is_tensor(item[1]) and item[1].numel() == 0, item[0]))
-        adapter_state = dict(adapter_items)
+        adapter_state = adapter_state_dict(self.model)
         adapter_state_sha256 = hash_tensor_state_dict(adapter_state)
         report_dict = self.report.to_dict()
         report_sha256 = stable_json_sha256(report_dict)
@@ -498,6 +579,7 @@ class ARTIFitResult:
         path: str | Path = "arti.st",
         *,
         include_base: bool = False,
+        adapter_scope: Literal["all", "report"] = "all",
         glyph_tensors: torch.Tensor | dict[str, torch.Tensor] | None = None,
         vocab_metadata: Any | None = None,
         optimizer: torch.optim.Optimizer | None = None,
@@ -508,9 +590,49 @@ class ARTIFitResult:
 
         from ..serialization import save
 
+        if adapter_scope not in {"all", "report"}:
+            raise ValueError("adapter_scope must be 'all' or 'report'")
+        adapter_state = (
+            adapter_state_dict(self.model)
+            if adapter_scope == "all"
+            else report_adapter_state_dict(self.model, self.report)
+        )
+        if not adapter_state:
+            raise ValueError("ARTI Fit export selected no adapter tensors")
+        if not include_base:
+            trainable_names = {name for name, parameter in self.model.named_parameters() if parameter.requires_grad}
+            non_adapter = sorted(trainable_names.difference(adapter_state))
+            if non_adapter:
+                raise ValueError(
+                    "adapter-only arti.st export requires the base model to be frozen; "
+                    f"found {len(non_adapter)} trainable non-adapter tensors"
+                )
+        report_dict = self.report.to_dict()
+        fit_manifest = AdapterArtifactManifest(
+            format_version=1,
+            package_name="arti",
+            package_version=__version__,
+            backend="torch",
+            include_base=include_base,
+            adapter_key_count=len(adapter_state),
+            adapter_parameters=self.report.adapter_parameters,
+            profile=self.report.profile,
+            scale=self.report.scale,
+            config_fingerprint=self.report.config_fingerprint,
+            adapter_state_sha256=hash_tensor_state_dict(adapter_state),
+            report_sha256=stable_json_sha256(report_dict),
+        ).to_dict()
+
         return save(
             self.model,
             path,
+            config={
+                "kind": "fit-adapter",
+                "format_version": 1,
+                "manifest": fit_manifest,
+                "report": report_dict,
+            },
+            state_dict=None if include_base else adapter_state,
             glyph_tensors=glyph_tensors,
             vocab_metadata=vocab_metadata,
             optimizer=optimizer,
@@ -522,6 +644,55 @@ class ARTIFitResult:
 
 def load_artifact(path: str | Path, *, map_location: str | torch.device | None = None) -> dict[str, Any]:
     return torch.load(Path(path), map_location=map_location, weights_only=True)
+
+
+def adapter_state_dict(model: nn.Module, *, trainable_only: bool = False) -> dict[str, torch.Tensor]:
+    """Select adapter tensors without including unrelated trainable base weights."""
+
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    items = [
+        (key, value)
+        for key, value in model.state_dict().items()
+        if is_adapter_state_key(key) and (not trainable_only or key in trainable)
+    ]
+    items.sort(key=lambda item: (item[1].numel() == 0, item[0]))
+    return dict(items)
+
+
+def report_adapter_state_dict(
+    model: nn.Module,
+    report: ARTIFitReport,
+) -> dict[str, torch.Tensor]:
+    """Select only adapters introduced by one fit report.
+
+    This keeps a newly attached outer adapter independent from any frozen
+    adapters already nested inside its base module.
+    """
+
+    selected: dict[str, torch.Tensor] = {}
+    for inserted in report.inserted:
+        try:
+            wrapper = model.get_submodule(inserted.module_path) if inserted.module_path else model
+        except AttributeError as exc:
+            raise ValueError(
+                f"reported adapter path {inserted.module_path!r} is not present in the model"
+            ) from exc
+        adapter = getattr(wrapper, "adapter", None)
+        if not isinstance(adapter, nn.Module):
+            raise ValueError(
+                f"reported adapter path {inserted.module_path!r} is not an ARTI adapter wrapper"
+            )
+        prefix = f"{inserted.module_path}." if inserted.module_path else ""
+        for key, value in adapter.state_dict().items():
+            selected[f"{prefix}adapter.{key}"] = value
+        output_gate = getattr(wrapper, "output_gate", None)
+        if output_gate is not None:
+            selected[f"{prefix}output_gate"] = output_gate
+    return dict(sorted(selected.items(), key=lambda item: (item[1].numel() == 0, item[0])))
+
+
+def is_adapter_state_key(key: str) -> bool:
+    return ".adapter." in key or key.startswith("adapter.") or key.endswith(".output_gate") or key == "output_gate"
 
 
 def hash_tensor_state_dict(state_dict: dict[str, Any]) -> str:
@@ -538,7 +709,7 @@ def hash_tensor_state_dict(state_dict: dict[str, Any]) -> str:
         digest.update(b"\0")
         digest.update(str(tensor.dtype).encode("utf-8"))
         digest.update(b"\0")
-        digest.update(tensor.numpy().tobytes())
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -630,7 +801,26 @@ def validate_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def validate_artifact(path: str | Path, *, map_location: str | torch.device | None = None) -> dict[str, Any]:
     """Load and validate an ARTI adapter artifact."""
-    return validate_artifact_payload(load_artifact(path, map_location=map_location))
+    target = Path(path)
+    if target.suffix.lower() != ".st":
+        return validate_artifact_payload(load_artifact(target, map_location=map_location))
+
+    from ..serialization import load
+
+    loaded = load(target, map_location="cpu" if map_location is None else map_location)
+    config = loaded.manifest.get("architecture", {}).get("config")
+    if not isinstance(config, dict) or config.get("kind") != "fit-adapter":
+        raise ValueError("arti.st is not an ARTI Fit adapter artifact")
+    if config.get("format_version") != 1:
+        raise ValueError(f"unsupported ARTI Fit arti.st format_version={config.get('format_version')!r}")
+    payload = {
+        "manifest": config.get("manifest"),
+        "report": config.get("report"),
+        "adapter_state_dict": {
+            key: value for key, value in loaded.state_dict.items() if is_adapter_state_key(key)
+        },
+    }
+    return validate_artifact_payload(payload)
 
 
 def validate_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -670,6 +860,8 @@ def validate_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
     for key in ("selected", "skipped_budget"):
         if not isinstance(insertion_plan.get(key), list):
             raise ValueError(f"ARTI fit plan insertion_plan.{key} must be a list")
+    if "excluded" in insertion_plan and not isinstance(insertion_plan["excluded"], list):
+        raise ValueError("ARTI fit plan insertion_plan.excluded must be a list")
     if not isinstance(insertion_plan.get("spec"), dict):
         raise ValueError("ARTI fit plan insertion_plan.spec must be a dictionary")
     if insertion_plan.get("adapter_parameters") != sum(int(row.get("parameters", 0)) for row in insertion_plan["selected"]):

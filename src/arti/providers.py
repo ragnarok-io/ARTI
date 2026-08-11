@@ -299,6 +299,10 @@ def _model_metadata(value: Any) -> dict[str, Any]:
     }
 
 
+def _class_path(value: Any) -> str:
+    return f"{value.__class__.__module__}.{value.__class__.__qualname__}"
+
+
 def _reject_remote_code(kwargs: Mapping[str, Any]) -> None:
     if kwargs.get("trust_remote_code") is True:
         raise ARTIProviderError(
@@ -307,10 +311,6 @@ def _reject_remote_code(kwargs: Mapping[str, Any]) -> None:
             "declarative loading does not allow trust_remote_code=True",
             hint="review and instantiate the trusted model yourself, then pass the nn.Module to ARTI",
         )
-
-
-def _class_path(value: Any) -> str:
-    return f"{value.__class__.__module__}.{value.__class__.__qualname__}"
 
 
 __all__ = [

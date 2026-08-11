@@ -38,9 +38,14 @@ PLUGIN_REGISTRY = {
     "torch": FitPlugin(
         name="torch",
         kind="backend",
-        default_strategy="all-linear",
+        default_strategy="all-tensor",
         optional_dependency=None,
-        capabilities=("scan-linear", "insert-wrapper", "freeze-base", "adapter-artifact"),
+        capabilities=(
+            "scan-runtime-tensor-boundaries",
+            "insert-wrapper",
+            "freeze-base",
+            "adapter-artifact",
+        ),
     ),
     "transformers": FitPlugin(
         name="transformers",
@@ -86,6 +91,6 @@ def plugin_report(names: tuple[str, ...] | list[str]) -> tuple[dict[str, object]
 def default_strategy_for(names: tuple[str, ...] | list[str]) -> str:
     for name in reversed(tuple(names)):
         plugin = get_plugin(name)
-        if plugin.default_strategy != "all-linear":
+        if plugin.default_strategy != "all-tensor":
             return plugin.default_strategy
-    return "all-linear"
+    return "all-tensor"

@@ -9,6 +9,15 @@
         "causal": {
           "type": "boolean"
         },
+        "exclude_modules": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        },
         "objective": {
           "items": {
             "enum": [
@@ -87,11 +96,36 @@
     "insertion": {
       "additionalProperties": false,
       "properties": {
+        "boundary_mask_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bridge_mode": {
+          "enum": [
+            "radial",
+            "dense"
+          ],
+          "type": "string"
+        },
         "every": {
           "minimum": 1,
           "type": "integer"
         },
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "string",
+            "array"
+          ]
+        },
         "freeze_base": {
+          "type": "boolean"
+        },
+        "identity_gate": {
           "type": "boolean"
         },
         "max_adapters": {
@@ -116,6 +150,44 @@
             }
           ]
         },
+        "positions": {
+          "oneOf": [
+            {
+              "enum": [
+                "input",
+                "output"
+              ],
+              "type": "string"
+            },
+            {
+              "items": {
+                "enum": [
+                  "input",
+                  "output"
+                ],
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            }
+          ]
+        },
+        "require_runtime_context": {
+          "type": "boolean"
+        },
+        "scale_pattern": {
+          "additionalProperties": {
+            "enum": [
+              "base",
+              "large",
+              "small",
+              "tiny"
+            ],
+            "type": "string"
+          },
+          "type": "object"
+        },
         "where": {
           "items": {
             "type": "string"
@@ -125,12 +197,29 @@
             "array",
             "null"
           ]
+        },
+        "zero_init_output": {
+          "type": "boolean"
         }
       },
       "type": "object"
     },
     "mechanism": {
       "additionalProperties": false,
+      "not": {
+        "properties": {
+          "recall_bank_fraction": {
+            "type": "number"
+          },
+          "recall_slots": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recall_bank_fraction",
+          "recall_slots"
+        ]
+      },
       "properties": {
         "coord_dim": {
           "minimum": 0,
@@ -189,6 +278,72 @@
             "null"
           ]
         },
+        "recall_bank_fraction": {
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.5,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "recall_formula": {
+          "description": "Explicit process-local Recall Formula provider ID. The host must register it before attachment or loading.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recall_group_size": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_group_topk": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_key_dim": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_min_steps": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recall_recognition_mode": {
+          "enum": [
+            "none",
+            "explicit",
+            "alignment",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recall_routing": {
+          "enum": [
+            "dense",
+            "grouped",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "recall_slots": {
           "minimum": 1,
           "type": [
@@ -200,6 +355,25 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "recall_tolerance": {
+          "minimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "recall_value_composition": {
+          "enum": [
+            "single",
+            "product",
+            "state",
+            null
+          ],
+          "type": [
+            "string",
             "null"
           ]
         },

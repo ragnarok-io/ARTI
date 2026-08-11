@@ -61,6 +61,7 @@ def save(
     path: str | Path = "arti.st",
     *,
     config: Mapping[str, Any] | None = None,
+    state_dict: Mapping[str, Tensor] | None = None,
     glyph_tensors: Tensor | Mapping[str, Tensor] | None = None,
     vocab_metadata: Any | None = None,
     optimizer: torch.optim.Optimizer | None = None,
@@ -82,7 +83,9 @@ def save(
     target.parent.mkdir(parents=True, exist_ok=True)
     if scope not in {"all", "trainable"}:
         raise ValueError("scope must be 'all' or 'trainable'")
-    state = _model_state(model, scope=scope)
+    state = _model_state(model, scope=scope) if state_dict is None else dict(state_dict)
+    if not state:
+        raise ValueError("state_dict selected no model tensors")
     architecture = _architecture_payload(model, config)
     return _save_state(
         state,
@@ -513,7 +516,10 @@ def _decode_tree(value: Any, tensors: Mapping[str, Tensor], *, depth: int = 0) -
             raise ValueError(f"checkpoint tensor reference {key!r} is missing")
         return tensors[key]
     if isinstance(value, dict) and set(value) == {"__arti_dict__"}:
-        return {_decode_tree(key, tensors, depth=depth + 1): _decode_tree(item, tensors, depth=depth + 1) for key, item in value["__arti_dict__"]}
+        return {
+            _decode_tree(key, tensors, depth=depth + 1): _decode_tree(item, tensors, depth=depth + 1)
+            for key, item in value["__arti_dict__"]
+        }
     if isinstance(value, dict) and set(value) == {"__arti_tuple__"}:
         return tuple(_decode_tree(item, tensors, depth=depth + 1) for item in value["__arti_tuple__"])
     if isinstance(value, dict) and set(value) == {"__arti_list__"}:
@@ -559,10 +565,14 @@ def _load_safetensors(path: Path, *, expected_kind: str, device: str) -> dict[st
 def _check_version_compatibility(saved: str, current: str) -> None:
     saved_version = _version_tuple(saved)
     current_version = _version_tuple(current)
-    # Public 1.x preserves the v1 serialization contract produced by the
-    # pre-public 0.x line. Format compatibility remains governed separately by
-    # ARTI_ST_FORMAT_VERSION.
     if saved_version[0] == 0 and current_version[0] == 1:
+        if saved_version[1] > 2:
+            raise ValueError(f"arti.st alpha version {saved} is newer than ARTI {current}")
+        return
+    if saved_version[0] in {0, 1} and current_version[0] == 2:
+        maximum_minor = 2 if saved_version[0] == 0 else 9
+        if saved_version[1] > maximum_minor:
+            raise ValueError(f"arti.st legacy version {saved} is newer than ARTI {current}")
         return
     if saved_version[0] != current_version[0]:
         raise ValueError(f"arti.st package major version {saved} is incompatible with ARTI {current}")

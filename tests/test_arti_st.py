@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn as nn
 from safetensors import safe_open
@@ -82,10 +84,10 @@ def test_arti_st_sha256_detects_weight_corruption(tmp_path: Path) -> None:
         raise AssertionError("corrupted arti.st should fail integrity validation")
 
 
-def test_arti_st_manifest_hash_and_future_major_version_are_checked(tmp_path: Path) -> None:
+def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Path) -> None:
     saved = arti.save(nn.Linear(4, 3), tmp_path / "arti.st")
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
-    manifest["package_version"] = "2.0.0"
+    manifest["package_version"] = "0.99.0"
     saved.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
     lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
@@ -96,25 +98,9 @@ def test_arti_st_manifest_hash_and_future_major_version_are_checked(tmp_path: Pa
     try:
         arti.load(saved.weights_path)
     except ValueError as exc:
-        assert "major version" in str(exc)
+        assert "newer than ARTI" in str(exc)
     else:
-        raise AssertionError("future major package should fail compatibility validation")
-
-
-def test_arti_st_accepts_pre_public_0_2_artifact(tmp_path: Path) -> None:
-    saved = arti.save(nn.Linear(4, 3), tmp_path / "legacy.st")
-    manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
-    manifest["package_version"] = "0.2.0"
-    saved.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
-    lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
-    lock["manifest_sha256"] = digest
-    lock["files"]["manifest"]["sha256"] = digest
-    saved.lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
-
-    loaded = arti.load(saved.weights_path)
-
-    assert loaded.manifest["package_version"] == "0.2.0"
+        raise AssertionError("future alpha package should fail compatibility validation")
 
 
 def test_arti_st_checkpoint_resume_matches_continuous_training(tmp_path: Path) -> None:
@@ -204,6 +190,233 @@ def test_fit_result_exports_trainable_arti_st_by_default(tmp_path: Path) -> None
     assert loaded.manifest["weight_scope"] == "trainable"
     assert loaded.state_dict
     assert all("adapter" in key for key in loaded.state_dict)
+    fit_config = loaded.manifest["architecture"]["config"]
+    assert fit_config["kind"] == "fit-adapter"
+    assert fit_config["format_version"] == 1
+
+
+def test_fit_arti_st_rehydrates_on_a_fresh_model(tmp_path: Path) -> None:
+    torch.manual_seed(19)
+    base = nn.Sequential(nn.Linear(4, 4), nn.Tanh(), nn.Linear(4, 2))
+    source_model = deepcopy(base)
+    fresh_model = deepcopy(base)
+    sample = torch.randn(3, 4)
+    fitted = arti.fit(
+        source_model,
+        sample_batch=sample,
+        config=arti.FitProjectConfig(where=("0",), identity_gate=True),
+    )
+    with torch.no_grad():
+        source_model[0].output_gate.fill_(0.75)
+        for parameter in source_model[0].adapter.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.02)
+    expected = source_model(sample)
+
+    saved = fitted.export_st(tmp_path / "adapter.arti.st")
+    applied = arti.apply_adapter(fresh_model, saved.weights_path, sample_batch=sample)
+
+    assert torch.allclose(fresh_model(sample), expected)
+    assert applied.report.applied_artifact is not None
+    assert applied.report.applied_artifact["adapter_state_sha256"]
+
+
+def test_fit_arti_st_stacks_report_scoped_outer_adapter(tmp_path: Path) -> None:
+    class Stage(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(4, 4)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.tanh(self.proj(x))
+
+    torch.manual_seed(23)
+    base = nn.Sequential(Stage(), Stage())
+    source = deepcopy(base)
+    fresh = deepcopy(base)
+    sample = torch.randn(2, 3, 4)
+
+    inner = arti.fit(source, sample_batch=sample, target_modules="0.proj")
+    with torch.no_grad():
+        for parameter in source[0].proj.adapter.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.01)
+    inner_saved = inner.export_st(tmp_path / "inner.arti.st")
+    inner_state_before = {
+        key: value.detach().clone()
+        for key, value in source[0].proj.adapter.state_dict().items()
+    }
+
+    outer = arti.fit(source, sample_batch=sample, target_modules="0")
+    with torch.no_grad():
+        for parameter in source[0].adapter.parameters():
+            parameter.add_(torch.randn_like(parameter) * 0.01)
+    expected = source(sample)
+    outer_saved = outer.export_st(
+        tmp_path / "outer.arti.st",
+        adapter_scope="report",
+    )
+    outer_payload = arti.load(outer_saved.weights_path)
+
+    assert outer_payload.state_dict
+    assert all(key.startswith("0.adapter.") for key in outer_payload.state_dict)
+    assert not any(".base." in key for key in outer_payload.state_dict)
+    assert all(
+        torch.equal(value, inner_state_before[key])
+        for key, value in source[0].base.proj.adapter.state_dict().items()
+    )
+
+    stack_path = tmp_path / "stack.json"
+    stack_path.write_text(
+        json.dumps(
+            {
+                "format": arti.ADAPTER_STACK_FORMAT,
+                "load_order": [
+                    {
+                        "path": inner_saved.weights_path.name,
+                        "sha256": hashlib.sha256(
+                            inner_saved.weights_path.read_bytes()
+                        ).hexdigest(),
+                    },
+                    {
+                        "path": outer_saved.weights_path.name,
+                        "sha256": hashlib.sha256(
+                            outer_saved.weights_path.read_bytes()
+                        ).hexdigest(),
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    applied_inner, applied_outer = arti.apply_adapter_stack(
+        fresh,
+        stack_path,
+        sample_batch=sample,
+    )
+
+    assert applied_inner.adapter_count == 1
+    assert applied_outer.adapter_count == 1
+    assert torch.allclose(fresh(sample), expected)
+
+
+def test_apply_adapter_rejects_non_fit_arti_st(tmp_path: Path) -> None:
+    saved = arti.save(nn.Linear(4, 3), tmp_path / "plain.arti.st")
+
+    try:
+        arti.apply_adapter(nn.Linear(4, 3), saved.weights_path, sample_batch=torch.randn(2, 4))
+    except ValueError as exc:
+        assert "not an ARTI Fit adapter artifact" in str(exc)
+    else:
+        raise AssertionError("plain arti.st should not be accepted as a Fit adapter")
+
+
+def test_adapter_only_fit_arti_st_rejects_trainable_base_weights(tmp_path: Path) -> None:
+    fitted = arti.fit(
+        nn.Sequential(nn.Linear(4, 4)),
+        sample_batch=torch.randn(2, 4),
+        target_modules="0",
+        freeze_base=False,
+    )
+
+    try:
+        fitted.export_st(tmp_path / "unsafe.arti.st")
+    except ValueError as exc:
+        assert "requires the base model to be frozen" in str(exc)
+    else:
+        raise AssertionError("adapter-only export should reject trainable base parameters")
+
+
+def test_fit_arti_st_hashes_bfloat16_adapter_tensors(tmp_path: Path) -> None:
+    model = nn.Sequential(nn.Linear(4, 4)).to(dtype=torch.bfloat16)
+    fitted = arti.fit(
+        model,
+        sample_batch=torch.randn(2, 4, dtype=torch.bfloat16),
+        target_modules="0",
+    )
+
+    saved = fitted.export_st(tmp_path / "bf16.arti.st")
+    loaded = arti.load(saved.weights_path)
+
+    assert loaded.state_dict
+    assert all(value.dtype == torch.bfloat16 for value in loaded.state_dict.values())
+
+
+def test_fit_arti_st_supports_explicit_contract_only_deployment(tmp_path: Path) -> None:
+    class Stage(nn.Module):
+        def __init__(self, dim: int = 4) -> None:
+            super().__init__()
+            self.dim = dim
+            self.proj = nn.Linear(dim, dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.proj(x)
+
+    torch.manual_seed(29)
+    source = nn.Sequential(Stage())
+    fresh = deepcopy(source)
+    sample = torch.randn(2, 3, 4)
+    fitted = arti.fit(source, sample_batch=sample, target_modules="0")
+    saved = fitted.export_st(tmp_path / "contract.arti.st")
+
+    with pytest.raises(ValueError, match="sample_batch is required"):
+        arti.apply_adapter(fresh, saved.weights_path)
+
+    applied = arti.apply_adapter(
+        fresh,
+        saved.weights_path,
+        trust_artifact_contract=True,
+    )
+
+    assert applied.adapter_count == 1
+    assert fresh(sample).shape == sample.shape
+
+
+def test_contract_only_deployment_rejects_declared_dim_mismatch(tmp_path: Path) -> None:
+    class Stage(nn.Module):
+        def __init__(self, dim: int) -> None:
+            super().__init__()
+            self.dim = dim
+            self.proj = nn.Linear(dim, dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.proj(x)
+
+    fitted = arti.fit(
+        nn.Sequential(Stage(4)),
+        sample_batch=torch.randn(2, 3, 4),
+        target_modules="0",
+    )
+    saved = fitted.export_st(tmp_path / "dim.arti.st")
+
+    with pytest.raises(ValueError, match="changed dim"):
+        arti.apply_adapter(
+            nn.Sequential(Stage(5)),
+            saved.weights_path,
+            trust_artifact_contract=True,
+        )
+
+
+def test_fit_artifact_rehydrates_final_paths_without_resampling_every(tmp_path: Path) -> None:
+    torch.manual_seed(31)
+    base = nn.Sequential(*(nn.Linear(4, 4) for _ in range(6)))
+    source = deepcopy(base)
+    fresh = deepcopy(base)
+    fitted = arti.fit(
+        source,
+        sample_batch=torch.randn(2, 4),
+        config=arti.FitProjectConfig(where=("*",), every=2, max_adapters=3),
+    )
+    assert [row.name for row in fitted.report.inserted] == ["0", "2", "4"]
+    saved = fitted.export_st(tmp_path / "sampled-plan.arti.st")
+
+    applied = arti.apply_adapter(
+        fresh,
+        saved.weights_path,
+        trust_artifact_contract=True,
+    )
+
+    assert [row.name for row in applied.report.inserted] == ["0", "2", "4"]
+    assert all(hasattr(fresh[index], "adapter") for index in (0, 2, 4))
+    assert all(not hasattr(fresh[index], "adapter") for index in (1, 3, 5))
 
 
 def test_arti_st_rejects_wrong_target_architecture_by_default(tmp_path: Path) -> None:

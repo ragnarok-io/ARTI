@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import arti
 from arti.layers import ARTILatentRecallField
-from arti.recall_ttt import RecallArtifactSpec, RecallCapacityPlan, RecallExpertPool, RecallExpertRegistry, RecallTTTSession, export_recall_artifact, load_recall_artifact, module_structure_fingerprint
+from arti.recall_artifacts import RecallArtifactSpec, RecallCapacityPlan, RecallExpertPool, RecallExpertRegistry, export_recall_artifact, load_recall_artifact, module_structure_fingerprint
+from arti.serialization import save
 
 
 class TinyRecallHost(nn.Module):
@@ -31,10 +31,6 @@ class TinyFieldHost(nn.Module):
         self.recall = ARTILatentRecallField(4, 2, recognition_mode="none")
 
 
-def consistency_loss(model: nn.Module, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-    return F.mse_loss(model(batch["support"]), batch["reference"])
-
-
 def spec(host: TinyRecallHost) -> RecallArtifactSpec:
     return RecallArtifactSpec(
         capability="toy-correction",
@@ -42,57 +38,6 @@ def spec(host: TinyRecallHost) -> RecallArtifactSpec:
         injection_fingerprint=module_structure_fingerprint(host.expert),
         training_metadata={"objective": "consistency"},
     )
-
-
-def test_recall_ttt_updates_only_expert_and_rolls_back() -> None:
-    host = TinyRecallHost()
-    initial = host.backbone.weight.detach().clone()
-    session = RecallTTTSession(host, host.expert, consistency_loss)
-    record = session.adapt(
-        [{"support": torch.ones(4, 3), "reference": torch.zeros(4, 3)}],
-        steps=3,
-        learning_rate=0.1,
-    )
-    assert record.initial_weights_sha256 != record.final_weights_sha256
-    assert record.backbone_sha256_before == record.backbone_sha256_after
-    assert torch.equal(host.backbone.weight, initial)
-    assert not torch.equal(host.expert.weight, torch.zeros_like(host.expert.weight))
-    rolled = session.rollback()
-    assert rolled is not None and rolled.rolled_back
-    assert torch.equal(host.expert.weight, torch.zeros_like(host.expert.weight))
-
-
-def test_recall_ttt_rejects_label_bearing_support() -> None:
-    host = TinyRecallHost()
-    session = RecallTTTSession(host, host.expert, consistency_loss)
-    with pytest.raises(ValueError, match="label-bearing"):
-        session.adapt(
-            [{"support": torch.ones(2, 3), "labels": torch.zeros(2, dtype=torch.long)}],
-            steps=1,
-            learning_rate=0.1,
-        )
-
-
-def test_recall_ttt_can_train_bank_only_for_concat_safe_artifacts() -> None:
-    host = TinyFieldHost()
-    query_before = host.recall.query.weight.detach().clone()
-    bank_before = host.recall.bank.detach().clone()
-
-    def bank_loss(model: nn.Module, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        return model.recall.bank.square().mean()
-
-    session = RecallTTTSession(
-        host,
-        host.recall,
-        bank_loss,
-        trainable_parameters=("bank",),
-    )
-    record = session.adapt([{"support": torch.ones(1, 4)}], steps=2, learning_rate=0.05)
-    assert record.trainable_parameters == ("bank",)
-    assert not torch.equal(host.recall.bank, bank_before)
-    assert torch.equal(host.recall.query.weight, query_before)
-    assert host.recall.bank.requires_grad
-    assert not host.recall.query.weight.requires_grad
 
 
 def test_recall_artifact_requires_name_and_host_compatibility(tmp_path: Path) -> None:
@@ -113,6 +58,27 @@ def test_recall_artifact_requires_name_and_host_compatibility(tmp_path: Path) ->
         load_recall_artifact(path, TinyRecallHost().expert, base_model=wrong_host)
 
 
+def test_recall_artifact_loader_accepts_legacy_v1_metadata(tmp_path: Path) -> None:
+    host = TinyRecallHost()
+    path = tmp_path / "legacy.recall.arti.st"
+    save(
+        host.expert,
+        path,
+        config={
+            "artifact_kind": "arti.recall-expert",
+            "artifact_version": 1,
+            "recall_expert": {
+                **spec(host).to_dict(),
+                "allowed_signals": ["consistency"],
+            },
+        },
+    )
+    with torch.no_grad():
+        host.expert.weight.fill_(2.0)
+    load_recall_artifact(path, host.expert, base_model=host)
+    assert torch.equal(host.expert.weight, torch.zeros_like(host.expert.weight))
+
+
 def test_registry_activation_failure_restores_previous_expert(tmp_path: Path) -> None:
     host = TinyRecallHost()
     path = tmp_path / "profile.recall.arti.st"
@@ -126,37 +92,35 @@ def test_registry_activation_failure_restores_previous_expert(tmp_path: Path) ->
     assert torch.equal(host.expert.weight, before)
 
 
-def test_recall_ttt_is_exposed_through_root_and_torch_namespaces() -> None:
-    assert arti.RecallTTTSession is RecallTTTSession
-    assert arti.torch.RecallTTTSession is RecallTTTSession
+def test_recall_artifacts_are_exposed_through_root_and_torch_namespaces() -> None:
     assert arti.torch.export_recall_artifact is export_recall_artifact
-    assert arti.RecallCapacityPlan is RecallCapacityPlan
-    assert arti.torch.RecallCapacityPlan is RecallCapacityPlan
     assert arti.RecallExpertPool is RecallExpertPool
     assert arti.torch.RecallExpertPool is RecallExpertPool
+    assert not hasattr(arti, "RecallTTTSession")
+    assert not hasattr(arti.torch, "RecallTTTSession")
 
 
-def test_capacity_plan_routes_and_protects_overflow() -> None:
+def test_capacity_plan_is_storage_only_and_deterministic() -> None:
     plan = RecallCapacityPlan(slots_per_expert=4, experts=2, overflow_policy="shard")
     decision = plan.decide(11)
-    assert decision.overflowed is True
     assert decision.accepted_items == 8
     assert decision.dropped_items == 3
     assert decision.expert_item_counts == (4, 4)
     assert decision.protected is True
-    abstain = RecallCapacityPlan(slots_per_expert=4, experts=2, overflow_policy="abstain").decide(11)
-    assert abstain.accepted_items == 0
-    assert abstain.dropped_items == 11
 
 
-def test_artifact_roundtrip_preserves_capacity_plan(tmp_path: Path) -> None:
+def test_artifact_roundtrip_preserves_capacity_metadata(tmp_path: Path) -> None:
     host = TinyRecallHost()
     path = tmp_path / "expert.recall.arti.st"
     configured = RecallArtifactSpec(
         capability="toy-correction",
         base_model_fingerprint=module_structure_fingerprint(host),
         injection_fingerprint=module_structure_fingerprint(host.expert),
-        capacity_plan=RecallCapacityPlan(slots_per_expert=3, experts=2, overflow_policy="shard"),
+        capacity_plan=RecallCapacityPlan(
+            slots_per_expert=3,
+            experts=2,
+            overflow_policy="shard",
+        ),
     )
     export_recall_artifact(host.expert, path, configured)
     loaded = load_recall_artifact(path, host.expert, base_model=host)

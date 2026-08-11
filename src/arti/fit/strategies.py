@@ -4,7 +4,11 @@ from __future__ import annotations
 
 
 STRATEGY_PATTERNS = {
-    "all-linear": ("*",),
+    "all-tensor": ("@tensor-leaves",),
+    "all-tensor-boundaries": ("@all-tensor-boundaries",),
+    "all-linear": ("@linear",),
+    "repeated-composites": ("@repeated-composites",),
+    "repeated-stages": ("@repeated-stages",),
     "transformer": (
         "*.embed_tokens",
         "*.embeddings",

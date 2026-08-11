@@ -7,6 +7,8 @@ current state and one static factor tensor and returns the complete next state.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -92,6 +94,15 @@ class FactorSpec:
         if self.init == "zero" and self.init_scale is not None:
             raise ValueError("zero initialization does not accept init_scale")
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "route": self.route,
+            "identity": self.identity,
+            "init": self.init,
+            "init_scale": self.init_scale,
+        }
+
 
 @dataclass(frozen=True)
 class FormulaIdentity:
@@ -119,6 +130,9 @@ class FormulaIdentity:
 
     def __str__(self) -> str:
         return self.canonical_id
+
+    def to_dict(self) -> dict[str, object]:
+        return {"name": self.name, "version": self.version}
 
 
 @dataclass(frozen=True)
@@ -166,6 +180,24 @@ class RecallFormulaContract:
         """Return the static factor-axis size."""
 
         return len(self.factors)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "identity": None if self.identity is None else self.identity.to_dict(),
+            "factors": [factor.to_dict() for factor in self.factors],
+            "output_semantics": self.output_semantics,
+            "identity_preserving": self.identity_preserving,
+            "api_version": self.api_version,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        payload = json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)

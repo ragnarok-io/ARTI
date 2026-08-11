@@ -563,8 +563,8 @@ class UnFold(nn.Module):
         if not self._can_use_triton_palette(x, exposed_count) or self.dim > 256:
             return False
         # The fused query keeps a complete token-by-feature tile resident.
-        # Larger FP32 tiles can exceed per-block shared-memory limits on
-        # consumer GPUs; the established palette path remains available.
+        # FP32 N=128,D=256 exceeds the measured 101 KiB shared-memory limit
+        # on the RTX 5070 Ti; the established palette path remains available.
         return x.dtype != torch.float32 or x.shape[1] <= 64
 
     def _select_operator_schedule(
@@ -1810,285 +1810,13 @@ class FusionPulse(nn.Module):
         return ", ".join(args)
 
 
-def _recall_formula_probe(module: nn.Module, dim: int) -> Tensor:
-    reference = next(module.parameters(), None)
-    if reference is None:
-        reference = next(module.buffers(), None)
-    kwargs = {}
-    if reference is not None:
-        kwargs["device"] = reference.device
-        if reference.is_floating_point():
-            kwargs["dtype"] = reference.dtype
-    return torch.zeros(dim, **kwargs)
-
-
-class _DenseRecallBank(nn.Module):
-    """Dense factor-bank implementation used by the public Recall wrapper."""
-
-    def __init__(
-        self,
-        dim: int,
-        slots: int,
-        *,
-        contract,
-        composition: str,
-        formula: nn.Module | None,
-        recognition: str,
-        identity_init: bool,
-    ) -> None:
-        super().__init__()
-        factor_count = contract.factor_count
-        if slots <= 0:
-            raise ValueError("slots must be positive")
-        if slots % factor_count:
-            raise ValueError(
-                f"Recall formula requires slots divisible by {factor_count}"
-            )
-        if recognition not in {"explicit", "alignment", "none"}:
-            raise ValueError("recognition must be 'explicit', 'alignment', or 'none'")
-
-        self.dim = int(dim)
-        self.slots = int(slots)
-        self.factor_names = contract.factor_names
-        self.factor_count = factor_count
-        self.composition = composition
-        self.formula = formula
-        self.recognition = recognition
-        self.scale = dim**-0.5
-        self.bank = nn.Parameter(torch.randn(slots, dim) * self.scale)
-        self.key_bank = nn.Parameter(torch.randn(slots, dim) * self.scale)
-        self.query = nn.Linear(dim, dim, bias=False)
-        self.alignment_recognizer = (
-            nn.Linear(dim * 2, 1) if recognition == "alignment" else None
-        )
-
-        slots_per_factor = slots // factor_count
-        self.factor_slices = tuple(
-            (index * slots_per_factor, (index + 1) * slots_per_factor)
-            for index in range(factor_count)
-        )
-        if identity_init or formula is not None:
-            with torch.no_grad():
-                for factor, (start, stop) in zip(
-                    contract.factors,
-                    self.factor_slices,
-                    strict=True,
-                ):
-                    factor_bank = self.bank[start:stop]
-                    if identity_init or factor.init == "zero":
-                        factor_bank.fill_(factor.identity)
-                    else:
-                        scale = dim**-0.5 if factor.init_scale is None else factor.init_scale
-                        factor_bank.normal_(mean=factor.identity, std=scale)
-            if identity_init and composition == "state":
-                coarse_start, coarse_stop = self.factor_slices[0]
-                direction_start, direction_stop = self.factor_slices[-2]
-                opacity_start, opacity_stop = self.factor_slices[-1]
-                with torch.no_grad():
-                    self.bank[coarse_start:coarse_stop].normal_(
-                        mean=0.0,
-                        std=self.scale,
-                    )
-                    self.bank[direction_start:direction_stop].normal_(
-                        mean=0.0,
-                        std=0.01,
-                    )
-                    self.bank[opacity_start:opacity_stop].normal_(
-                        mean=0.0,
-                        std=0.01,
-                    )
-
-    def forward(
-        self,
-        state: Tensor,
-        mask: Tensor,
-        recall: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        if recall is not None and (
-            recall.ndim != 3
-            or recall.shape[0] != state.shape[0]
-            or recall.shape[2] != state.shape[2]
-        ):
-            raise ValueError("recall must have shape [B, K, D]")
-
-        query = self.query(state)
-        factors: list[Tensor] = []
-        factor_weights: list[Tensor] = []
-        recognition_key: Tensor | None = None
-        for index, (start, stop) in enumerate(self.factor_slices):
-            factor_bank = self.bank[start:stop].to(dtype=state.dtype)
-            factor_keys = self.key_bank[start:stop].to(dtype=state.dtype)
-            if recall is not None and index == 0:
-                routed_bank = torch.cat(
-                    [
-                        factor_bank.unsqueeze(0).expand(state.shape[0], -1, -1),
-                        recall.to(state),
-                    ],
-                    dim=1,
-                )
-                routed_keys = torch.cat(
-                    [
-                        factor_keys.unsqueeze(0).expand(state.shape[0], -1, -1),
-                        recall.to(state),
-                    ],
-                    dim=1,
-                )
-                logits = (
-                    torch.einsum("bnd,bkd->bnk", query, routed_keys) * self.scale
-                )
-                weights = torch.softmax(logits, dim=-1)
-                factor = torch.einsum("bnk,bkd->bnd", weights, routed_bank)
-                key_context = torch.einsum("bnk,bkd->bnd", weights, routed_keys)
-            else:
-                logits = torch.einsum("bnd,kd->bnk", query, factor_keys) * self.scale
-                weights = torch.softmax(logits, dim=-1)
-                factor = torch.einsum("bnk,kd->bnd", weights, factor_bank)
-                key_context = torch.einsum("bnk,kd->bnd", weights, factor_keys)
-            if recognition_key is None:
-                recognition_key = key_context
-            factors.append(factor)
-            factor_weights.append(weights)
-
-        factor_tensor = torch.stack(factors, dim=-2)
-        candidate = self._compose(state, factor_tensor)
-        if self.recognition == "explicit":
-            assert recognition_key is not None
-            similarity = torch.cosine_similarity(query, recognition_key, dim=-1, eps=1e-6)
-            recognition = torch.sigmoid((similarity - 0.5) / 0.1)
-        elif self.recognition == "alignment":
-            assert self.alignment_recognizer is not None
-            recognition = torch.sigmoid(
-                self.alignment_recognizer(torch.cat([state, candidate], dim=-1))
-            ).squeeze(-1)
-        else:
-            recognition = torch.ones(state.shape[:2], device=state.device, dtype=state.dtype)
-
-        recognition = recognition * mask.to(state.dtype)
-        candidate = state + recognition.unsqueeze(-1) * (candidate - state)
-        candidate = torch.where(mask.unsqueeze(-1), candidate, state)
-        return candidate, torch.cat(factor_weights, dim=-1), recognition
-
-    def _compose(self, state: Tensor, factors: Tensor) -> Tensor:
-        if self.composition == "single":
-            return state + factors[..., 0, :]
-        if self.composition == "product":
-            scale, shift = factors.unbind(dim=-2)
-            return (1.0 + torch.tanh(scale)) * (state + shift)
-        if self.composition == "state":
-            coarse = factors[..., 0, :]
-            fine = factors[..., 1, :]
-            content = coarse + coarse.detach().abs().clamp_min(1.0) * torch.tanh(fine)
-            modulation = 1.0 + torch.tanh(factors[..., 2:15, :]) / 13.0
-            recalled = content * modulation.prod(dim=-2)
-            direction = torch.tanh(factors[..., 15, :])
-            opacity = torch.tanh(factors[..., 16, :]).square()
-            return (1.0 - opacity) * state + opacity * direction * recalled
-
-        if self.formula is None:
-            raise RuntimeError("custom Recall composition requires a formula")
-        flat_state = state.reshape(-1, state.shape[-1])
-        flat_factors = factors.reshape(
-            -1,
-            self.factor_count,
-            factors.shape[-1],
-        )
-        candidate = torch.vmap(self.formula)(flat_state, flat_factors).reshape_as(state)
-        if not isinstance(candidate, Tensor) or candidate.shape != state.shape:
-            raise ValueError("Recall formula must return one next-state Tensor")
-        if candidate.device != state.device or candidate.dtype != state.dtype:
-            raise ValueError("Recall formula must preserve state device and dtype")
-        return candidate
-
-
-class _DenseRecallState(nn.Module):
-    def __init__(
-        self,
-        recall: _DenseRecallBank,
-        *,
-        steps: int,
-        min_steps: int,
-        tolerance: float | None,
-        activation: str,
-        dropout: float,
-    ) -> None:
-        super().__init__()
-        if steps <= 0:
-            raise ValueError("steps must be positive")
-        if min_steps <= 0 or min_steps > steps:
-            raise ValueError("min_steps must be in [1, steps]")
-        if tolerance is not None and tolerance < 0:
-            raise ValueError("tolerance must be non-negative")
-        if activation not in {"half", "none"}:
-            raise ValueError("activation must be 'half' or 'none'")
-        self.recall = recall
-        self.steps = int(steps)
-        self.min_steps = int(min_steps)
-        self.tolerance = tolerance
-        self.activation = Half() if activation == "half" else nn.Identity()
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        state: Tensor,
-        mask: Tensor,
-        recall: Tensor | None,
-    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        initial = state
-        active = mask.any(dim=1)
-        steps_executed = torch.zeros(state.shape[0], device=state.device, dtype=state.dtype)
-        last_weights = torch.empty(
-            state.shape[0],
-            state.shape[1],
-            0,
-            device=state.device,
-            dtype=state.dtype,
-        )
-        last_recognition = torch.zeros(
-            state.shape[:2],
-            device=state.device,
-            dtype=state.dtype,
-        )
-
-        for step in range(self.steps):
-            if not bool(torch.any(active)):
-                break
-            candidate, last_weights, last_recognition = self.recall(state, mask, recall)
-            raw_delta = candidate - state
-            delta = self.dropout(self.activation(raw_delta))
-            active_tokens = active.unsqueeze(-1) & mask
-            previous = state
-            state = torch.where(
-                active_tokens.unsqueeze(-1),
-                state + delta,
-                state,
-            )
-            steps_executed = steps_executed + active.to(state.dtype)
-            if self.tolerance is not None and step + 1 >= self.min_steps:
-                valid = mask.unsqueeze(-1).to(torch.float32)
-                update_ratio = (
-                    ((state - previous).float() * valid).flatten(1).norm(dim=-1)
-                    / (previous.float() * valid)
-                    .flatten(1)
-                    .norm(dim=-1)
-                    .clamp_min(1e-12)
-                )
-                active = active & (update_ratio.detach() > self.tolerance)
-                if not bool(torch.any(active)):
-                    break
-
-        write = state - initial
-        diagnostics = {
-            "recall_bank_weights": last_weights,
-            "recall_recognition": last_recognition,
-            "recall_steps_executed": steps_executed,
-            "recall_effect_norm": write.norm(dim=-1),
-            "recall_write_norm": write.norm(dim=-1),
-        }
-        return state, write, diagnostics
-
-
 class Recall(nn.Module):
-    """Tensor-in/tensor-out Recall with versioned or local custom formulas."""
+    """Tensor-in/tensor-out Recall with versioned or custom formulas.
+
+    A Formula receives the current state and statically ordered Bank factors,
+    then returns the complete next state. Recall retains ownership of routing,
+    masking, recognition, activation, and iterative application.
+    """
 
     def __init__(
         self,
@@ -2101,18 +1829,23 @@ class Recall(nn.Module):
         tolerance: float | None = None,
         activation: str = "half",
         recognition: str = "none",
+        routing: str = "dense",
+        key_dim: int = 32,
+        group_size: int = 16,
+        group_topk: int = 2,
+        route_exploration: float = 0.0,
         dropout: float = 0.0,
         identity_init: bool = False,
     ) -> None:
         super().__init__()
-        if dim <= 0:
-            raise ValueError("dim must be positive")
+        from .config import ARTIConfig
+        from .layers import ARTIRecallWriteState
         from .recall_formula import (
             BUILTIN_RECALL_FORMULA_ALIASES,
             BUILTIN_RECALL_FORMULAS,
-            check_recall_formula,
         )
 
+        formula_module: nn.Module | None
         if isinstance(formula, str):
             formula_id = BUILTIN_RECALL_FORMULA_ALIASES.get(formula, formula)
             builtin = BUILTIN_RECALL_FORMULAS.get(formula_id)
@@ -2121,11 +1854,7 @@ class Recall(nn.Module):
 
                 registration = resolve_formula(formula_id)
                 formula_module = registration.instantiate()
-                contract = check_recall_formula(
-                    formula_module,
-                    _recall_formula_probe(formula_module, dim),
-                )
-                composition = "custom"
+                value_composition = "single"
                 formula_id = registration.reference
                 formula_origin = registration.origin
                 formula_portable = registration.portable
@@ -2133,22 +1862,17 @@ class Recall(nn.Module):
                 manifest_version = str(registration.identity.version)
             else:
                 formula_module = None
-                contract = builtin.contract
                 assert builtin.legacy_value_composition is not None
-                composition = builtin.legacy_value_composition
+                value_composition = builtin.legacy_value_composition
                 formula_origin = "builtin"
                 formula_portable = True
-                assert contract.identity is not None
-                manifest_id = contract.identity.name
-                manifest_version = str(contract.identity.version)
+                assert builtin.contract.identity is not None
+                manifest_id = builtin.contract.identity.name
+                manifest_version = str(builtin.contract.identity.version)
         elif isinstance(formula, nn.Module):
             formula_module = formula
-            contract = check_recall_formula(
-                formula_module,
-                _recall_formula_probe(formula_module, dim),
-            )
             formula_id = "custom"
-            composition = "custom"
+            value_composition = "single"
             formula_origin = "custom"
             formula_portable = False
             manifest_id = "custom"
@@ -2156,14 +1880,28 @@ class Recall(nn.Module):
         else:
             raise TypeError("formula must be a versioned formula ID or torch.nn.Module")
 
-        bank = _DenseRecallBank(
-            dim,
-            slots,
-            contract=contract,
-            composition=composition,
-            formula=formula_module,
-            recognition=recognition,
-            identity_init=identity_init,
+        config = ARTIConfig(
+            input_dim=dim,
+            hidden_dim=dim,
+            recall_slots=slots,
+            recall_steps=steps,
+            recall_min_steps=min_steps,
+            recall_tolerance=tolerance,
+            recall_activation=activation,
+            recall_recognition_mode=recognition,
+            recall_routing=routing,
+            recall_key_dim=key_dim,
+            recall_group_size=group_size,
+            recall_group_topk=group_topk,
+            recall_value_composition=value_composition,
+            recall_route_exploration=route_exploration,
+            dropout=dropout,
+            use_layer_norm=False,
+            use_phase_mixer=False,
+            use_virtual_interface=False,
+            use_pairwise_context=False,
+            use_recall=True,
+            use_virtual_recall=False,
         )
         self.dim = int(dim)
         self.slots = int(slots)
@@ -2172,29 +1910,32 @@ class Recall(nn.Module):
         self.formula_portable = formula_portable
         self._manifest_id = manifest_id
         self._manifest_version = manifest_version
-        self.state = _DenseRecallState(
-            bank,
-            steps=steps,
-            min_steps=min_steps,
-            tolerance=tolerance,
-            activation=activation,
-            dropout=dropout,
+        self.state = ARTIRecallWriteState(
+            config,
+            identity_init_bank=identity_init,
+            formula=formula_module,
         )
 
     @property
     def formula(self) -> nn.Module | None:
-        """Return the local custom or registered formula, when present."""
+        """Return the local custom/registered Formula, if one is in use."""
 
         return self.state.recall.formula
 
     @property
     def factor_names(self) -> tuple[str, ...]:
-        """Return factor names in stable Bank layout order."""
+        """Return factor names in their stable Bank layout order."""
 
         return self.state.recall.factor_names
 
+    @property
+    def route_names(self) -> tuple[str, ...]:
+        """Return Formula route names in their stable assignment order."""
+
+        return self.state.recall.route_names
+
     def formula_manifest(self) -> RecallFormulaManifest:
-        """Return passive formula and factor-layout metadata."""
+        """Return passive formula/layout metadata for artifact construction."""
 
         from .recall_manifest import RecallFormulaManifest, RecallLayoutManifest
 
@@ -2215,6 +1956,7 @@ class Recall(nn.Module):
         *,
         mask: Tensor | None = None,
         recall: Tensor | None = None,
+        route_assignment: Tensor | None = None,
         return_info: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if not isinstance(x, Tensor) or not x.is_floating_point():
@@ -2236,11 +1978,16 @@ class Recall(nn.Module):
             sequence.shape[1],
             sequence.device,
         )
-        output, _write, diagnostics = self.state(sequence, token_mask, recall)
-        output = output.squeeze(1) if was_vector else output
-        if return_info:
-            return output, diagnostics
-        return output
+        next_state, _write, diagnostics = self.state(
+            sequence,
+            token_mask,
+            recall,
+            route_assignment,
+        )
+        output = next_state.squeeze(1) if was_vector else next_state
+        if not return_info:
+            return output
+        return output, diagnostics
 
     def extra_repr(self) -> str:
         return (
@@ -2380,8 +2127,8 @@ class RecallRefiner(nn.Module):
 
 Pulse = LearnedPulse
 
-from .stateful_recall import StatefulRecall  # noqa: E402
-from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput  # noqa: E402
+from .stateful_recall import StatefulRecall
+from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
 __all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "Recall", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 

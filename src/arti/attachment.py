@@ -81,6 +81,78 @@ class _RecallBundle(nn.Module):
         self.layers = nn.ModuleList(tuple(recalls))
 
 
+class ARTIExpertSet:
+    """Named Recall banks rebuilt from immutable assets after every change."""
+
+    def __init__(self, attachment: "ARTIAttachment", contract) -> None:
+        from .recall_experts import RecallExpertAssembly, validate_recall_expert_contract
+
+        attachment._require_attached()
+        template = attachment._bundle()
+        validate_recall_expert_contract(
+            contract,
+            attachment._model,
+            template,
+            shared_config={"attachment": _config_payload(attachment.config)},
+        )
+        self.attachment = attachment
+        self.contract = contract
+        self._assembly = RecallExpertAssembly(template, contract)
+        self._layout = None
+
+    @property
+    def expert_ids(self) -> tuple[str, ...]:
+        return self._assembly.expert_ids
+
+    @property
+    def layout(self):
+        return self._layout
+
+    def add(self, path: str | Path, *, materialize: bool = True):
+        candidate = self._assembly.fork()
+        asset = candidate.add(path)
+        self._commit(candidate, materialize=materialize)
+        return asset
+
+    def remove(self, expert_id: str, *, materialize: bool = True):
+        candidate = self._assembly.fork()
+        asset = candidate.remove(expert_id)
+        self._commit(candidate, materialize=materialize)
+        return asset
+
+    def clear(self, *, materialize: bool = True):
+        candidate = self._assembly.fork()
+        assets = candidate.clear()
+        self._commit(candidate, materialize=materialize)
+        return assets
+
+    def replace(self, paths: Iterable[str | Path], *, materialize: bool = True):
+        candidate = self._assembly.fork()
+        assets = candidate.replace(paths)
+        self._commit(candidate, materialize=materialize)
+        return assets
+
+    def materialize(self):
+        bundle, layout = self._assembly.materialize()
+        self._install(bundle, layout)
+        return layout
+
+    def _commit(self, candidate, *, materialize: bool) -> None:
+        if materialize:
+            bundle, layout = candidate.materialize()
+            self._install(bundle, layout)
+        self._assembly = candidate
+
+    def _install(self, bundle, layout) -> None:
+        if len(bundle.layers) != len(self.attachment.paths):
+            raise RuntimeError("Recall expert assembly layer count changed")
+        for path, recall in zip(self.attachment.paths, bundle.layers, strict=True):
+            wrapper = self.attachment._layered.wrappers[path]
+            wrapper.recall = recall
+            wrapper.enabled = bool(layout.expert_ids)
+        self._layout = layout
+
+
 class ARTIAttachment:
     """Control surface installed as ``model.arti`` by :meth:`ARTI.attach`."""
 
@@ -115,9 +187,85 @@ class ARTIAttachment:
         self._require_attached()
         return _summary(self._model, self.config)
 
-    def parameters(self) -> Iterable[nn.Parameter]:
+    def parameters(self, role: str = "all") -> Iterable[nn.Parameter]:
         self._require_attached()
-        return self._layered.recall_parameters()
+        if role == "all":
+            return self._layered.recall_parameters()
+        if role == "expert_banks":
+            from .recall_experts import recall_bank_parameter_names
+
+            bundle = self._bundle()
+            names = set(recall_bank_parameter_names(bundle))
+            return (parameter for name, parameter in bundle.named_parameters() if name in names)
+        raise ValueError("parameter role must be 'all' or 'expert_banks'")
+
+    def freeze_expert_banks(self) -> tuple[tuple[str, nn.Parameter], ...]:
+        """Freeze the host and shared Recall reader, leaving only banks trainable."""
+
+        from .recall_experts import freeze_for_recall_expert
+
+        self._require_attached()
+        return freeze_for_recall_expert(self._model, self._bundle())
+
+    def expert_contract(
+        self,
+        preset_id: str,
+        *,
+        model_id: str | None = None,
+        revision: str | None = None,
+    ):
+        """Capture the immutable host and shared-reader contract for experts."""
+
+        from .recall_experts import create_recall_expert_contract
+
+        self._require_attached()
+        return create_recall_expert_contract(
+            self._model,
+            self._bundle(),
+            preset_id=preset_id,
+            model_id=model_id,
+            revision=revision,
+            shared_config={"attachment": _config_payload(self.config)},
+        )
+
+    def save_expert(
+        self,
+        path: str | Path,
+        *,
+        expert_id: str,
+        contract,
+        training_metadata: Mapping[str, Any] | None = None,
+        private_module: nn.Module | None = None,
+        private_metadata: Mapping[str, Any] | None = None,
+    ) -> ARTISaveResult:
+        """Export current banks and an optional private tensor extension."""
+
+        from .recall_experts import export_recall_expert_bank, validate_recall_expert_contract
+
+        self._require_attached()
+        bundle = self._bundle()
+        validate_recall_expert_contract(
+            contract,
+            self._model,
+            bundle,
+            shared_config={"attachment": _config_payload(self.config)},
+        )
+        return export_recall_expert_bank(
+            bundle,
+            path,
+            host=self._model,
+            expert_id=expert_id,
+            contract=contract,
+            shared_config={"attachment": _config_payload(self.config)},
+            training_metadata=training_metadata,
+            private_module=private_module,
+            private_metadata=private_metadata,
+        )
+
+    def experts(self, contract) -> ARTIExpertSet:
+        """Create a reversible expert set from this attachment's template."""
+
+        return ARTIExpertSet(self, contract)
 
     def set_enabled(self, feature: str, enabled: bool = True, *, paths: Iterable[str] | None = None) -> None:
         """Independently toggle Recall, Half, or recognition."""
@@ -185,6 +333,7 @@ class ARTIAttachment:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         training_state: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> ARTISaveResult:
         """Save only attached Recall weights and topology as ``*.recall.arti.st``."""
 
@@ -193,18 +342,22 @@ class ARTIAttachment:
         if not target.name.endswith(".recall.arti.st"):
             raise ValueError("attachment artifacts must end in '.recall.arti.st'")
         bundle = self._bundle()
-        metadata = {
+        extra = dict(metadata or {})
+        if "unified_attachment" in extra:
+            raise ValueError("attachment metadata cannot override unified_attachment")
+        artifact_metadata = {
             "unified_attachment": {
                 "version": 1,
                 "config": _config_payload(self.config),
                 "declaration": None if self.declaration is None else self.declaration.to_dict(include_source=True),
                 "host_structure": _host_structure_fingerprint(self._model),
-            }
+            },
+            **extra,
         }
         return save_arti(
             bundle,
             target,
-            config=metadata,
+            config=artifact_metadata,
             scope="all",
             optimizer=optimizer,
             scheduler=scheduler,
@@ -253,6 +406,7 @@ class ARTIAttachment:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         resume_from_checkpoint: str | Path | bool | None = None,
+        trainable: str = "all",
     ):
         """Create a Torch, Transformers, or Accelerate training session."""
 
@@ -279,6 +433,7 @@ class ARTIAttachment:
             optimizer=optimizer,
             scheduler=scheduler,
             resume_from_checkpoint=resume_from_checkpoint,
+            trainable=trainable,
         )
         return session
 
@@ -465,21 +620,31 @@ def _resolve_config(
         raise ValueError("recall enabled=False creates no attachment; leave the model unchanged instead")
     layer_selector = options.pop("layers", options.pop("layer_paths", None))
     discovered = discover_layers(model, layer_selector)
+    batch_axis = options.get("batch_axis")
+    feature_axis = options.get("feature_axis")
     dims = {item.path: item.dim for item in discovered if item.dim is not None}
     unresolved = tuple(item.path for item in discovered if item.dim is None)
     if unresolved and sample_batch is not None:
-        dims.update(_runtime_path_dims(model, unresolved, sample_batch))
+        dims.update(
+            _runtime_path_dims(
+                model,
+                unresolved,
+                sample_batch,
+                batch_axis=batch_axis,
+                feature_axis=feature_axis,
+            )
+        )
     unknown = tuple(path for path in unresolved if path not in dims)
     if unknown:
         raise ValueError(f"cannot infer hidden dimensions for {unknown}; pass sample_batch or explicit LayeredRecallConfig")
-    allowed = {"rank", "slots", "half", "use_half", "recognition", "recognition_mode", "recognition_threshold", "recognition_temperature", "copies", "combine", "freeze_backbone"}
+    allowed = {"rank", "slots", "half", "use_half", "recognition", "recognition_mode", "recognition_threshold", "recognition_temperature", "copies", "combine", "batch_axis", "feature_axis", "freeze_backbone"}
     extra = set(options) - allowed
     if extra:
         raise ValueError(f"unknown Recall attachment options: {sorted(extra)}")
     rank = options.get("rank", 16)
     slots = options.get("slots", 8)
     use_half = options.get("half", options.get("use_half", True))
-    recognition = options.get("recognition", options.get("recognition_mode", "alignment"))
+    recognition = options.get("recognition", options.get("recognition_mode", "none"))
     if recognition is False:
         recognition = "none"
     elif recognition is True:
@@ -496,6 +661,12 @@ def _resolve_config(
             recognition_temperature=float(_path_option(options.get("recognition_temperature", 0.1), item.path)),
             copies=int(_path_option(options.get("copies", 1), item.path)),
             combine=str(_path_option(options.get("combine", "sum"), item.path)),
+            batch_axis=None
+            if batch_axis is None
+            else int(_path_option(batch_axis, item.path)),
+            feature_axis=None
+            if feature_axis is None
+            else int(_path_option(feature_axis, item.path)),
         )
         for item in discovered
     )

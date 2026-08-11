@@ -69,12 +69,26 @@ class ARTITrainingSession:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         resume_from_checkpoint: str | Path | bool | None = None,
+        trainable: str = "all",
     ) -> None:
         self.attachment = attachment
         self.model = attachment._model
         self.config = config
         self.objective = resolve_attachment_objective(objective or config.objective, corruption_probability=config.corruption_probability)
-        parameters = list(attachment.parameters())
+        if trainable not in {"all", "expert_banks"}:
+            raise ValueError("trainable must be 'all' or 'expert_banks'")
+        if trainable == "expert_banks" and config.engine != "torch":
+            raise ValueError("expert_banks training currently requires the torch engine")
+        self.trainable = trainable
+        self._expert_guard = None
+        self._expert_frozen_snapshot: tuple[tuple[Tensor, Tensor], ...] = ()
+        if trainable == "expert_banks":
+            attachment.freeze_expert_banks()
+            self._expert_guard = attachment.expert_contract("arti.internal.training-guard")
+            self._expert_frozen_snapshot = _capture_expert_frozen_state(self.model, attachment._bundle())
+        parameters = list(attachment.parameters(role=trainable))
+        if optimizer is not None and _optimizer_parameter_ids(optimizer) != {id(parameter) for parameter in parameters}:
+            raise ValueError("optimizer parameters must exactly match the selected ARTI trainable role")
         self.optimizer = optimizer or torch.optim.AdamW(parameters, lr=config.learning_rate)
         self.scheduler = scheduler
         self.global_step = 0
@@ -95,12 +109,20 @@ class ARTITrainingSession:
         target_steps = self.config.steps if steps is None else int(steps)
         if target_steps <= 0:
             raise ValueError("steps must be positive")
-        if self.config.engine == "transformers":
-            self._fit_transformers(train_data, target_steps, trainer_kwargs)
-        elif self.config.engine == "accelerate":
-            self._fit_accelerate(train_data, target_steps)
-        else:
-            self._fit_torch(train_data, target_steps)
+        try:
+            if self.config.engine == "transformers":
+                self._fit_transformers(train_data, target_steps, trainer_kwargs)
+            elif self.config.engine == "accelerate":
+                self._fit_accelerate(train_data, target_steps)
+            else:
+                self._fit_torch(train_data, target_steps)
+            if self._expert_guard is not None:
+                current_guard = self.attachment.expert_contract("arti.internal.training-guard")
+                if current_guard != self._expert_guard:
+                    raise RuntimeError("expert-bank training changed the frozen host or shared Recall reader")
+        except Exception:
+            _restore_frozen_state(self._expert_frozen_snapshot)
+            raise
         saved = None
         if checkpoint_path is not None:
             saved = self.save_checkpoint(checkpoint_path)
@@ -143,7 +165,10 @@ class ARTITrainingSession:
     def _fit_torch(self, train_data: Iterable[Any], steps: int) -> None:
         iterator = _cycling(train_data)
         accumulation = self.config.gradient_accumulation_steps
-        self.model.train()
+        self.model.eval() if self.trainable == "expert_banks" else self.model.train()
+        parameter = next(self.model.parameters(), torch.empty(0))
+        use_scaler = self.config.mixed_precision == "fp16" and parameter.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=True) if use_scaler else None
         self.optimizer.zero_grad(set_to_none=True)
         for _ in range(steps):
             total = 0.0
@@ -151,9 +176,17 @@ class ARTITrainingSession:
                 batch = next(iterator)
                 with _autocast(self.model, self.config.mixed_precision):
                     loss = _call_objective(self.objective, self.model, batch, self.attachment)
-                (loss / accumulation).backward()
+                scaled_loss = loss / accumulation
+                if scaler is None:
+                    scaled_loss.backward()
+                else:
+                    scaler.scale(scaled_loss).backward()
                 total += float(loss.detach())
-            self.optimizer.step()
+            if scaler is None:
+                self.optimizer.step()
+            else:
+                scaler.step(self.optimizer)
+                scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -376,6 +409,34 @@ def _autocast(model: torch.nn.Module, precision: str):
         return nullcontext()
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     return torch.autocast(device_type=device_type, dtype=dtype)
+
+
+def _optimizer_parameter_ids(optimizer: torch.optim.Optimizer) -> set[int]:
+    return {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group.get("params", ())
+    }
+
+
+def _capture_expert_frozen_state(model: torch.nn.Module, expert: torch.nn.Module) -> tuple[tuple[Tensor, Tensor], ...]:
+    bank_ids = {
+        id(parameter)
+        for name, parameter in expert.named_parameters()
+        if name == "bank" or name.endswith(".bank")
+    }
+    shared_parameter_ids = {id(parameter) for parameter in expert.parameters()} - bank_ids
+    selected: list[Tensor] = []
+    selected.extend(parameter for parameter in model.parameters() if id(parameter) in shared_parameter_ids)
+    selected.extend(model.buffers())
+    unique = {id(tensor): tensor for tensor in selected}
+    return tuple((tensor, tensor.detach().clone()) for tensor in unique.values())
+
+
+def _restore_frozen_state(snapshot: tuple[tuple[Tensor, Tensor], ...]) -> None:
+    with torch.no_grad():
+        for tensor, value in snapshot:
+            tensor.copy_(value.to(tensor))
 
 
 __all__ = [

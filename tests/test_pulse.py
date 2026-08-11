@@ -64,19 +64,3 @@ def test_pulse_distinctness_rejects_collapse() -> None:
     assert report.latent_collision_count == 1
     with pytest.raises(ValueError, match="collisions"):
         assert_pulse_distinct(raw, collapsed)
-
-
-def test_pulse_rejects_huge_ids_before_output_allocation() -> None:
-    x = torch.randn(1, 2, 4)
-    pulse_ids = torch.tensor([[0, 2**31]])
-
-    with pytest.raises(ValueError, match="cannot exceed"):
-        pulse_compress(x, pulse_ids)
-
-
-def test_pulse_rejects_ids_outside_explicit_workspace() -> None:
-    x = torch.randn(1, 3, 4)
-    pulse_ids = torch.tensor([[0, 1, 2]])
-
-    with pytest.raises(ValueError, match="smaller than pulse_count"):
-        pulse_compress(x, pulse_ids, pulse_count=2)

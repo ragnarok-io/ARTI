@@ -73,6 +73,27 @@ def test_layer_recall_strictly_applies_half_to_candidate_delta() -> None:
     assert torch.all(half_delta.abs() <= raw_delta.abs() + 1e-7)
 
 
+def test_layer_recall_defaults_to_half_without_strength_or_recognition_gates() -> None:
+    recall = arti.LayerRecall(8, rank=3, slots=4)
+
+    assert recall.use_half
+    assert recall.recognition_mode == "none"
+    assert not hasattr(recall, "gate")
+    assert recall.recognizer is None
+    assert set(dict(recall.named_parameters())) == {"bank", "query.weight", "emit.weight"}
+
+
+def test_layer_recall_first_step_reaches_every_parameter() -> None:
+    torch.manual_seed(5)
+    recall = arti.LayerRecall(8, rank=3, slots=4)
+    loss = recall(torch.randn(2, 5, 8)).square().mean()
+
+    loss.backward()
+
+    assert all(parameter.grad is not None for parameter in recall.parameters())
+    assert all(torch.isfinite(parameter.grad).all() for parameter in recall.parameters())
+
+
 def test_tuple_output_transformer_layer_contract_is_preserved() -> None:
     class TupleBlock(nn.Module):
         def __init__(self) -> None:
@@ -96,6 +117,51 @@ def test_tuple_output_transformer_layer_contract_is_preserved() -> None:
     assert isinstance(output, tuple)
     assert output[0].shape == (2, 4, 8)
     assert output[1].shape == ()
+
+
+def test_layered_recall_attaches_to_arbitrary_spatial_tensor_boundary() -> None:
+    class SpatialWarp(nn.Module):
+        def forward(self, hidden: torch.Tensor):
+            return {"aux": torch.tensor(1), "sample": hidden.tanh()}
+
+    class Host(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.warp = SpatialWarp()
+
+        def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+            return self.warp(hidden)["sample"]
+
+    sample = torch.randn(2, 3, 4, 5, 6)
+    model = arti.LayeredRecallModel.attach(
+        Host(), ("warp",), sample_batch=sample, rank=2, slots=3
+    )
+    output = model(sample)
+    output.square().mean().backward()
+
+    assert output.shape == sample.shape
+    assert model.wrappers["warp"].recall.dim == 6
+    assert any(parameter.grad is not None for parameter in model.recall_parameters())
+
+
+def test_layered_recall_accepts_explicit_feature_axis_for_channel_first_boundary() -> None:
+    class ChannelFirstWarp(nn.Module):
+        def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+            return hidden.sin()
+
+    host = nn.Sequential(ChannelFirstWarp())
+    sample = torch.randn(2, 3, 4, 5)
+    model = arti.LayeredRecallModel.attach(
+        host,
+        ("0",),
+        sample_batch=sample,
+        feature_axis={"0": 1},
+        rank=2,
+        slots=3,
+    )
+
+    assert model(sample).shape == sample.shape
+    assert model.wrappers["0"].recall.dim == 3
 
 
 def test_layer_artifacts_are_path_bound_loadable_and_concatenable(tmp_path) -> None:
@@ -228,6 +294,26 @@ def test_layer_diagnostics_exposes_latest_trace_components() -> None:
 
     assert set(report) == {"0", "2"}
     assert set(report["0"]) == {"raw_delta", "delta", "recognition", "survival"}
+
+
+def test_layer_survival_diagnostic_is_finite_for_zero_fp16_delta() -> None:
+    model = arti.LayeredRecallModel.attach(
+        nn.Sequential(nn.Identity()),
+        ("0",),
+        dims={"0": 8},
+        rank=2,
+        slots=3,
+    ).half()
+    wrapper = model.wrappers["0"]
+    wrapper.capture = True
+    with torch.no_grad():
+        wrapper.recall.emit.weight.zero_()
+
+    model(torch.randn(2, 4, 8, dtype=torch.float16))
+
+    assert wrapper.last_survival is not None
+    assert torch.isfinite(wrapper.last_survival).all()
+    assert torch.count_nonzero(wrapper.last_survival) == 0
 
 
 def test_layered_recall_delegates_generate() -> None:

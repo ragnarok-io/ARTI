@@ -18,3 +18,5 @@ class ARTIOutput:
     recall_prediction: Tensor | None = None
     recall_influence: Tensor | None = None
     diagnostics: dict[str, Tensor] = field(default_factory=dict)
+    recall_context: Tensor | None = None
+    recall_route: Tensor | None = None

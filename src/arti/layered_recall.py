@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import torch
 import copy
@@ -13,10 +13,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .fit.insertion import get_parent_module, replace_mapping_value, set_child_module
-from .fit.scanner import STRUCTURED_TENSOR_KEYS, run_model, scan_model
+from .fit.insertion import get_parent_module, set_child_module
+from .fit.scanner import run_model, scan_model
 from .nn import Half
-from .recall_ttt import (
+from .recall_workspace import RecallWorkspace
+from .recall_artifacts import (
     RecallArtifactSpec,
     RecallExpertPool,
     export_recall_artifact,
@@ -24,6 +25,7 @@ from .recall_ttt import (
     module_structure_fingerprint,
 )
 from .serialization import load as load_arti
+from .tensor_boundary import TensorLayout, find_primary_tensor, replace_tensor_at_path
 
 
 class LayerRecall(nn.Module):
@@ -36,9 +38,10 @@ class LayerRecall(nn.Module):
         rank: int = 16,
         slots: int = 8,
         use_half: bool = True,
-        recognition_mode: str = "alignment",
+        recognition_mode: str = "none",
         recognition_threshold: float = 0.5,
         recognition_temperature: float = 0.1,
+        workspace: RecallWorkspace | None = None,
     ) -> None:
         super().__init__()
         if dim <= 0 or rank <= 0 or slots <= 0:
@@ -52,10 +55,12 @@ class LayerRecall(nn.Module):
         self.slots = int(slots)
         self.use_half = bool(use_half)
         self.recognition_mode = recognition_mode
+        if workspace is not None and workspace.dim != rank:
+            raise ValueError("workspace feature dimension must match rank")
+        self.workspace = workspace
         self.bank = nn.Parameter(torch.randn(slots, rank) * rank**-0.5)
         self.query = nn.Linear(dim, rank, bias=False)
         self.emit = nn.Linear(rank, dim, bias=False)
-        self.gate = nn.Linear(rank * 2, 1)
         self.recognizer = nn.Linear(rank * 2, 1) if recognition_mode == "alignment" else None
         self.survival = Half() if use_half else nn.Identity()
         self.register_buffer("recognition_threshold", torch.tensor(float(recognition_threshold)), persistent=False)
@@ -73,9 +78,25 @@ class LayerRecall(nn.Module):
         sequence = hidden.unsqueeze(1) if hidden.ndim == 2 else hidden
         valid = _mask_for(sequence, mask)
         query = self.query(sequence)
-        logits = torch.einsum("bnr,kr->bnk", query, self.bank) * self.rank**-0.5
+        bank = self.bank.to(device=query.device, dtype=query.dtype)
+        logits = torch.einsum("bnr,kr->bnk", query, bank) * self.rank**-0.5
         weights = torch.softmax(logits, dim=-1)
-        context = torch.einsum("bnk,kr->bnr", weights, self.bank)
+        direct_context = torch.einsum("bnk,kr->bnr", weights, bank)
+        workspace_info: dict[str, Tensor] | None = None
+        if self.workspace is None:
+            context = direct_context
+        else:
+            batch, tokens, slots = weights.shape
+            candidates = weights.unsqueeze(-1) * bank.reshape(1, 1, slots, self.rank)
+            candidates = candidates.reshape(batch, tokens * slots, self.rank)
+            candidate_mask = valid.unsqueeze(-1).expand(-1, -1, slots).reshape(batch, tokens * slots)
+            context, workspace_info = self.workspace(
+                query,
+                candidates,
+                query_mask=valid,
+                candidate_mask=candidate_mask,
+                return_info=True,
+            )
         features = torch.cat([query, context], dim=-1)
         if self.recognition_mode == "alignment":
             assert self.recognizer is not None
@@ -87,8 +108,7 @@ class LayerRecall(nn.Module):
         else:
             recognition = torch.ones_like(logits[..., 0])
         recognition = recognition * valid.to(sequence.dtype)
-        strength = torch.sigmoid(self.gate(features)).squeeze(-1) * recognition
-        raw_delta = self.emit(context) * strength.unsqueeze(-1)
+        raw_delta = self.emit(context) * recognition.unsqueeze(-1)
         delta = self.survival(raw_delta) * valid.unsqueeze(-1).to(sequence.dtype)
         if hidden.ndim == 2:
             delta = delta[:, 0]
@@ -97,12 +117,25 @@ class LayerRecall(nn.Module):
             weights = weights[:, 0]
         if not return_info:
             return delta
-        return delta, {
+        info = {
             "raw_delta": raw_delta,
             "recognition": recognition,
             "weights": weights,
             "delta_norm": delta.norm(dim=-1),
         }
+        if workspace_info is not None:
+            info.update(
+                {
+                    "workspace_survival": workspace_info["survival"],
+                    "workspace_slot_usage": workspace_info["slot_usage"],
+                    "workspace_read_weights": workspace_info["read_weights"],
+                    "workspace_mask": workspace_info["workspace_mask"],
+                    "workspace_exposed_mask": workspace_info["exposed_mask"],
+                    "workspace_source_index": workspace_info["source_index"],
+                    "workspace_context_norm": workspace_info["context_norm"],
+                }
+            )
+        return delta, info
 
 
 class LayerRecallStack(nn.Module):
@@ -185,13 +218,24 @@ class LayerRecallStack(nn.Module):
 class LayerRecallWrapper(nn.Module):
     """Preserve a base layer's output contract while adding one Recall delta."""
 
-    def __init__(self, base: nn.Module, recall: LayerRecall | LayerRecallStack, *, layer_path: str) -> None:
+    def __init__(
+        self,
+        base: nn.Module,
+        recall: LayerRecall | LayerRecallStack,
+        *,
+        layer_path: str,
+        batch_axis: int | None = None,
+        feature_axis: int | None = None,
+    ) -> None:
         super().__init__()
         self.base = base
         self.recall = recall
         self.layer_path = layer_path
+        self.batch_axis = batch_axis
+        self.feature_axis = feature_axis
         self.enabled = True
         self.capture = False
+        self._delta_gate: Callable[[Tensor], Tensor] | None = None
         self.last_pre: Tensor | None = None
         self.last_delta: Tensor | None = None
         self.last_raw_delta: Tensor | None = None
@@ -201,20 +245,42 @@ class LayerRecallWrapper(nn.Module):
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         output = self.base(*args, **kwargs)
-        tensor, replace = _extract_output_tensor(output)
-        if tensor is None or replace is None or tensor.ndim not in {2, 3} or not tensor.is_floating_point():
+        found = find_primary_tensor(output)
+        if found is None:
             return output
-        delta = torch.zeros_like(tensor)
-        recognition = torch.zeros(tensor.shape[:-1], device=tensor.device, dtype=tensor.dtype)
+        tensor, output_path = found
+        inferred = TensorLayout.infer(tensor, self.base)
+        layout = TensorLayout(
+            tuple(int(value) for value in tensor.shape),
+            inferred.batch_axis if self.batch_axis is None else self.batch_axis,
+            inferred.feature_axis if self.feature_axis is None else self.feature_axis,
+        )
+        sequence = layout.pack(tensor)
+        delta_sequence = torch.zeros_like(sequence)
+        recognition = torch.zeros(
+            sequence.shape[:-1], device=sequence.device, dtype=sequence.dtype
+        )
         if self.enabled:
-            delta, info = self.recall(tensor, return_info=True)
+            delta_sequence, info = self.recall(sequence, return_info=True)
             recognition = info["recognition"]
-            raw_delta = info.get("raw_delta", delta)
-            survival = delta.abs().mean(dim=-1) / raw_delta.abs().mean(dim=-1).clamp_min(1e-8)
+            raw_delta_sequence = info.get("raw_delta", delta_sequence)
+            if self._delta_gate is not None:
+                gate = _normalize_delta_gate(self._delta_gate(sequence), sequence)
+                scale = gate.unsqueeze(-1).to(delta_sequence)
+                delta_sequence = delta_sequence * scale
+                raw_delta_sequence = raw_delta_sequence * scale
+                recognition = recognition * gate.to(recognition)
+            delta_scale = delta_sequence.float().abs().mean(dim=-1)
+            raw_scale = raw_delta_sequence.float().abs().mean(dim=-1)
+            survival = (delta_scale / raw_scale.clamp_min(torch.finfo(torch.float32).tiny)).to(tensor.dtype)
         else:
-            raw_delta = torch.zeros_like(tensor)
-            survival = torch.zeros(tensor.shape[:-1], device=tensor.device, dtype=tensor.dtype)
-        post = tensor + delta
+            raw_delta_sequence = torch.zeros_like(sequence)
+            survival = torch.zeros(
+                sequence.shape[:-1], device=sequence.device, dtype=sequence.dtype
+            )
+        delta = layout.restore(delta_sequence)
+        raw_delta = layout.restore(raw_delta_sequence)
+        post = layout.restore(sequence + delta_sequence)
         if self.capture:
             self.last_pre = tensor
             self.last_delta = delta
@@ -222,7 +288,20 @@ class LayerRecallWrapper(nn.Module):
             self.last_post = post
             self.last_recognition = recognition
             self.last_survival = survival
-        return replace(post)
+        return replace_tensor_at_path(output, output_path, post)
+
+    @property
+    def has_delta_gate(self) -> bool:
+        """Whether an external tensor gate currently modulates this Recall branch."""
+
+        return self._delta_gate is not None
+
+    def set_delta_gate(self, gate: Callable[[Tensor], Tensor] | None) -> None:
+        """Install a non-serialized survival gate for the Recall delta."""
+
+        if gate is not None and not callable(gate):
+            raise TypeError("delta gate must be callable or None")
+        self._delta_gate = gate
 
     def clear_trace(self) -> None:
         self.last_pre = None
@@ -231,6 +310,19 @@ class LayerRecallWrapper(nn.Module):
         self.last_post = None
         self.last_recognition = None
         self.last_survival = None
+
+
+def _normalize_delta_gate(gate: Tensor, hidden: Tensor) -> Tensor:
+    if not isinstance(gate, Tensor):
+        raise TypeError("delta gate must return a Tensor")
+    expected = hidden.shape[:-1]
+    if hidden.ndim == 3 and tuple(gate.shape) == (hidden.shape[0],):
+        gate = gate.unsqueeze(-1).expand(expected)
+    if tuple(gate.shape) != tuple(expected):
+        raise ValueError(f"delta gate returned shape {tuple(gate.shape)}; expected {tuple(expected)}")
+    if not gate.is_floating_point():
+        raise TypeError("delta gate must return a floating-point Tensor")
+    return gate
 
 
 @dataclass(frozen=True)
@@ -242,11 +334,13 @@ class LayerRecallSpec:
     rank: int = 16
     slots: int = 8
     use_half: bool = True
-    recognition_mode: str = "alignment"
+    recognition_mode: str = "none"
     recognition_threshold: float = 0.5
     recognition_temperature: float = 0.1
     copies: int = 1
     combine: str = "sum"
+    batch_axis: int | None = None
+    feature_axis: int | None = None
 
     def __post_init__(self) -> None:
         if not self.path:
@@ -263,6 +357,14 @@ class LayerRecallSpec:
             raise ValueError("copies must be positive")
         if self.combine not in {"sum", "mean"}:
             raise ValueError("combine must be 'sum' or 'mean'")
+        if self.batch_axis is not None and (
+            isinstance(self.batch_axis, bool) or not isinstance(self.batch_axis, int)
+        ):
+            raise ValueError("batch_axis must be an integer or None")
+        if self.feature_axis is not None and (
+            isinstance(self.feature_axis, bool) or not isinstance(self.feature_axis, int)
+        ):
+            raise ValueError("feature_axis must be an integer or None")
 
 
 @dataclass(frozen=True)
@@ -273,8 +375,10 @@ class LayeredRecallConfig:
     rank: int | Mapping[str, int] = 16
     slots: int | Mapping[str, int] = 8
     use_half: bool = True
-    recognition_mode: str = "alignment"
+    recognition_mode: str = "none"
     freeze_backbone: bool = True
+    batch_axis: int | Mapping[str, int] | None = None
+    feature_axis: int | Mapping[str, int] | None = None
     layers: tuple[LayerRecallSpec, ...] = ()
 
     def __post_init__(self) -> None:
@@ -365,6 +469,14 @@ class LayeredRecallModel(nn.Module):
             }
             copies: int | Mapping[str, int] = {layer.path: layer.copies for layer in config.layers}
             combine: str | Mapping[str, str] = {layer.path: layer.combine for layer in config.layers}
+            batch_axis: int | Mapping[str, int] | None = {
+                layer.path: layer.batch_axis for layer in config.layers if layer.batch_axis is not None
+            }
+            feature_axis: int | Mapping[str, int] | None = {
+                layer.path: layer.feature_axis
+                for layer in config.layers
+                if layer.feature_axis is not None
+            }
         else:
             rank = config.rank
             slots = config.slots
@@ -374,6 +486,8 @@ class LayeredRecallModel(nn.Module):
             recognition_temperature = 0.1
             copies = 1
             combine = "sum"
+            batch_axis = config.batch_axis
+            feature_axis = config.feature_axis
         return cls.attach(
             model,
             config.paths,
@@ -387,6 +501,8 @@ class LayeredRecallModel(nn.Module):
             recognition_temperature=recognition_temperature,
             copies=copies,
             combine=combine,
+            batch_axis=batch_axis,
+            feature_axis=feature_axis,
             freeze_backbone=config.freeze_backbone,
         )
 
@@ -401,19 +517,32 @@ class LayeredRecallModel(nn.Module):
         rank: int | Mapping[str, int] = 16,
         slots: int | Mapping[str, int] = 8,
         use_half: bool | Mapping[str, bool] = True,
-        recognition_mode: str | Mapping[str, str] = "alignment",
+        recognition_mode: str | Mapping[str, str] = "none",
         recognition_threshold: float | Mapping[str, float] = 0.5,
         recognition_temperature: float | Mapping[str, float] = 0.1,
         copies: int | Mapping[str, int] = 1,
         combine: str | Mapping[str, str] = "sum",
+        batch_axis: int | Mapping[str, int] | None = None,
+        feature_axis: int | Mapping[str, int] | None = None,
         freeze_backbone: bool = True,
     ) -> "LayeredRecallModel":
         paths = tuple(layer_paths)
         if not paths or len(set(paths)) != len(paths):
             raise ValueError("layer_paths must contain unique layer names")
         resolved_dims = dict(dims or {})
+        runtime_candidates = {}
         if sample_batch is not None:
-            report = scan_model(model, sample_batch)
+            report = scan_model(
+                model,
+                sample_batch,
+                batch_axis=batch_axis,
+                feature_axis=feature_axis,
+            )
+            runtime_candidates = {
+                candidate.name: candidate
+                for candidate in report.candidates
+                if candidate.name in paths
+            }
             resolved_dims.update({candidate.name: candidate.dim for candidate in report.candidates if candidate.name in paths})
             unresolved = tuple(path for path in paths if path not in resolved_dims)
             if unresolved:
@@ -448,7 +577,32 @@ class LayeredRecallModel(nn.Module):
             reference = next((parameter for parameter in base.parameters() if parameter.is_floating_point()), None)
             if reference is not None:
                 branch.to(device=reference.device, dtype=reference.dtype)
-            set_child_module(parent, leaf, LayerRecallWrapper(base, branch, layer_path=path))
+            else:
+                candidate = runtime_candidates.get(path)
+                dtype = (
+                    None
+                    if candidate is None or candidate.dtype is None
+                    else getattr(torch, candidate.dtype.removeprefix("torch."), None)
+                )
+                if candidate is not None and candidate.device is not None and isinstance(dtype, torch.dtype):
+                    branch.to(device=torch.device(candidate.device), dtype=dtype)
+            batch_axis_value = _optional_path_value(batch_axis, path)
+            feature_axis_value = _optional_path_value(feature_axis, path)
+            resolved_batch_axis = None if batch_axis_value is None else int(batch_axis_value)
+            resolved_feature_axis = (
+                None if feature_axis_value is None else int(feature_axis_value)
+            )
+            set_child_module(
+                parent,
+                leaf,
+                LayerRecallWrapper(
+                    base,
+                    branch,
+                    layer_path=path,
+                    batch_axis=resolved_batch_axis,
+                    feature_axis=resolved_feature_axis,
+                ),
+            )
         return cls(model, paths)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
@@ -533,7 +687,6 @@ class LayeredRecallModel(nn.Module):
         path: str | Path,
         *,
         capability: str = "layered-trajectory-repair",
-        allowed_signals: tuple[str, ...] = ("masked_reconstruction", "consistency"),
         training_metadata: Mapping[str, Any] | None = None,
     ):
         wrapper = self._wrapper_at(layer_path)
@@ -542,7 +695,6 @@ class LayeredRecallModel(nn.Module):
             capability=capability,
             base_model_fingerprint=module_structure_fingerprint(self.model),
             injection_fingerprint=module_structure_fingerprint(wrapper.recall),
-            allowed_signals=allowed_signals,
             visibility_policy="layer-local-mask",
             training_metadata=metadata,
         )
@@ -778,19 +930,6 @@ def _run_inputs(model: nn.Module, inputs: Any, *, causal: bool) -> Any:
     return run_model(model, inputs, causal=causal)
 
 
-def _extract_output_tensor(output: Any):
-    if isinstance(output, Tensor):
-        return output, lambda value: value
-    if isinstance(output, tuple) and output and isinstance(output[0], Tensor):
-        return output[0], lambda value: (value, *output[1:])
-    if isinstance(output, Mapping):
-        for key in STRUCTURED_TENSOR_KEYS:
-            value = output.get(key)
-            if isinstance(value, Tensor):
-                return value, lambda replacement, key=key: replace_mapping_value(output, key, replacement)
-    return None, None
-
-
 def _mask_for(sequence: Tensor, mask: Tensor | None) -> Tensor:
     if mask is None:
         return torch.ones(sequence.shape[:2], device=sequence.device, dtype=torch.bool)
@@ -800,7 +939,15 @@ def _mask_for(sequence: Tensor, mask: Tensor | None) -> Tensor:
 
 
 def _infer_module_dim(module: nn.Module) -> int | None:
-    for attribute in ("out_features", "normalized_shape", "hidden_size", "embed_dim"):
+    for attribute in (
+        "out_features",
+        "out_channels",
+        "num_channels",
+        "num_features",
+        "normalized_shape",
+        "hidden_size",
+        "embed_dim",
+    ):
         value = getattr(module, attribute, None)
         if isinstance(value, int):
             return value
@@ -809,15 +956,33 @@ def _infer_module_dim(module: nn.Module) -> int | None:
     return None
 
 
-def _runtime_path_dims(model: nn.Module, paths: Iterable[str], sample_batch: Any) -> dict[str, int]:
+def _runtime_path_dims(
+    model: nn.Module,
+    paths: Iterable[str],
+    sample_batch: Any,
+    *,
+    batch_axis: int | Mapping[str, int] | None = None,
+    feature_axis: int | Mapping[str, int] | None = None,
+) -> dict[str, int]:
     observed: dict[str, int] = {}
     handles = []
 
     def capture(path: str):
         def hook(_module: nn.Module, _inputs: tuple[Any, ...], output: Any) -> None:
-            tensor, _ = _extract_output_tensor(output)
-            if tensor is not None and tensor.ndim in {2, 3}:
-                observed[path] = int(tensor.shape[-1])
+            found = find_primary_tensor(output)
+            if found is not None:
+                tensor = found[0]
+                inferred = TensorLayout.infer(tensor, _module)
+                layout = TensorLayout(
+                    tuple(int(value) for value in tensor.shape),
+                    inferred.batch_axis
+                    if _optional_path_value(batch_axis, path) is None
+                    else int(_optional_path_value(batch_axis, path)),
+                    inferred.feature_axis
+                    if _optional_path_value(feature_axis, path) is None
+                    else int(_optional_path_value(feature_axis, path)),
+                )
+                observed[path] = layout.feature_dim
 
         return hook
 
@@ -851,6 +1016,12 @@ def _per_path_value(value: Any | Mapping[str, Any], path: str) -> Any:
             raise ValueError(f"mapping is missing layer path {path!r}")
         return value[path]
     return value
+
+
+def _optional_path_value(value: Any | Mapping[str, Any] | None, path: str) -> Any:
+    if value is None:
+        return None
+    return value.get(path) if isinstance(value, Mapping) else value
 
 
 def _require_trace(value: Tensor | None, path: str, kind: str) -> Tensor:

@@ -1,5 +1,5 @@
 """PyTorch backend block re-exports."""
 
-from ..blocks import ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
+from ..blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
 
-__all__ = ["ARTIResidualBlock", "ARTISequenceBlock", "ARTIPooledBlock"]
+__all__ = ["ARTIHostBridge", "ARTIResidualBlock", "ARTISequenceBlock", "ARTIPooledBlock"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,17 @@ class MechanismOverrides:
     interface_slots: int | None = None
     recall_slots: int | None = None
     recall_steps: int | None = None
+    recall_min_steps: int | None = None
+    recall_tolerance: float | None = None
     recall_activation: str | None = None
+    recall_recognition_mode: str | None = None
+    recall_bank_fraction: float | None = None
+    recall_routing: str | None = None
+    recall_key_dim: int | None = None
+    recall_group_size: int | None = None
+    recall_group_topk: int | None = None
+    recall_value_composition: str | None = None
+    recall_formula: str | None = None
     hidden_multiplier: float | None = None
 
     @classmethod
@@ -47,7 +58,29 @@ class MechanismOverrides:
             interface_slots=_optional_int(payload.get("interface_slots")),
             recall_slots=_optional_int(payload.get("recall_slots")),
             recall_steps=_optional_int(payload.get("recall_steps")),
+            recall_min_steps=_optional_int(payload.get("recall_min_steps")),
+            recall_tolerance=None
+            if payload.get("recall_tolerance") is None
+            else float(payload["recall_tolerance"]),
             recall_activation=None if payload.get("recall_activation") is None else str(payload["recall_activation"]),
+            recall_recognition_mode=None
+            if payload.get("recall_recognition_mode") is None
+            else str(payload["recall_recognition_mode"]),
+            recall_bank_fraction=None
+            if payload.get("recall_bank_fraction") is None
+            else float(payload["recall_bank_fraction"]),
+            recall_routing=None
+            if payload.get("recall_routing") is None
+            else str(payload["recall_routing"]),
+            recall_key_dim=_optional_int(payload.get("recall_key_dim")),
+            recall_group_size=_optional_int(payload.get("recall_group_size")),
+            recall_group_topk=_optional_int(payload.get("recall_group_topk")),
+            recall_value_composition=None
+            if payload.get("recall_value_composition") is None
+            else str(payload["recall_value_composition"]),
+            recall_formula=None
+            if payload.get("recall_formula") is None
+            else str(payload["recall_formula"]),
             hidden_multiplier=None if payload.get("hidden_multiplier") is None else float(payload["hidden_multiplier"]),
         )
 
@@ -61,7 +94,17 @@ class MechanismOverrides:
             "interface_slots": self.interface_slots,
             "recall_slots": self.recall_slots,
             "recall_steps": self.recall_steps,
+            "recall_min_steps": self.recall_min_steps,
+            "recall_tolerance": self.recall_tolerance,
             "recall_activation": self.recall_activation,
+            "recall_recognition_mode": self.recall_recognition_mode,
+            "recall_bank_fraction": self.recall_bank_fraction,
+            "recall_routing": self.recall_routing,
+            "recall_key_dim": self.recall_key_dim,
+            "recall_group_size": self.recall_group_size,
+            "recall_group_topk": self.recall_group_topk,
+            "recall_value_composition": self.recall_value_composition,
+            "recall_formula": self.recall_formula,
             "hidden_multiplier": self.hidden_multiplier,
         }
 
@@ -79,8 +122,74 @@ class MechanismOverrides:
                 raise ValueError(f"ARTI fit config mechanism.{key} must be positive")
         if self.recall_steps is not None and self.recall_steps < 0:
             raise ValueError("ARTI fit config mechanism.recall_steps must be non-negative")
+        if self.recall_min_steps is not None and self.recall_min_steps < 0:
+            raise ValueError("ARTI fit config mechanism.recall_min_steps must be non-negative")
+        if self.recall_tolerance is not None and (
+            not math.isfinite(self.recall_tolerance) or self.recall_tolerance < 0
+        ):
+            raise ValueError(
+                "ARTI fit config mechanism.recall_tolerance must be finite and non-negative"
+            )
+        if (
+            self.recall_steps is not None
+            and self.recall_steps > 0
+            and self.recall_min_steps is not None
+            and not 1 <= self.recall_min_steps <= self.recall_steps
+        ):
+            raise ValueError(
+                "ARTI fit config mechanism.recall_min_steps must be in "
+                "[1, recall_steps]"
+            )
         if self.recall_activation is not None and self.recall_activation not in {"half", "none"}:
             raise ValueError("ARTI fit config mechanism.recall_activation must be 'half' or 'none'")
+        if self.recall_recognition_mode is not None and self.recall_recognition_mode not in {
+            "explicit",
+            "alignment",
+            "none",
+        }:
+            raise ValueError(
+                "ARTI fit config mechanism.recall_recognition_mode must be "
+                "'explicit', 'alignment', or 'none'"
+            )
+        if self.recall_bank_fraction is not None and not 0.5 < self.recall_bank_fraction < 1.0:
+            raise ValueError(
+                "ARTI fit config mechanism.recall_bank_fraction must be in (0.5, 1)"
+            )
+        if self.recall_bank_fraction is not None and self.recall_slots is not None:
+            raise ValueError(
+                "ARTI fit config mechanism.recall_bank_fraction and "
+                "mechanism.recall_slots are mutually exclusive; use the fraction "
+                "for automatic bank sizing or slots for an explicit shape"
+            )
+        if self.recall_routing is not None and self.recall_routing not in {
+            "dense",
+            "grouped",
+        }:
+            raise ValueError(
+                "ARTI fit config mechanism.recall_routing must be 'dense' or 'grouped'"
+            )
+        if self.recall_value_composition is not None and self.recall_value_composition not in {
+            "single",
+            "product",
+            "state",
+        }:
+            raise ValueError(
+                "ARTI fit config mechanism.recall_value_composition must be "
+                "'single', 'product', or 'state'"
+            )
+        if self.recall_formula is not None:
+            from ..recall_registry import RecallFormulaId
+
+            RecallFormulaId.parse(self.recall_formula)
+            if self.recall_value_composition not in {None, "single"}:
+                raise ValueError(
+                    "ARTI fit config mechanism.recall_formula cannot be combined "
+                    "with a non-single legacy recall_value_composition"
+                )
+        for key in ("recall_key_dim", "recall_group_size", "recall_group_topk"):
+            value = getattr(self, key)
+            if value is not None and value <= 0:
+                raise ValueError(f"ARTI fit config mechanism.{key} must be positive")
         if self.hidden_multiplier is not None and self.hidden_multiplier <= 0:
             raise ValueError("ARTI fit config mechanism.hidden_multiplier must be positive")
         return self
@@ -99,8 +208,16 @@ class FitProjectConfig:
     runtime_fields: RuntimeFieldConfig = RuntimeFieldConfig()
     objectives: tuple[str, ...] = ()
     where: tuple[str, ...] | None = None
+    exclude: tuple[str, ...] = ()
+    positions: tuple[str, ...] = ("output",)
+    scale_pattern: tuple[tuple[str, str], ...] = ()
     every: int = 1
     freeze_base: bool = True
+    identity_gate: bool = False
+    zero_init_output: bool = False
+    bridge_mode: str = "radial"
+    boundary_mask_key: str | None = None
+    require_runtime_context: bool = False
     max_adapters: int | None = None
     max_extra_params: int | str | None = None
 
@@ -121,8 +238,18 @@ class FitProjectConfig:
             runtime_fields=RuntimeFieldConfig.from_mapping(runtime),
             objectives=_as_tuple(fit.get("objectives", fit.get("objective", payload.get("objectives", payload.get("objective", ()))))),
             where=None if where is None else _as_tuple(where),
+            exclude=_as_tuple(insertion.get("exclude", fit.get("exclude_modules", ()))),
+            positions=_as_tuple(insertion.get("positions", ("output",))),
+            scale_pattern=_as_scale_pattern(insertion.get("scale_pattern", {})),
             every=int(insertion.get("every", 1)),
             freeze_base=bool(insertion.get("freeze_base", True)),
+            identity_gate=bool(insertion.get("identity_gate", False)),
+            zero_init_output=bool(insertion.get("zero_init_output", False)),
+            bridge_mode=str(insertion.get("bridge_mode", "radial")),
+            boundary_mask_key=_optional_str(insertion.get("boundary_mask_key")),
+            require_runtime_context=bool(
+                insertion.get("require_runtime_context", False)
+            ),
             max_adapters=_optional_int(insertion.get("max_adapters")),
             max_extra_params=insertion.get("max_extra_params"),
         )
@@ -138,8 +265,16 @@ class FitProjectConfig:
             "objectives": list(self.objectives),
             "insertion": {
                 "where": None if self.where is None else list(self.where),
+                "exclude": list(self.exclude),
+                "positions": list(self.positions),
+                "scale_pattern": dict(self.scale_pattern),
                 "every": self.every,
                 "freeze_base": self.freeze_base,
+                "identity_gate": self.identity_gate,
+                "zero_init_output": self.zero_init_output,
+                "bridge_mode": self.bridge_mode,
+                "boundary_mask_key": self.boundary_mask_key,
+                "require_runtime_context": self.require_runtime_context,
                 "max_adapters": self.max_adapters,
                 "max_extra_params": self.max_extra_params,
             },
@@ -161,8 +296,20 @@ class FitProjectConfig:
         resolve_scale(self.scale)
         self.mechanism.validate()
         resolve_objectives(self.objectives)
+        if self.identity_gate and self.zero_init_output:
+            raise ValueError(
+                "ARTI fit config insertion.identity_gate and zero_init_output are mutually exclusive"
+            )
+        if self.bridge_mode not in {"radial", "dense"}:
+            raise ValueError("ARTI fit config insertion.bridge_mode must be 'radial' or 'dense'")
+        if self.boundary_mask_key == "":
+            raise ValueError("ARTI fit config insertion.boundary_mask_key must not be empty")
         if self.every <= 0:
             raise ValueError("ARTI fit config insertion.every must be positive")
+        if not self.positions or set(self.positions) - {"input", "output"}:
+            raise ValueError("ARTI fit config insertion.positions must contain 'input' and/or 'output'")
+        for _, scale_name in self.scale_pattern:
+            resolve_scale(scale_name)
         if self.max_adapters is not None and self.max_adapters < 0:
             raise ValueError("ARTI fit config insertion.max_adapters must be non-negative")
         if isinstance(self.max_extra_params, int) and self.max_extra_params < 0:
@@ -212,6 +359,23 @@ def apply_mechanism_overrides(profile: AdapterProfile, scale: AdapterScale, over
     if not observer_phase:
         coord_dim = 0
         coord_frame_mode = "none"
+    explicit_recall_shape = (
+        overrides.recall_slots is not None or overrides.hidden_multiplier is not None
+    )
+    recall_bank_fraction = (
+        overrides.recall_bank_fraction
+        if overrides.recall_bank_fraction is not None
+        else None
+        if explicit_recall_shape
+        else scale.recall_bank_fraction
+    )
+    recall_routing = (
+        overrides.recall_routing
+        if overrides.recall_routing is not None
+        else "dense"
+        if recall_bank_fraction is None and explicit_recall_shape
+        else scale.recall_routing
+    )
     return (
         AdapterProfile(
             name=profile.name,
@@ -225,7 +389,33 @@ def apply_mechanism_overrides(profile: AdapterProfile, scale: AdapterScale, over
             interface_slots=scale.interface_slots if overrides.interface_slots is None else overrides.interface_slots,
             recall_slots=scale.recall_slots if overrides.recall_slots is None else overrides.recall_slots,
             recall_steps=scale.recall_steps if overrides.recall_steps is None else overrides.recall_steps,
+            recall_min_steps=scale.recall_min_steps
+            if overrides.recall_min_steps is None
+            else overrides.recall_min_steps,
+            recall_tolerance=scale.recall_tolerance
+            if overrides.recall_tolerance is None
+            else overrides.recall_tolerance,
             recall_activation=scale.recall_activation if overrides.recall_activation is None else overrides.recall_activation,
+            recall_recognition_mode=scale.recall_recognition_mode
+            if overrides.recall_recognition_mode is None
+            else overrides.recall_recognition_mode,
+            recall_bank_fraction=recall_bank_fraction,
+            recall_routing=recall_routing,
+            recall_key_dim=scale.recall_key_dim
+            if overrides.recall_key_dim is None
+            else overrides.recall_key_dim,
+            recall_group_size=scale.recall_group_size
+            if overrides.recall_group_size is None
+            else overrides.recall_group_size,
+            recall_group_topk=scale.recall_group_topk
+            if overrides.recall_group_topk is None
+            else overrides.recall_group_topk,
+            recall_value_composition=scale.recall_value_composition
+            if overrides.recall_value_composition is None
+            else overrides.recall_value_composition,
+            recall_formula=scale.recall_formula
+            if overrides.recall_formula is None
+            else overrides.recall_formula,
             operator_count=scale.operator_count if overrides.operator_count is None else overrides.operator_count,
         ),
     )
@@ -301,12 +491,30 @@ def _to_toml(config: FitProjectConfig) -> str:
         *runtime_lines,
         "[insertion]",
         f"where = {_toml_value(insertion['where'])}",
+        f"exclude = {_toml_value(insertion['exclude'])}",
+        f"positions = {_toml_value(insertion['positions'])}",
         f"every = {insertion['every']}",
         f"freeze_base = {str(insertion['freeze_base']).lower()}",
+        f"identity_gate = {str(insertion['identity_gate']).lower()}",
+        f"zero_init_output = {str(insertion['zero_init_output']).lower()}",
+        f'bridge_mode = "{insertion["bridge_mode"]}"',
+        *(
+            []
+            if insertion["boundary_mask_key"] is None
+            else [f'boundary_mask_key = "{insertion["boundary_mask_key"]}"']
+        ),
+        f"require_runtime_context = {str(insertion['require_runtime_context']).lower()}",
         f"max_adapters = {_toml_value(insertion['max_adapters'])}",
         f"max_extra_params = {_toml_value(insertion['max_extra_params'])}",
         "",
     ]
+    if insertion["scale_pattern"]:
+        lines.extend(["[insertion.scale_pattern]"])
+        lines.extend(
+            f"{_toml_string(pattern)} = {_toml_string(scale)}"
+            for pattern, scale in insertion["scale_pattern"].items()
+        )
+        lines.append("")
     if data["phases"] is not None:
         lines.insert(4, f"phases = {data['phases']}")
     return "\n".join(lines)
@@ -353,8 +561,20 @@ def _as_tuple(value: Any) -> tuple[str, ...]:
     raise ValueError("ARTI fit config value must be a string or list of strings")
 
 
+def _as_scale_pattern(value: Any) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ValueError("ARTI fit config insertion.scale_pattern must be a mapping")
+    return tuple((str(pattern), str(scale)) for pattern, scale in value.items())
+
+
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _optional_str(value: Any) -> str | None:
+    return None if value is None else str(value)
 
 
 def _optional_bool(value: Any) -> bool | None:

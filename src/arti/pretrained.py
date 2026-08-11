@@ -295,12 +295,20 @@ class ARTIPretrained:
         freeze_base: bool = True,
         max_adapters: int | None = None,
         max_extra_params: int | str | None = None,
+        identity_gate: bool = False,
+        zero_init_output: bool = True,
+        bridge_mode: str = "radial",
+        boundary_mask_key: str | None = None,
         allow_empty: bool = False,
         training: TrainingSpec | Mapping[str, Any] | None = None,
     ) -> ARTIPlan:
         if not self.projects:
             self.scan()
         assert self.inspection is not None
+        if identity_gate and zero_init_output:
+            raise ValueError("identity_gate and zero_init_output are mutually exclusive")
+        if bridge_mode not in {"radial", "dense"}:
+            raise ValueError("bridge_mode must be 'radial' or 'dense'")
         mechanisms = _normalize_features(features)
         components = []
         for name, builder in self.projects.items():
@@ -314,7 +322,10 @@ class ARTIPretrained:
                 freeze_base=freeze_base,
                 max_adapters=max_adapters,
                 max_extra_params=max_extra_params,
-                identity_gate=True,
+                identity_gate=identity_gate,
+                zero_init_output=zero_init_output,
+                bridge_mode=bridge_mode,
+                boundary_mask_key=boundary_mask_key,
                 require_runtime_context=bool(mechanisms["phase"]["enabled"] and mechanisms["phase"]["mode"] == "external"),
             )
             if not insertion.selected and not allow_empty:
@@ -353,7 +364,10 @@ class ARTIPretrained:
                 "freeze_base": freeze_base,
                 "max_adapters": max_adapters,
                 "max_extra_params": max_extra_params,
-                "identity_gate": True,
+                "identity_gate": identity_gate,
+                "zero_init_output": zero_init_output,
+                "bridge_mode": bridge_mode,
+                "boundary_mask_key": boundary_mask_key,
                 "allow_empty": allow_empty,
                 "require_runtime_context": bool(mechanisms["phase"]["enabled"] and mechanisms["phase"]["mode"] == "external"),
             },
@@ -388,6 +402,9 @@ class ARTIPretrained:
                 max_adapters=len(names),
                 max_extra_params=selected_plan.insertion.get("max_extra_params"),
                 identity_gate=bool(selected_plan.insertion.get("identity_gate", True)),
+                zero_init_output=bool(selected_plan.insertion.get("zero_init_output", False)),
+                bridge_mode=str(selected_plan.insertion.get("bridge_mode", "dense")),
+                boundary_mask_key=selected_plan.insertion.get("boundary_mask_key"),
                 require_runtime_context=bool(selected_plan.insertion.get("require_runtime_context", False)),
             )
             if [item.name for item in builder.inserted] != names:
@@ -680,6 +697,10 @@ def from_pretrained(
     freeze_base: bool = True,
     max_adapters: int | None = None,
     max_extra_params: int | str | None = None,
+    identity_gate: bool = False,
+    zero_init_output: bool = True,
+    bridge_mode: str = "radial",
+    boundary_mask_key: str | None = None,
     allow_empty: bool = False,
     training: TrainingSpec | Mapping[str, Any] | None = None,
 ) -> ARTIPretrained:
@@ -700,6 +721,10 @@ def from_pretrained(
         freeze_base=freeze_base,
         max_adapters=max_adapters,
         max_extra_params=max_extra_params,
+        identity_gate=identity_gate,
+        zero_init_output=zero_init_output,
+        bridge_mode=bridge_mode,
+        boundary_mask_key=boundary_mask_key,
         allow_empty=allow_empty,
         training=training,
     )

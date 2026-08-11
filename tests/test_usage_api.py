@@ -67,7 +67,13 @@ def test_config_diff_reports_only_changed_execution_fields() -> None:
     recall = arti.profile("recall").compile(input_dim=8)
     difference = minimal.diff(recall)
 
-    assert set(difference) == {"recall_steps", "recall_slots", "use_recall", "use_virtual_recall"}
+    assert set(difference) == {
+        "recall_min_steps",
+        "recall_steps",
+        "recall_slots",
+        "use_recall",
+        "use_virtual_recall",
+    }
     assert difference["use_recall"] == {"self": False, "other": True}
 
 

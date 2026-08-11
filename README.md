@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 1.9.0 is a **Stable Candidate**. The supported 1.x surface is frozen
+Version 2.0.0 is a **Stable Candidate**. The supported 2.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -46,7 +46,27 @@ The alpha browser runtime is published separately:
 pnpm add @arti-fit/web@alpha
 ```
 
-## What Is New In 1.9
+## What Is New In 2.0
+
+ARTI 2.0 makes the current Recall architecture the public default. Recall now
+uses a fixed query basis, host-dimensional Bank values, versioned Formula
+contracts, explicit per-Bank composition, and bounded iterative refinement.
+The package also exposes reusable Recall artifact, expert, policy, workspace,
+and value-transition primitives without coupling them to a training loop.
+
+The experimental 1.x `RecallTTTSession` API has been removed. It mixed
+optimization policy with the tensor layer and is not part of the 2.x
+replacement. Applications should compose `arti.nn.Recall`, Formula contracts,
+and explicit artifact/state APIs instead.
+
+The `arti.st` file format remains version 1. ARTI 2.0 can strictly load the
+value Bank and query basis from compatible 1.x Recall states, while discarding
+the obsolete learned routing key Bank and initializing new state metadata.
+Because routing semantics changed, migrated Recall artifacts must be validated
+on their intended workload; load compatibility does not claim identical 1.x
+numerical behavior.
+
+## What Was New In 1.9
 
 ARTI 1.9 adds runtime control over the exact number of Recall refinement steps
 without changing or rewriting adapter weights:
@@ -300,8 +320,9 @@ print(saved.weights_sha256)
 print(loaded.missing_keys, loaded.unexpected_keys)
 ```
 
-ARTI 1.x reads compatible format-version 1 artifacts produced by the pre-public
-0.x line. Legacy `.pt` migration uses PyTorch's restricted tensor-only loader:
+ARTI 2.x reads compatible format-version 1 artifacts produced by the pre-public
+0.x and public 1.x lines. Legacy `.pt` migration uses PyTorch's restricted
+tensor-only loader:
 
 ```python
 arti.migrate_pt("legacy-state.pt", "layer.arti.st")

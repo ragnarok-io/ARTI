@@ -134,6 +134,8 @@ def _compile_plan(workflow, config: Mapping[str, Any]) -> ARTIPlan:
         freeze_base=bool(insertion.get("freeze_base", True)),
         max_adapters=insertion.get("max_adapters"),
         max_extra_params=insertion.get("max_extra_params"),
+        identity_gate=bool(insertion.get("identity_gate", False)),
+        zero_init_output=bool(insertion.get("zero_init_output", True)),
         allow_empty=bool(insertion.get("allow_empty", False)),
         training=_mapping(config, "training"),
     )

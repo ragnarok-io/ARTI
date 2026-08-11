@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from ..tensor_boundary import PRIMARY_TENSOR_KEYS, TensorLayout, find_primary_tensor
 from .batch_schema import BatchSchema, infer_batch_schema
 from .runtime import RuntimeFieldConfig, adapter_context, runtime_keys, runtime_kwargs_from_batch
 
@@ -17,6 +19,8 @@ from .runtime import RuntimeFieldConfig, adapter_context, runtime_keys, runtime_
 @dataclass(frozen=True)
 class InsertionCandidate:
     name: str
+    module_path: str
+    position: str
     module_type: str
     output_shape: tuple[int, ...]
     dim: int
@@ -24,6 +28,13 @@ class InsertionCandidate:
     source: str = "forward"
     tensor_rank: int | None = None
     path_depth: int = 0
+    output_path: tuple[str | int, ...] = ()
+    tensor_path: tuple[str | int, ...] = ()
+    batch_axis: int | None = None
+    feature_axis: int | None = None
+    device: str | None = None
+    dtype: str | None = None
+    is_leaf: bool = True
 
 
 @dataclass(frozen=True)
@@ -69,25 +80,21 @@ def run_model(model: nn.Module, sample_batch: Any, *, causal: bool = False, runt
     return model(sample_batch)
 
 
-STRUCTURED_TENSOR_KEYS = ("last_hidden_state", "hidden_state", "logits", "output")
+STRUCTURED_TENSOR_KEYS = PRIMARY_TENSOR_KEYS
 
 
 def tensor_from_module_output(output: Any) -> Tensor | None:
-    if torch.is_tensor(output):
-        return output
-    if isinstance(output, (tuple, list)) and output and torch.is_tensor(output[0]):
-        return output[0]
-    if isinstance(output, Mapping):
-        for key in STRUCTURED_TENSOR_KEYS:
-            value = output.get(key)
-            if torch.is_tensor(value):
-                return value
-    return None
+    found = find_primary_tensor(output)
+    return None if found is None else found[0]
 
 
 SCANNABLE_MODULE_TYPES = (
+    nn.BatchNorm1d,
     nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.Conv1d,
     nn.Conv2d,
+    nn.Conv3d,
     nn.GroupNorm,
     nn.Linear,
     nn.Embedding,
@@ -101,7 +108,19 @@ SCANNABLE_MODULE_TYPES = (
 )
 
 
-def scan_model(model: nn.Module, sample_batch: Any | None = None, *, causal: bool = False, runtime_fields: RuntimeFieldConfig | None = None) -> ScanReport:
+def scan_model(
+    model: nn.Module,
+    sample_batch: Any | None = None,
+    *,
+    causal: bool = False,
+    runtime_fields: RuntimeFieldConfig | None = None,
+    batch_axis: int | Mapping[str, int] | None = None,
+    feature_axis: int | Mapping[str, int] | None = None,
+    positions: str | tuple[str, ...] = ("output",),
+) -> ScanReport:
+    resolved_positions = _normalize_positions(positions)
+    if sample_batch is None and "input" in resolved_positions:
+        raise ValueError("input boundary discovery requires sample_batch")
     candidates: list[InsertionCandidate] = []
     seen_names: set[str] = set()
     hooks = []
@@ -117,54 +136,125 @@ def scan_model(model: nn.Module, sample_batch: Any | None = None, *, causal: boo
         seen_names.add(candidate.name)
         candidates.append(candidate)
 
-    def hook(name: str, module: nn.Module):
+    def output_hook(name: str, module: nn.Module):
         def _capture(_: nn.Module, __: tuple[Any, ...], output: Any) -> None:
-            tensor = tensor_from_module_output(output)
-            if torch.is_tensor(tensor) and tensor.is_floating_point() and tensor.ndim in {2, 3, 4}:
-                dim = int(tensor.shape[1]) if tensor.ndim == 4 else int(tensor.shape[-1])
+            found = find_primary_tensor(output)
+            if found is not None:
+                tensor, output_path = found
+                inferred = TensorLayout.infer(tensor, module)
+                layout = TensorLayout(
+                    tuple(int(value) for value in tensor.shape),
+                    _axis_for_path(batch_axis, name, inferred.batch_axis),
+                    _axis_for_path(feature_axis, name, inferred.feature_axis),
+                )
                 append_candidate(
                     InsertionCandidate(
                         name=name,
+                        module_path=name,
+                        position="output",
                         module_type=module.__class__.__name__,
                         output_shape=tuple(int(dim) for dim in tensor.shape),
-                        dim=dim,
+                        dim=layout.feature_dim,
                         parameters=sum(param.numel() for param in module.parameters()),
                         source="forward",
                         tensor_rank=int(tensor.ndim),
                         path_depth=name.count(".") + 1,
+                        output_path=output_path,
+                        tensor_path=output_path,
+                        batch_axis=layout.batch_axis,
+                        feature_axis=layout.feature_axis,
+                        device=str(tensor.device),
+                        dtype=str(tensor.dtype),
+                        is_leaf=not any(module.children()),
                     )
                 )
 
         return _capture
 
-    scannable_modules = tuple((name, module) for name, module in model.named_modules() if name and is_scannable_module(module))
-    for name, module in scannable_modules:
-        hooks.append(module.register_forward_hook(hook(name, module)))
-    if sample_batch is not None:
-        was_training = model.training
-        model.eval()
-        with torch.no_grad():
-            run_model(model, sample_batch, causal=causal, runtime_fields=runtime_fields)
-        model.train(was_training)
-    else:
-        for name, module in scannable_modules:
-            dim = static_module_dim(module)
-            if dim is None:
-                continue
+    def input_hook(name: str, module: nn.Module):
+        def _capture(_: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            tree = {"args": args, "kwargs": kwargs}
+            found = find_primary_tensor(tree)
+            if found is None:
+                return
+            tensor, tensor_path = found
+            inferred = TensorLayout.infer(tensor, module)
+            candidate_name = f"{name}::input"
+            layout = TensorLayout(
+                tuple(int(value) for value in tensor.shape),
+                _axis_for_path(batch_axis, candidate_name, inferred.batch_axis),
+                _axis_for_path(feature_axis, candidate_name, inferred.feature_axis),
+            )
             append_candidate(
                 InsertionCandidate(
-                    name=name,
+                    name=candidate_name,
+                    module_path=name,
+                    position="input",
                     module_type=module.__class__.__name__,
-                    output_shape=(),
-                    dim=dim,
+                    output_shape=tuple(int(dim) for dim in tensor.shape),
+                    dim=layout.feature_dim,
                     parameters=sum(param.numel() for param in module.parameters()),
-                    source="static",
-                    tensor_rank=None,
+                    source="forward-input",
+                    tensor_rank=int(tensor.ndim),
                     path_depth=name.count(".") + 1,
+                    tensor_path=tensor_path,
+                    batch_axis=layout.batch_axis,
+                    feature_axis=layout.feature_axis,
+                    device=str(tensor.device),
+                    dtype=str(tensor.dtype),
+                    is_leaf=not any(module.children()),
                 )
             )
-    for handle in hooks:
-        handle.remove()
+
+        return _capture
+
+    named_modules = tuple((name, module) for name, module in model.named_modules() if name)
+    scannable_modules = (
+        named_modules
+        if sample_batch is not None
+        else tuple((name, module) for name, module in named_modules if is_scannable_module(module))
+    )
+    try:
+        for name, module in scannable_modules:
+            if "input" in resolved_positions:
+                hooks.append(module.register_forward_pre_hook(input_hook(name, module), with_kwargs=True))
+            if "output" in resolved_positions:
+                hooks.append(module.register_forward_hook(output_hook(name, module)))
+        if sample_batch is not None:
+            was_training = model.training
+            model.eval()
+            try:
+                with torch.no_grad():
+                    run_model(
+                        model,
+                        sample_batch,
+                        causal=causal,
+                        runtime_fields=runtime_fields,
+                    )
+            finally:
+                model.train(was_training)
+        else:
+            for name, module in scannable_modules:
+                dim = static_module_dim(module)
+                if dim is None:
+                    continue
+                append_candidate(
+                    InsertionCandidate(
+                        name=name,
+                        module_path=name,
+                        position="output",
+                        module_type=module.__class__.__name__,
+                        output_shape=(),
+                        dim=dim,
+                        parameters=sum(param.numel() for param in module.parameters()),
+                        source="static",
+                        tensor_rank=None,
+                        path_depth=name.count(".") + 1,
+                    )
+                )
+    finally:
+        for handle in hooks:
+            handle.remove()
 
     params = list(model.parameters())
     first = next((param for param in params), None)
@@ -186,9 +276,9 @@ def is_scannable_module(module: nn.Module) -> bool:
 
 
 def static_module_dim(module: nn.Module) -> int | None:
-    if isinstance(module, nn.BatchNorm2d):
+    if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
         return int(module.num_features)
-    if isinstance(module, nn.Conv2d):
+    if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
         return int(module.out_channels)
     if isinstance(module, nn.GroupNorm):
         return int(module.num_channels)
@@ -205,3 +295,34 @@ def static_module_dim(module: nn.Module) -> int | None:
         directions = 2 if bool(getattr(module, "bidirectional", False)) else 1
         return int(module.hidden_size) * directions
     return None
+
+
+def _axis_for_path(
+    value: int | Mapping[str, int] | None,
+    path: str,
+    default: int,
+) -> int:
+    if value is None:
+        return default
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, Mapping):
+        matches = [axis for pattern, axis in value.items() if fnmatch.fnmatchcase(path, pattern)]
+        if not matches:
+            return default
+        if len(matches) > 1 and len(set(matches)) > 1:
+            raise ValueError(f"conflicting tensor-axis overrides for module {path!r}")
+        axis = matches[-1]
+        if isinstance(axis, int) and not isinstance(axis, bool):
+            return axis
+    raise TypeError("tensor-axis override must be an integer or mapping of glob patterns to integers")
+
+
+def _normalize_positions(value: str | tuple[str, ...]) -> tuple[str, ...]:
+    positions = (value,) if isinstance(value, str) else tuple(value)
+    if not positions:
+        raise ValueError("positions must contain 'input' and/or 'output'")
+    invalid = set(positions) - {"input", "output"}
+    if invalid:
+        raise ValueError(f"unknown tensor boundary positions: {sorted(invalid)}")
+    return tuple(dict.fromkeys(positions))

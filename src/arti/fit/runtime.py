@@ -19,6 +19,7 @@ class FitRuntimeContext:
     coord: Tensor | None = None
     observer_coord: Tensor | None = None
     frame_operators: Tensor | None = None
+    route_assignment: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def adapter_context(
     coord: Tensor | None = None,
     observer_coord: Tensor | None = None,
     frame_operators: Tensor | None = None,
+    route_assignment: Tensor | None = None,
 ) -> Iterator[None]:
     if attention_mask is not None and mask is not None:
         raise ValueError("adapter_context accepts either attention_mask or mask, not both")
@@ -80,6 +82,7 @@ def adapter_context(
             coord=coord,
             observer_coord=observer_coord,
             frame_operators=frame_operators,
+            route_assignment=route_assignment,
         )
     )
     try:
