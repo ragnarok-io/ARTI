@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 2.0.0 is a **Stable Candidate**. The supported 2.x surface is frozen
+Version 2.0.1 is a **Stable Candidate**. The supported 2.x surface is frozen
 for final compatibility verification, but this release does not yet carry an
 LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -65,6 +65,127 @@ the obsolete learned routing key Bank and initializing new state metadata.
 Because routing semantics changed, migrated Recall artifacts must be validated
 on their intended workload; load compatibility does not claim identical 1.x
 numerical behavior.
+
+## Choose The Smallest Useful Surface
+
+ARTI mechanisms are independent. A project can use one tensor layer, attach
+Recall to selected model boundaries, or compose separately trained Bank assets.
+Coordinates, masks, visibility, Recall, Pulse, and the other mechanisms do not
+need to be enabled together.
+
+| Need | Start with |
+| --- | --- |
+| A normal tensor-in/tensor-out layer | `arti.nn.Layer` or `arti.nn.Recall` |
+| Salience survival or workspace compaction | `Half`, `Fold`, `UnFold`, `Pulse` |
+| Existing PyTorch/Transformers/Diffusers model | `arti.ARTI.attach(...)` or `arti.fit(...)` |
+| Independently trained Recall assets | Bank-only expert artifacts |
+| Several compatible Recall assets at once | Bank concat with per-Bank controls |
+| Ordered heterogeneous adapters | An adapter-stack manifest |
+
+## Attach At Explicit Tensor Boundaries
+
+ARTI can scan a real sample forward, select module input or output tensor
+boundaries, and preview the exact parameter cost before changing the model.
+Placement and scale remain application choices:
+
+```python
+import arti
+
+project = (
+    arti.project(model)
+    .at(
+        ["model.layers.*"],
+        exclude=["*.lm_head"],
+        positions="output",
+        scale_pattern={"model.layers.0": "small", "model.layers.*": "medium"},
+    )
+)
+
+preview = project.preview(sample_batch)  # no model mutation
+print(preview.insertion_plan.to_dict())
+project.insert()
+```
+
+This is not a model-specific patch list. ARTI temporarily packs the selected
+tensor into `[B, D]` or `[B, N, D]`, applies the configured tensor layer, and
+restores the original rank and output container.
+
+## Build Reusable Recall Experts
+
+A Recall expert artifact can contain only trainable Bank tensors. The host and
+shared reader are frozen and fingerprinted by an immutable contract:
+
+```python
+import arti
+import torch
+
+attached = arti.ARTI.attach(
+    model,
+    recall={"layers": "model.layers.*", "rank": 16, "slots": 32},
+)
+
+contract = attached.arti.expert_contract(
+    "qwen-recall-v1",
+    model_id="Qwen/Qwen3-0.6B",
+)
+attached.arti.freeze_expert_banks()
+optimizer = torch.optim.AdamW(
+    attached.arti.parameters("expert_banks"),
+    lr=1e-3,
+)
+
+# Run the application-owned training loop, then export only the Banks.
+attached.arti.save_expert(
+    "style.recall.arti.st",
+    expert_id="style",
+    contract=contract,
+)
+```
+
+Compatible immutable experts can be rebuilt into one native Bank assembly:
+
+```python
+experts = attached.arti.experts(contract)
+experts.replace(["style.recall.arti.st", "domain.recall.arti.st"])
+print(experts.expert_ids)
+```
+
+For fit-exported adapters, the equivalent lower-level composition keeps each
+Bank independently controllable:
+
+```python
+arti.concatenate_adapter_banks(
+    model,
+    ["style.recall.arti.st", "domain.recall.arti.st"],
+    bank_names=["style", "domain"],
+    weights={"style": 2.0, "domain": 1.0},
+)
+arti.set_adapter_bank_weights(model, {"style": 1.0, "domain": 3.0})
+arti.set_adapter_bank_influences(model, {"style": 1.0, "domain": -0.5})
+```
+
+Weights change routing priors. Signed influences change write direction and
+strength. Neither operation rewrites the source artifacts. See
+[Recall artifacts](docs/recall-artifacts.md).
+
+## Compose And Run Efficiently
+
+Independent adapters can also be loaded in a hash-checked declared order:
+
+```python
+results = arti.apply_adapter_stack(model, "arti-stack.json", sample_batch=sample)
+```
+
+After attachment, runtime controls do not rewrite weights:
+
+```python
+arti.set_recall_refine_steps(model, 4)
+arti.set_adapter_scale(model, 0.75)
+compiled = arti.compile_adapter_hotpaths(model)
+```
+
+`compile_adapter_hotpaths` compiles ARTI write paths without compiling the
+host model. Eager artifacts remain portable and unchanged.
 
 ## What Was New In 1.9
 
@@ -336,6 +457,10 @@ publisher signatures. Obtain models and weights from trusted sources.
 - `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, alpha `Recall`,
   alpha `FusionPulse`, `RecallRefiner`, and visual workspace modules.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
+- `arti.fit`: boundary scanning, planning, attachment, artifact stacks,
+  Bank composition, runtime scaling, and ARTI-only hotpath compilation.
+- Recall expert APIs: immutable contracts, Bank-only SafeTensors artifacts,
+  named assemblies, per-Bank routing weights, and signed influences.
 - `arti.torch`: backend-explicit aliases for PyTorch applications.
 - `arti.jax`: optional functional JAX subset with array-only parameter trees,
   JIT, whole-tree gradients, and batch/VMAP-consistent single-sample APIs.

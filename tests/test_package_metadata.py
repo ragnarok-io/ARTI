@@ -35,6 +35,17 @@ def test_release_identity_and_citation_are_consistent():
     assert "uv add arti-fit" in readme
 
 
+def test_readme_covers_the_public_2x_composition_paths():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "arti.project(model)" in readme
+    assert "expert_contract" in readme
+    assert "arti.concatenate_adapter_banks" in readme
+    assert "arti.set_adapter_bank_influences" in readme
+    assert "arti.apply_adapter_stack" in readme
+    assert "arti.compile_adapter_hotpaths" in readme
+
+
 def test_package_declares_pep561_type_marker():
     assert (ROOT / "src" / "arti" / "py.typed").exists()
 
