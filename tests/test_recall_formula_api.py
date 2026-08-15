@@ -7,12 +7,11 @@ import torch
 from torch import Tensor, nn
 
 from arti.recall_formula import (
-    BUILTIN_RECALL_FORMULA_ALIASES,
     BUILTIN_RECALL_FORMULAS,
     FactorSpec,
     MAX_RECALL_FORMULA_FACTORS,
     RecallFormulaContract,
-    check_recall_formula,
+    validate_formula,
 )
 
 
@@ -36,25 +35,15 @@ class TrainableFormula(nn.Module):
 
 
 @pytest.mark.parametrize(
-    ("legacy_id", "canonical_id", "factor_count"),
-    [
-        ("single", "delta-v1", 1),
-        ("product", "affine-v1", 2),
-        ("state", "state-v1", 17),
-    ],
+    ("reference", "factor_count"),
+    [("arti/delta@1", 1), ("arti/affine@1", 2), ("arti/state@1", 17)],
 )
-def test_builtin_ids_map_legacy_names_to_versioned_contracts(
-    legacy_id: str,
-    canonical_id: str,
-    factor_count: int,
-) -> None:
-    assert BUILTIN_RECALL_FORMULA_ALIASES[legacy_id] == canonical_id
-    description = BUILTIN_RECALL_FORMULAS[canonical_id]
+def test_builtin_ids_are_canonical(reference: str, factor_count: int) -> None:
+    description = BUILTIN_RECALL_FORMULAS[reference]
 
     assert description.contract.identity is not None
-    assert description.contract.identity.canonical_id == canonical_id
+    assert description.contract.identity.reference == reference
     assert description.contract.factor_count == factor_count
-    assert description.legacy_value_composition == legacy_id
     assert len(set(description.contract.factor_names)) == factor_count
 
 
@@ -63,7 +52,7 @@ def test_custom_module_contract_means_complete_next_state() -> None:
     factors = torch.randn(2, 3, 1, 5)
     module = AdditiveFormula()
 
-    contract = check_recall_formula(module, state)
+    contract = validate_formula(module, state)
     next_state = module(state, factors)
 
     assert contract.output_semantics == "next_state"
@@ -72,7 +61,7 @@ def test_custom_module_contract_means_complete_next_state() -> None:
 
 
 def test_factor_names_define_count_and_are_not_reordered() -> None:
-    contract = check_recall_formula(TrainableFormula(), torch.randn(2, 3, 5))
+    contract = validate_formula(TrainableFormula(), torch.randn(2, 3, 5))
 
     assert contract.factor_names == ("content", "gate")
     assert contract.factor_count == 2
@@ -87,12 +76,12 @@ def test_invalid_factor_names_are_rejected(factor_names: tuple[object, ...]) -> 
     module.factor_names = factor_names
 
     with pytest.raises((TypeError, ValueError), match="factor"):
-        check_recall_formula(module, torch.randn(2, 3, 5))
+        validate_formula(module, torch.randn(2, 3, 5))
 
 
 def test_explicit_factor_count_and_names_must_agree() -> None:
     with pytest.raises(ValueError, match="factor_count"):
-        check_recall_formula(
+        validate_formula(
             AdditiveFormula(),
             torch.randn(2, 3, 5),
             factor_count=2,
@@ -134,12 +123,12 @@ def test_output_shape_device_dtype_and_finiteness_are_checked(
     message: str,
 ) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
-        check_recall_formula(module, torch.randn(2, 3, 5))
+        validate_formula(module, torch.randn(2, 3, 5))
 
 
 def test_gradients_reach_state_factors_and_formula_parameters() -> None:
     module = TrainableFormula()
-    check_recall_formula(module, torch.randn(2, 3, 5))
+    validate_formula(module, torch.randn(2, 3, 5))
     state = torch.randn(2, 3, 5, requires_grad=True)
     factors = torch.randn(2, 3, 2, 5, requires_grad=True)
 
@@ -153,7 +142,7 @@ def test_gradients_reach_state_factors_and_formula_parameters() -> None:
 
 def test_identity_probe_accepts_zero_factor_identity() -> None:
     state = torch.randn(2, 3, 5)
-    contract = check_recall_formula(AdditiveFormula(), state, test_identity=True)
+    contract = validate_formula(AdditiveFormula(), state, test_identity=True)
 
     assert contract.identity_preserving
 
@@ -166,7 +155,7 @@ def test_identity_probe_rejects_non_identity_formula() -> None:
             return state + 1
 
     with pytest.raises(ValueError, match="identity"):
-        check_recall_formula(
+        validate_formula(
             ConstantShift(),
             torch.randn(2, 3, 5),
             test_identity=True,
@@ -178,7 +167,7 @@ def test_plain_callable_is_not_an_extension_point() -> None:
         return state + factors[..., 0, :]
 
     with pytest.raises(TypeError, match="nn.Module"):
-        check_recall_formula(function_formula, torch.randn(2, 3, 5))
+        validate_formula(function_formula, torch.randn(2, 3, 5))
 
 
 def test_formula_cannot_publish_optimizer_control_hooks() -> None:
@@ -187,7 +176,7 @@ def test_formula_cannot_publish_optimizer_control_hooks() -> None:
             return torch.optim.SGD(parameters, lr=1.0)
 
     with pytest.raises((TypeError, ValueError), match="optimizer"):
-        check_recall_formula(OptimizerOwningFormula(), torch.randn(2, 3, 5))
+        validate_formula(OptimizerOwningFormula(), torch.randn(2, 3, 5))
 
 
 def test_contract_probe_does_not_allow_input_or_module_state_mutation() -> None:
@@ -209,7 +198,7 @@ def test_contract_probe_does_not_allow_input_or_module_state_mutation() -> None:
     original_module_state = {name: value.clone() for name, value in module.state_dict().items()}
 
     with pytest.raises((TypeError, ValueError), match="mutat|state"):
-        check_recall_formula(module, state)
+        validate_formula(module, state)
 
     assert torch.equal(state, original_state)
     assert all(
@@ -237,7 +226,7 @@ def test_contract_probe_restores_state_mode_and_rng_when_formula_raises() -> Non
     rng_state = torch.random.get_rng_state().clone()
 
     with pytest.raises(RuntimeError, match="probe failed"):
-        check_recall_formula(module, probe)
+        validate_formula(module, probe)
 
     assert module.training
     assert module.calls.item() == 0
@@ -251,7 +240,7 @@ def test_contract_probe_rejects_unbounded_factor_count_before_allocation() -> No
     )
 
     with pytest.raises(ValueError, match="factor count exceeds"):
-        check_recall_formula(module, torch.randn(4))
+        validate_formula(module, torch.randn(4))
 
 
 def test_explicit_contract_factor_metadata_is_preserved() -> None:
@@ -269,7 +258,7 @@ def test_explicit_contract_factor_metadata_is_preserved() -> None:
             identity_preserving=True,
         )
 
-    contract = check_recall_formula(
+    contract = validate_formula(
         ContractFormula(),
         torch.randn(2, 3, 5),
         test_identity=True,

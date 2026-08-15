@@ -19,15 +19,34 @@ from typing import Final, Literal, Mapping, Sequence
 import torch
 from torch import Tensor, nn
 
+from .recall_registry import RecallFormulaId
+
 
 RecallOutputSemantics = Literal["next_state"]
+RecallFormulaComposition = Literal["custom", "single", "product", "state"]
+RecallFormulaVectorization = Literal["scalar_vmap", "batched"]
+RecallFormulaLayout = Literal["generic", "contiguous_mfd"]
+RecallFormulaAccumulation = Literal["activation", "float32"]
 MAX_RECALL_FORMULA_FACTORS: Final = 256
 MAX_RECALL_FORMULA_PROBE_ELEMENTS: Final = 1_000_000
+RECALL_FORMULA_CONTRACT_API_VERSION: Final = 2
+RECALL_FORMULA_LOCK_VERSION: Final = 2
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-_FORMULA_NAME_RE = re.compile(
-    r"^[a-z][a-z0-9_]*(?:[./-][a-z][a-z0-9_]*)*$"
+_CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
+_COMPOSITIONS: Final = frozenset({"custom", "single", "product", "state"})
+_VECTORIZATION_MODES: Final = frozenset({"scalar_vmap", "batched"})
+_LAYOUTS: Final = frozenset({"generic", "contiguous_mfd"})
+_ACCUMULATION_DTYPES: Final = frozenset({"activation", "float32"})
+_DTYPE_NAMES: Final = frozenset(
+    {"floating", "float16", "bfloat16", "float32", "float64"}
 )
+_DTYPE_TO_NAME: Final = {
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+    torch.float32: "float32",
+    torch.float64: "float64",
+}
 _INIT_KINDS: Final = frozenset({"zero", "normal"})
 _FORBIDDEN_CONTROL_NAMES: Final = frozenset(
     {
@@ -42,12 +61,123 @@ _FORBIDDEN_CONTROL_NAMES: Final = frozenset(
 )
 
 
+def formula_dtype_supported(dtype: torch.dtype, supported_dtypes: Sequence[str]) -> bool:
+    """Return whether a Formula execution contract admits ``dtype``."""
+
+    dtype_name = _DTYPE_TO_NAME.get(dtype)
+    if dtype_name is None:
+        return False
+    supported = frozenset(supported_dtypes)
+    return "floating" in supported or dtype_name in supported
+
+
 def _validate_component(value: str, *, field: str) -> str:
     if not isinstance(value, str) or not _COMPONENT_RE.fullmatch(value):
         raise ValueError(
             f"{field} must match {_COMPONENT_RE.pattern!r}; received {value!r}"
         )
     return value
+
+
+@dataclass(frozen=True)
+class RecallFormulaExecutionSpec:
+    """Static execution and compiler capabilities of a Formula.
+
+    This is metadata only. It never selects a backend or installs a compiler;
+    the runtime remains responsible for checking the declaration and choosing
+    eager or compiled execution.
+    """
+
+    vectorization: RecallFormulaVectorization = "scalar_vmap"
+    layout: RecallFormulaLayout = "generic"
+    supported_dtypes: tuple[str, ...] = ("floating",)
+    accumulation_dtype: RecallFormulaAccumulation = "activation"
+    supports_autograd: bool = True
+    supports_compile: bool = False
+    supports_triton: bool = False
+    deterministic: bool = True
+
+    def __post_init__(self) -> None:
+        if self.vectorization not in _VECTORIZATION_MODES:
+            raise ValueError(
+                "RecallFormulaExecutionSpec.vectorization must be 'scalar_vmap' or 'batched'"
+            )
+        if self.layout not in _LAYOUTS:
+            raise ValueError(
+                "RecallFormulaExecutionSpec.layout must be 'generic' or 'contiguous_mfd'"
+            )
+        dtypes = tuple(self.supported_dtypes)
+        if not dtypes or any(dtype not in _DTYPE_NAMES for dtype in dtypes):
+            raise ValueError(
+                "RecallFormulaExecutionSpec.supported_dtypes contains an unsupported dtype"
+            )
+        if len(set(dtypes)) != len(dtypes):
+            raise ValueError("RecallFormulaExecutionSpec.supported_dtypes must be unique")
+        if tuple(sorted(dtypes)) != dtypes:
+            raise ValueError(
+                "RecallFormulaExecutionSpec.supported_dtypes must be sorted"
+            )
+        object.__setattr__(self, "supported_dtypes", dtypes)
+        if self.accumulation_dtype not in _ACCUMULATION_DTYPES:
+            raise ValueError(
+                "RecallFormulaExecutionSpec.accumulation_dtype must be 'activation' or 'float32'"
+            )
+        for value, name in (
+            (self.supports_autograd, "supports_autograd"),
+            (self.supports_compile, "supports_compile"),
+            (self.supports_triton, "supports_triton"),
+            (self.deterministic, "deterministic"),
+        ):
+            if type(value) is not bool:
+                raise TypeError(f"RecallFormulaExecutionSpec.{name} must be bool")
+        if self.supports_triton and self.layout != "contiguous_mfd":
+            raise ValueError(
+                "Triton-capable Formula execution requires layout='contiguous_mfd'"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "vectorization": self.vectorization,
+            "layout": self.layout,
+            "supported_dtypes": list(self.supported_dtypes),
+            "accumulation_dtype": self.accumulation_dtype,
+            "supports_autograd": self.supports_autograd,
+            "supports_compile": self.supports_compile,
+            "supports_triton": self.supports_triton,
+            "deterministic": self.deterministic,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "RecallFormulaExecutionSpec":
+        if not isinstance(value, Mapping):
+            raise TypeError("RecallFormulaExecutionSpec payload must be a mapping")
+        required = {
+            "vectorization",
+            "layout",
+            "supported_dtypes",
+            "accumulation_dtype",
+            "supports_autograd",
+            "supports_compile",
+            "supports_triton",
+            "deterministic",
+        }
+        if set(value) != required:
+            raise ValueError(
+                "RecallFormulaExecutionSpec payload contains missing or unknown fields"
+            )
+        dtypes = value["supported_dtypes"]
+        if not isinstance(dtypes, Sequence) or isinstance(dtypes, (str, bytes)):
+            raise TypeError("supported_dtypes must be a sequence")
+        return cls(
+            vectorization=value["vectorization"],
+            layout=value["layout"],
+            supported_dtypes=tuple(dtypes),
+            accumulation_dtype=value["accumulation_dtype"],
+            supports_autograd=value["supports_autograd"],
+            supports_compile=value["supports_compile"],
+            supports_triton=value["supports_triton"],
+            deterministic=value["deterministic"],
+        )
 
 
 @dataclass(frozen=True)
@@ -103,36 +233,25 @@ class FactorSpec:
             "init_scale": self.init_scale,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "FactorSpec":
+        """Restore a factor declaration without importing executable code."""
 
-@dataclass(frozen=True)
-class FormulaIdentity:
-    """Stable semantic identity for a Recall formula."""
-
-    name: str
-    version: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not _FORMULA_NAME_RE.fullmatch(self.name):
+        if not isinstance(value, Mapping):
+            raise TypeError("FactorSpec payload must be a mapping")
+        required = {"name", "route", "identity", "init", "init_scale"}
+        if set(value) != required:
             raise ValueError(
-                f"FormulaIdentity.name must match {_FORMULA_NAME_RE.pattern!r}; "
-                f"received {self.name!r}"
+                "FactorSpec payload must contain exactly name, route, identity, "
+                "init, and init_scale"
             )
-        if isinstance(self.version, bool) or not isinstance(self.version, int):
-            raise TypeError("FormulaIdentity.version must be an integer")
-        if self.version <= 0:
-            raise ValueError("FormulaIdentity.version must be positive")
-
-    @property
-    def canonical_id(self) -> str:
-        """Return the immutable ``name-vN`` identifier."""
-
-        return f"{self.name}-v{self.version}"
-
-    def __str__(self) -> str:
-        return self.canonical_id
-
-    def to_dict(self) -> dict[str, object]:
-        return {"name": self.name, "version": self.version}
+        return cls(
+            name=value["name"],
+            route=value["route"],
+            identity=value["identity"],
+            init=value["init"],
+            init_scale=value["init_scale"],
+        )
 
 
 @dataclass(frozen=True)
@@ -140,10 +259,13 @@ class RecallFormulaContract:
     """Static contract implemented by a Recall formula module."""
 
     factors: tuple[FactorSpec, ...]
-    identity: FormulaIdentity | None = None
+    identity: RecallFormulaId | None = None
     output_semantics: RecallOutputSemantics = "next_state"
     identity_preserving: bool = False
-    api_version: int = 1
+    api_version: int = RECALL_FORMULA_CONTRACT_API_VERSION
+    composition: RecallFormulaComposition = "custom"
+    capabilities: tuple[str, ...] = ("torch.eager",)
+    execution: RecallFormulaExecutionSpec = RecallFormulaExecutionSpec()
 
     def __post_init__(self) -> None:
         factors = tuple(self.factors)
@@ -156,8 +278,8 @@ class RecallFormulaContract:
             raise ValueError("RecallFormulaContract factor names must be unique")
         object.__setattr__(self, "factors", factors)
 
-        if self.identity is not None and not isinstance(self.identity, FormulaIdentity):
-            raise TypeError("RecallFormulaContract.identity must be FormulaIdentity or None")
+        if self.identity is not None and not isinstance(self.identity, RecallFormulaId):
+            raise TypeError("RecallFormulaContract.identity must be RecallFormulaId or None")
         if self.output_semantics != "next_state":
             raise ValueError(
                 "Recall formulas must return next_state; delta output semantics are not supported"
@@ -166,8 +288,36 @@ class RecallFormulaContract:
             raise TypeError("RecallFormulaContract.identity_preserving must be bool")
         if isinstance(self.api_version, bool) or not isinstance(self.api_version, int):
             raise TypeError("RecallFormulaContract.api_version must be an integer")
-        if self.api_version <= 0:
-            raise ValueError("RecallFormulaContract.api_version must be positive")
+        if self.api_version != RECALL_FORMULA_CONTRACT_API_VERSION:
+            raise ValueError(
+                "unsupported RecallFormulaContract.api_version="
+                f"{self.api_version!r}; expected {RECALL_FORMULA_CONTRACT_API_VERSION}"
+            )
+        if self.composition not in _COMPOSITIONS:
+            choices = ", ".join(sorted(_COMPOSITIONS))
+            raise ValueError(
+                f"RecallFormulaContract.composition must be one of: {choices}"
+            )
+        capabilities = tuple(self.capabilities)
+        if any(
+            not isinstance(capability, str)
+            or _CAPABILITY_RE.fullmatch(capability) is None
+            for capability in capabilities
+        ):
+            raise ValueError(
+                "RecallFormulaContract.capabilities must contain lowercase capability names"
+            )
+        if len(set(capabilities)) != len(capabilities):
+            raise ValueError("RecallFormulaContract.capabilities must be unique")
+        if tuple(sorted(capabilities)) != capabilities:
+            raise ValueError(
+                "RecallFormulaContract.capabilities must be sorted for stable serialization"
+            )
+        object.__setattr__(self, "capabilities", capabilities)
+        if not isinstance(self.execution, RecallFormulaExecutionSpec):
+            raise TypeError(
+                "RecallFormulaContract.execution must be RecallFormulaExecutionSpec"
+            )
 
     @property
     def factor_names(self) -> tuple[str, ...]:
@@ -188,6 +338,9 @@ class RecallFormulaContract:
             "output_semantics": self.output_semantics,
             "identity_preserving": self.identity_preserving,
             "api_version": self.api_version,
+            "composition": self.composition,
+            "capabilities": list(self.capabilities),
+            "execution": self.execution.to_dict(),
         }
 
     @property
@@ -199,26 +352,217 @@ class RecallFormulaContract:
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "RecallFormulaContract":
+        """Restore a pure-data contract and reject schema drift."""
+
+        if not isinstance(value, Mapping):
+            raise TypeError("RecallFormulaContract payload must be a mapping")
+        required = {
+            "identity",
+            "factors",
+            "output_semantics",
+            "identity_preserving",
+            "api_version",
+            "composition",
+            "capabilities",
+            "execution",
+        }
+        if set(value) != required:
+            raise ValueError(
+                "RecallFormulaContract payload contains missing or unknown fields"
+            )
+        identity_payload = value["identity"]
+        identity = None
+        if identity_payload is not None:
+            identity = RecallFormulaId.from_dict(identity_payload)
+        factor_payloads = value["factors"]
+        if not isinstance(factor_payloads, Sequence) or isinstance(
+            factor_payloads, (str, bytes)
+        ):
+            raise TypeError("RecallFormulaContract.factors must be a sequence")
+        capabilities = value["capabilities"]
+        if not isinstance(capabilities, Sequence) or isinstance(capabilities, (str, bytes)):
+            raise TypeError("RecallFormulaContract.capabilities must be a sequence")
+        return cls(
+            factors=tuple(FactorSpec.from_dict(item) for item in factor_payloads),
+            identity=identity,
+            output_semantics=value["output_semantics"],
+            identity_preserving=value["identity_preserving"],
+            api_version=value["api_version"],
+            composition=value["composition"],
+            capabilities=tuple(capabilities),
+            execution=RecallFormulaExecutionSpec.from_dict(value["execution"]),
+        )
+
 
 @dataclass(frozen=True)
-class RecallFormulaDescription:
-    """Human-facing metadata for a formula contract."""
+class RecallFormulaLock:
+    """Code-free binding of a Formula contract to one concrete Recall shape.
+
+    The contract describes the mathematical interface. The lock fixes factor
+    order, hidden width, slot count, and backend for one instantiated layer.
+    It contains no module, optimizer, or tensor values, so it can be inspected
+    and compared before loading weights.
+    """
 
     contract: RecallFormulaContract
-    summary: str
-    legacy_value_composition: str | None = None
+    hidden_dim: int
+    slots: int
+    backend: str = "torch"
+    lock_version: int = RECALL_FORMULA_LOCK_VERSION
 
     def __post_init__(self) -> None:
         if not isinstance(self.contract, RecallFormulaContract):
-            raise TypeError("RecallFormulaDescription.contract must be RecallFormulaContract")
-        if not isinstance(self.summary, str) or not self.summary.strip():
-            raise ValueError("RecallFormulaDescription.summary must be non-empty")
-        object.__setattr__(self, "summary", self.summary.strip())
-        if self.legacy_value_composition is not None:
-            _validate_component(
-                self.legacy_value_composition,
-                field="RecallFormulaDescription.legacy_value_composition",
+            raise TypeError("RecallFormulaLock.contract must be RecallFormulaContract")
+        if type(self.lock_version) is not int or self.lock_version != RECALL_FORMULA_LOCK_VERSION:
+            raise ValueError(
+                "unsupported RecallFormulaLock.lock_version; "
+                f"expected {RECALL_FORMULA_LOCK_VERSION}"
             )
+        for value, name in ((self.hidden_dim, "hidden_dim"), (self.slots, "slots")):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.slots % self.contract.factor_count:
+            raise ValueError(
+                "slots must be divisible by the Formula factor count: "
+                f"{self.slots} % {self.contract.factor_count} != 0"
+            )
+        if self.backend != "torch":
+            raise ValueError("RecallFormulaLock.backend currently supports only 'torch'")
+
+    @classmethod
+    def bind(
+        cls,
+        contract: RecallFormulaContract,
+        *,
+        hidden_dim: int,
+        slots: int,
+        backend: str = "torch",
+    ) -> "RecallFormulaLock":
+        """Create the deterministic shape/backend binding for a Formula."""
+
+        return cls(
+            contract=contract,
+            hidden_dim=hidden_dim,
+            slots=slots,
+            backend=backend,
+        )
+
+    @property
+    def factor_count(self) -> int:
+        return self.contract.factor_count
+
+    @property
+    def contract_fingerprint(self) -> str:
+        return self.contract.fingerprint
+
+    @property
+    def factor_names(self) -> tuple[str, ...]:
+        return self.contract.factor_names
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        return self.contract.capabilities
+
+    @property
+    def sha256(self) -> str:
+        payload = json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def validate(
+        self,
+        contract: RecallFormulaContract,
+        *,
+        hidden_dim: int,
+        slots: int,
+        backend: str = "torch",
+    ) -> None:
+        """Validate that a runtime Formula instance matches this lock."""
+
+        if contract.fingerprint != self.contract_fingerprint:
+            raise ValueError("Formula contract fingerprint does not match the lock")
+        if hidden_dim != self.hidden_dim or slots != self.slots:
+            raise ValueError("Formula shape does not match the lock")
+        if backend != self.backend:
+            raise ValueError("Formula backend does not match the lock")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "lock_version": self.lock_version,
+            "contract": self.contract.to_dict(),
+            "contract_fingerprint": self.contract_fingerprint,
+            "hidden_dim": self.hidden_dim,
+            "slots": self.slots,
+            "backend": self.backend,
+            "layout": {
+                "state": "[..., D]",
+                "factors": "[..., F, D]",
+                "factor_axis": -2,
+            },
+            "capabilities": list(self.capabilities),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "RecallFormulaLock":
+        """Restore and verify a lock without resolving or importing a Formula."""
+
+        if not isinstance(value, Mapping):
+            raise TypeError("RecallFormulaLock payload must be a mapping")
+        required = {
+            "lock_version",
+            "contract",
+            "contract_fingerprint",
+            "hidden_dim",
+            "slots",
+            "backend",
+            "layout",
+            "capabilities",
+        }
+        if set(value) != required:
+            raise ValueError("RecallFormulaLock payload contains missing or unknown fields")
+        if value["layout"] != {
+            "state": "[..., D]",
+            "factors": "[..., F, D]",
+            "factor_axis": -2,
+        }:
+            raise ValueError("RecallFormulaLock layout is unsupported")
+        contract = RecallFormulaContract.from_dict(value["contract"])
+        lock = cls(
+            contract=contract,
+            hidden_dim=value["hidden_dim"],
+            slots=value["slots"],
+            backend=value["backend"],
+            lock_version=value["lock_version"],
+        )
+        if value["contract_fingerprint"] != lock.contract_fingerprint:
+            raise ValueError("RecallFormulaLock contract fingerprint is invalid")
+        capabilities = value["capabilities"]
+        if not isinstance(capabilities, Sequence) or isinstance(capabilities, (str, bytes)):
+            raise TypeError("RecallFormulaLock.capabilities must be a sequence")
+        if tuple(capabilities) != lock.capabilities:
+            raise ValueError("RecallFormulaLock capabilities do not match its contract")
+        return lock
+
+
+@dataclass(frozen=True)
+class _BuiltinFormulaDefinition:
+    """Internal implementation metadata for a built-in Formula."""
+
+    contract: RecallFormulaContract
+    summary: str
+    composition: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.contract, RecallFormulaContract):
+            raise TypeError("_BuiltinFormulaDefinition.contract must be RecallFormulaContract")
+        if not self.summary.strip():
+            raise ValueError("_BuiltinFormulaDefinition.summary must be non-empty")
+        _validate_component(self.composition, field="_BuiltinFormulaDefinition.composition")
 
 
 def _factor(
@@ -232,22 +576,24 @@ def _factor(
 
 
 _DELTA_CONTRACT = RecallFormulaContract(
-    identity=FormulaIdentity("delta", 1),
+    identity=RecallFormulaId.parse("arti/delta@1"),
     factors=(_factor("content"),),
     identity_preserving=True,
+    composition="single",
 )
 
 _AFFINE_CONTRACT = RecallFormulaContract(
-    identity=FormulaIdentity("affine", 1),
+    identity=RecallFormulaId.parse("arti/affine@1"),
     factors=(
         _factor("scale"),
         _factor("shift"),
     ),
     identity_preserving=True,
+    composition="product",
 )
 
 _STATE_CONTRACT = RecallFormulaContract(
-    identity=FormulaIdentity("state", 1),
+    identity=RecallFormulaId.parse("arti/state@1"),
     factors=(
         _factor("coarse_content"),
         _factor("fine_content"),
@@ -256,33 +602,26 @@ _STATE_CONTRACT = RecallFormulaContract(
         _factor("opacity"),
     ),
     identity_preserving=True,
+    composition="state",
 )
 
-BUILTIN_RECALL_FORMULAS: Final[Mapping[str, RecallFormulaDescription]] = MappingProxyType(
+BUILTIN_RECALL_FORMULAS: Final[Mapping[str, _BuiltinFormulaDefinition]] = MappingProxyType(
     {
-        "delta-v1": RecallFormulaDescription(
+        "arti/delta@1": _BuiltinFormulaDefinition(
             contract=_DELTA_CONTRACT,
-            summary="One-factor Recall formula compatible with the legacy single mode.",
-            legacy_value_composition="single",
+            summary="One-factor next-state Recall Formula.",
+            composition="single",
         ),
-        "affine-v1": RecallFormulaDescription(
+        "arti/affine@1": _BuiltinFormulaDefinition(
             contract=_AFFINE_CONTRACT,
-            summary="Two-factor Recall formula compatible with the legacy product mode.",
-            legacy_value_composition="product",
+            summary="Two-factor affine next-state Recall Formula.",
+            composition="product",
         ),
-        "state-v1": RecallFormulaDescription(
+        "arti/state@1": _BuiltinFormulaDefinition(
             contract=_STATE_CONTRACT,
-            summary="Seventeen-factor Recall formula compatible with the legacy state mode.",
-            legacy_value_composition="state",
+            summary="Seventeen-factor structured next-state Recall Formula.",
+            composition="state",
         ),
-    }
-)
-
-BUILTIN_RECALL_FORMULA_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        "single": "delta-v1",
-        "product": "affine-v1",
-        "state": "state-v1",
     }
 )
 
@@ -416,7 +755,7 @@ def _module_state_changed(module: nn.Module, snapshot: Mapping[str, Tensor]) -> 
     )
 
 
-def check_recall_formula(
+def validate_formula(
     module: nn.Module,
     x: Tensor,
     *,
@@ -490,9 +829,14 @@ def check_recall_formula(
             output_semantics="next_state",
             identity_preserving=test_identity,
         )
+    if not formula_dtype_supported(x.dtype, contract.execution.supported_dtypes):
+        raise TypeError(
+            "Recall formula execution contract does not support "
+            f"dtype {x.dtype}; supported dtypes are "
+            f"{contract.execution.supported_dtypes!r}"
+        )
 
     probe_state = x.detach().clone()
-    original_probe_state = probe_state.clone()
     probe_factors = _deterministic_factors(probe_state, len(factors))
     module_state = {
         name: value.detach().clone() for name, value in module.state_dict().items()
@@ -502,37 +846,111 @@ def check_recall_formula(
     cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
     try:
         with torch.no_grad():
-            output = module(probe_state, probe_factors)
-            input_mutated = not torch.equal(probe_state, original_probe_state)
+            flat_state = probe_state.reshape(-1, probe_state.shape[-1])
+            flat_factors = probe_factors.reshape(-1, len(factors), probe_state.shape[-1])
+
+            def run_abi(state: Tensor, factor_values: Tensor) -> Tensor:
+                if contract.execution.vectorization == "batched":
+                    return module(state, factor_values)
+                # Probe with independent randomness so a Formula can surface
+                # its own exception. Deterministic contracts are rejected by
+                # the repeated-output check below if they actually use it.
+                return torch.vmap(module, randomness="different")(
+                    state,
+                    factor_values,
+                )
+
+            def run_with_probe_rng(state: Tensor, factor_values: Tensor) -> Tensor:
+                torch.random.set_rng_state(cpu_rng_state)
+                if cuda_rng_state is not None:
+                    torch.cuda.set_rng_state_all(cuda_rng_state)
+                return run_abi(state, factor_values)
+
+            abi_state = flat_state.detach().clone()
+            abi_factors = flat_factors.detach().clone()
+            output = run_abi(abi_state, abi_factors)
+            input_mutated = not torch.equal(abi_state, flat_state)
             state_mutated = _module_state_changed(module, module_state)
             if input_mutated or state_mutated:
                 raise ValueError(
                     "Recall formula must not mutate its input or module state during forward"
                 )
-            _validate_formula_output(output, probe_state)
+            _validate_formula_output(output, flat_state)
 
-            if test_identity:
-                identity_factors = torch.empty_like(probe_factors)
+            if contract.execution.vectorization == "batched":
+                # A batched Formula is an optimization of independent rows,
+                # not permission to mix samples or padded tokens. Probe that
+                # invariant by changing only the second row while resetting
+                # RNG state for stochastic contracts.
+                seed_state = flat_state[:1]
+                seed_factors = flat_factors[:1]
+                batched_state = torch.cat((seed_state, seed_state + 0.5), dim=0)
+                batched_factors = torch.cat(
+                    (seed_factors, seed_factors + 0.125), dim=0
+                )
+                batched_output = _validate_formula_output(
+                    run_with_probe_rng(batched_state, batched_factors),
+                    batched_state,
+                )
+                changed_state = batched_state.clone()
+                changed_factors = batched_factors.clone()
+                changed_state[1].add_(17.0)
+                changed_factors[1].sub_(11.0)
+                changed_output = _validate_formula_output(
+                    run_with_probe_rng(changed_state, changed_factors),
+                    changed_state,
+                )
+                if not torch.allclose(
+                    batched_output[0],
+                    changed_output[0],
+                    atol=float(identity_atol),
+                    rtol=float(identity_rtol),
+                ):
+                    raise ValueError(
+                        "batched Recall formulas must be row-independent; "
+                        "changing one batch/token row changed another row"
+                    )
+
+            if contract.execution.deterministic:
+                repeat_state = flat_state.detach().clone()
+                repeat_output = _validate_formula_output(
+                    run_abi(repeat_state, flat_factors),
+                    flat_state,
+                )
+                if not torch.equal(output, repeat_output):
+                    raise ValueError(
+                        "deterministic Recall formulas must return the same output "
+                        "for repeated identical inputs"
+                    )
+                if not torch.equal(repeat_state, flat_state) or _module_state_changed(
+                    module, module_state
+                ):
+                    raise ValueError(
+                        "Recall formula must not mutate its input or module state during forward"
+                    )
+
+            if test_identity or contract.identity_preserving:
+                identity_factors = torch.empty_like(flat_factors)
                 for index, factor in enumerate(factors):
                     identity_factors[..., index, :].fill_(factor.identity)
-                identity_input = original_probe_state.clone()
+                identity_input = flat_state.detach().clone()
                 identity_output = _validate_formula_output(
-                    module(identity_input, identity_factors),
+                    run_abi(identity_input, identity_factors),
                     identity_input,
                 )
                 if not torch.equal(
-                    identity_input, original_probe_state
+                    identity_input, flat_state
                 ) or _module_state_changed(module, module_state):
                     raise ValueError(
                         "Recall formula must not mutate its input or module state during forward"
                     )
                 if not torch.allclose(
                     identity_output,
-                    original_probe_state,
+                    flat_state,
                     atol=float(identity_atol),
                     rtol=float(identity_rtol),
                 ):
-                    max_error = (identity_output - original_probe_state).abs().max().item()
+                    max_error = (identity_output - flat_state).abs().max().item()
                     raise ValueError(
                         "Recall formula failed its next_state identity check: "
                         f"maximum absolute error was {max_error:.6g}"
@@ -548,14 +966,14 @@ def check_recall_formula(
 
 
 __all__ = [
-    "BUILTIN_RECALL_FORMULA_ALIASES",
     "BUILTIN_RECALL_FORMULAS",
     "FactorSpec",
-    "FormulaIdentity",
     "MAX_RECALL_FORMULA_FACTORS",
     "MAX_RECALL_FORMULA_PROBE_ELEMENTS",
     "RecallFormulaContract",
-    "RecallFormulaDescription",
+    "RecallFormulaExecutionSpec",
+    "RecallFormulaLock",
     "RecallOutputSemantics",
-    "check_recall_formula",
+    "formula_dtype_supported",
+    "validate_formula",
 ]

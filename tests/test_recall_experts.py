@@ -15,7 +15,8 @@ from arti.fit import (
     set_adapter_bank_influences,
     set_adapter_bank_weights,
 )
-from arti.recall_formula import FactorSpec, FormulaIdentity, RecallFormulaContract
+from arti.recall_formula import FactorSpec, RecallFormulaContract
+from arti.recall_registry import RecallFormulaId
 from arti.recall_experts import (
     RecallExpertAssembly,
     canonical_tensor_state_sha256,
@@ -30,7 +31,7 @@ from arti.recall_experts import (
 
 class _FourFactorFormula(nn.Module):
     recall_formula_contract = RecallFormulaContract(
-        identity=FormulaIdentity("tests/four-factor-expert", 1),
+        identity=RecallFormulaId.parse("tests/four-factor-expert@1"),
         factors=tuple(
             FactorSpec(f"factor_{index}", route=f"route_{index}", init="zero") for index in range(4)
         ),

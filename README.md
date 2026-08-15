@@ -13,9 +13,9 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 2.0.1 is a **Stable Candidate**. The supported 2.x surface is frozen
-for final compatibility verification, but this release does not yet carry an
-LTS commitment. See [Stability](STABILITY.md) and [Security](SECURITY.md).
+Version 3.0.0 is a **Stable Candidate**. The 3.x surface is the current
+Formula contract line; it intentionally does not preserve the 2.x Formula
+symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
 ## Install
 
@@ -46,25 +46,23 @@ The alpha browser runtime is published separately:
 pnpm add @arti-fit/web@alpha
 ```
 
-## What Is New In 2.0
+## What Is New In 3.0
 
-ARTI 2.0 makes the current Recall architecture the public default. Recall now
+ARTI 3.0 makes the current Recall architecture the public default. Recall now
 uses a fixed query basis, host-dimensional Bank values, versioned Formula
 contracts, explicit per-Bank composition, and bounded iterative refinement.
 The package also exposes reusable Recall artifact, expert, policy, workspace,
 and value-transition primitives without coupling them to a training loop.
 
-The experimental 1.x `RecallTTTSession` API has been removed. It mixed
-optimization policy with the tensor layer and is not part of the 2.x
-replacement. Applications should compose `arti.nn.Recall`, Formula contracts,
+The experimental `RecallTTTSession` API and the 2.x Formula symbols have been
+removed. They mixed optimization policy with the tensor layer and are not part
+of the 3.x replacement. Applications should compose `arti.nn.Recall`, Formula contracts,
 and explicit artifact/state APIs instead.
 
-The `arti.st` file format remains version 1. ARTI 2.0 can strictly load the
-value Bank and query basis from compatible 1.x Recall states, while discarding
-the obsolete learned routing key Bank and initializing new state metadata.
-Because routing semantics changed, migrated Recall artifacts must be validated
-on their intended workload; load compatibility does not claim identical 1.x
-numerical behavior.
+The `arti.st` container remains version 1, but the Recall Formula contract and
+manifest schema are version 2. ARTI 3.0 deliberately rejects 2.x Formula
+contracts, manifests, and locks instead of silently interpreting them under a
+different execution contract.
 
 ## Choose The Smallest Useful Surface
 
@@ -219,8 +217,8 @@ a Recall field.
 
 ## What Was New In 1.8
 
-ARTI 1.8 introduces `arti.nn.Recall`, a standalone tensor-in/tensor-out layer
-with an extensible Formula API:
+ARTI provides `arti.nn.Recall`, a standalone tensor-in/tensor-out layer with an
+extensible Formula API:
 
 ```text
 current state + routed Bank factors -> Formula -> next state
@@ -233,7 +231,8 @@ routing, serialization, masking, or iterative execution.
 
 The release includes:
 
-- versioned `delta-v1`, `affine-v1`, and `state-v1` formulas;
+- canonical versioned `arti/delta@1`, `arti/affine@1`, and `arti/state@1`
+  formulas;
 - local custom formulas implemented as ordinary `torch.nn.Module` objects;
 - explicit process-local registration for trusted application formulas;
 - stable factor ordering and passive manifest metadata;
@@ -242,8 +241,9 @@ The release includes:
 
 Recall formulas do not own optimizers, gradient policy, files, network access,
 or training schedules. Third-party formula code is never imported from an
-artifact. `Recall` and the Formula API are alpha surfaces in 1.8; the rest of
-the supported 1.x surface retains its existing stability level.
+artifact. Each Formula can expose a pure-data contract and an instance lock;
+the lock binds the declared formula to its factor layout, hidden dimension,
+slot count, and execution backend before weights are loaded.
 
 ## Use ARTI As A Layer
 
@@ -285,7 +285,7 @@ import torch
 recall = arti.nn.Recall(
     dim=64,
     slots=32,
-    formula="affine-v1",
+    formula="arti/affine@1",
     steps=2,
 )
 
@@ -300,14 +300,15 @@ print(info["recall_steps_executed"])
 
 `Recall` routes trainable Bank factors and applies a versioned formula to the
 current state. Its deterministic default uses `Half` on each proposed update.
-Built-in formulas are `delta-v1`, `affine-v1`, and `state-v1`; legacy names
-`single`, `product`, and `state` remain accepted.
+Built-in formulas use canonical IDs: `arti/delta@1`, `arti/affine@1`, and
+`arti/state@1`. Legacy short names are rejected rather than silently mapped to
+a different implementation.
 
 | Formula | Bank factors | Minimum slot multiple |
 | --- | --- | --- |
-| `delta-v1` | `content` | 1 |
-| `affine-v1` | `scale`, `shift` | 2 |
-| `state-v1` | coarse/fine content, modulation, direction, opacity | 17 |
+| `arti/delta@1` | `content` | 1 |
+| `arti/affine@1` | `scale`, `shift` | 2 |
+| `arti/state@1` | coarse/fine content, modulation, direction, opacity | 17 |
 
 `slots` is the total Bank slot count and must be divisible by the selected
 formula's factor count. `steps`, `min_steps`, and `tolerance` control bounded
@@ -441,7 +442,7 @@ print(saved.weights_sha256)
 print(loaded.missing_keys, loaded.unexpected_keys)
 ```
 
-ARTI 2.x reads compatible format-version 1 artifacts produced by the pre-public
+ARTI 3.x reads compatible format-version 1 artifacts produced by the pre-public
 0.x and public 1.x lines. Legacy `.pt` migration uses PyTorch's restricted
 tensor-only loader:
 

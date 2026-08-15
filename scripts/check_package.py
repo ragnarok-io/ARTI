@@ -145,7 +145,7 @@ def main() -> None:
                     "assert callable(arti.Recall); "
                     "assert arti.nn.Recall is arti.Recall; "
                     "assert arti.torch.Recall is arti.Recall; "
-                    "assert callable(arti.check_recall_formula); "
+                    "assert callable(arti.validate_formula); "
                     "assert callable(arti.register_formula); "
                     "assert callable(arti.list_formulas); "
                     "assert callable(arti.UnFold); "

@@ -15,9 +15,9 @@ from arti.recall_manifest import (
 
 
 def _manifest(*, origin: str = "builtin", portable: bool = True) -> RecallFormulaManifest:
-    factors = BUILTIN_RECALL_FORMULAS["state-v1"].contract.factor_names
+    factors = BUILTIN_RECALL_FORMULAS["arti/state@1"].contract.factor_names
     return RecallFormulaManifest(
-        id="state",
+        id="arti/state",
         version="1",
         factor_names=factors,
         origin=origin,
@@ -32,6 +32,7 @@ def test_manifest_is_canonical_json_safe_and_roundtrips() -> None:
     payload = manifest.to_dict()
 
     assert json.loads(json.dumps(payload)) == payload
+    assert manifest.api_version == 2
     assert RecallFormulaManifest.from_dict(json.loads(json.dumps(payload))) == manifest
     assert manifest.canonical_json() == canonical_json(payload)
     assert manifest.sha256 == hashlib.sha256(
@@ -39,6 +40,14 @@ def test_manifest_is_canonical_json_safe_and_roundtrips() -> None:
     ).hexdigest()
     assert manifest.sha256 == canonical_sha256(payload)
     assert payload["layout_fingerprint"] == payload["layout"]["fingerprint"]
+
+
+def test_manifest_rejects_the_previous_formula_schema_version() -> None:
+    payload = _manifest().to_dict()
+    payload["api_version"] = 1
+
+    with pytest.raises(ValueError, match="unsupported Recall formula api_version"):
+        RecallFormulaManifest.from_dict(payload)
 
 
 def test_canonical_hash_does_not_depend_on_mapping_key_order() -> None:

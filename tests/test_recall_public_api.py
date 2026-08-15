@@ -15,7 +15,10 @@ class AdditiveFormula(nn.Module):
         return state + factors[..., 0, :]
 
 
-@pytest.mark.parametrize("formula,slots", [("delta-v1", 4), ("affine-v1", 4), ("state-v1", 17)])
+@pytest.mark.parametrize(
+    "formula,slots",
+    [("arti/delta@1", 4), ("arti/affine@1", 4), ("arti/state@1", 17)],
+)
 def test_recall_builtin_formulas_preserve_shape(formula: str, slots: int) -> None:
     layer = arti_nn.Recall(8, slots, formula=formula, activation="none")
     x = torch.randn(2, 3, 8)
@@ -27,11 +30,9 @@ def test_recall_builtin_formulas_preserve_shape(formula: str, slots: int) -> Non
     assert layer.formula_id == formula
 
 
-def test_recall_accepts_legacy_formula_aliases() -> None:
-    layer = arti_nn.Recall(4, 4, formula="single")
-
-    assert layer.formula_id == "delta-v1"
-    assert layer.factor_names == ("content",)
+def test_recall_rejects_legacy_formula_aliases() -> None:
+    with pytest.raises(ValueError, match="canonical|reference"):
+        arti_nn.Recall(4, 4, formula="single")
 
 
 def test_custom_formula_uses_bank_factors_and_propagates_gradients() -> None:
@@ -147,11 +148,11 @@ def test_recall_return_info_reports_existing_diagnostics() -> None:
 
 
 def test_recall_exposes_passive_formula_manifest() -> None:
-    layer = arti_nn.Recall(4, 4, formula="delta-v1")
+    layer = arti_nn.Recall(4, 4, formula="arti/delta@1")
 
     manifest = layer.formula_manifest()
 
-    assert manifest.id == "delta"
+    assert manifest.id == "arti/delta"
     assert manifest.version == "1"
     assert manifest.factor_names == ("content",)
     assert manifest.origin == "builtin"
@@ -171,7 +172,8 @@ def test_explicit_registered_formula_can_be_resolved_without_discovery() -> None
 def test_recall_is_exported_from_root_and_nn() -> None:
     assert arti.Recall is arti_nn.Recall
     assert arti.torch.Recall is arti_nn.Recall
-    assert callable(arti.check_recall_formula)
+    assert callable(arti.formula_dtype_supported)
+    assert callable(arti.validate_formula)
     assert callable(arti.register_formula)
     assert callable(arti.list_formulas)
 

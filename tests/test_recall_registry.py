@@ -210,5 +210,5 @@ def test_factory_must_not_return_the_same_module_instance_twice() -> None:
 def test_public_discovery_includes_builtin_formula_ids() -> None:
     references = {description.reference for description in list_formulas()}
 
-    assert {"delta-v1", "affine-v1", "state-v1"} <= references
-    assert describe_formula("single").reference == "delta-v1"
+    assert {"arti/delta@1", "arti/affine@1", "arti/state@1"} <= references
+    assert describe_formula("arti/state@1").reference == "arti/state@1"

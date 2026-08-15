@@ -55,6 +55,14 @@ class RecallFormulaId:
     name: str
     version: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.namespace, str) or re.fullmatch(_COMPONENT, self.namespace) is None:
+            raise InvalidRecallFormulaIdError("Recall formula namespace is invalid")
+        if not isinstance(self.name, str) or re.fullmatch(_COMPONENT, self.name) is None:
+            raise InvalidRecallFormulaIdError("Recall formula name is invalid")
+        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version <= 0:
+            raise InvalidRecallFormulaIdError("Recall formula version must be a positive integer")
+
     @property
     def base_id(self) -> str:
         return f"{self.namespace}/{self.name}"
@@ -62,6 +70,34 @@ class RecallFormulaId:
     @property
     def reference(self) -> str:
         return f"{self.base_id}@{self.version}"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "namespace": self.namespace,
+            "name": self.name,
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "RecallFormulaId":
+        """Restore an exact identity from a validated, code-free payload."""
+
+        if not isinstance(value, dict):
+            raise InvalidRecallFormulaIdError(
+                "Recall formula identity must be a mapping"
+            )
+        required = {"namespace", "name", "version"}
+        unknown = set(value) - required
+        missing = required - set(value)
+        if missing or unknown:
+            raise InvalidRecallFormulaIdError(
+                "Recall formula identity must contain exactly namespace, name, and version"
+            )
+        return cls(
+            namespace=value["namespace"],
+            name=value["name"],
+            version=value["version"],
+        )
 
     @classmethod
     def parse(cls, reference: str) -> "RecallFormulaId":
@@ -346,8 +382,8 @@ def list_formulas() -> tuple[RecallFormulaDescription, ...]:
 
     builtins = tuple(
         RecallFormulaDescription(
-            reference=formula_id,
-            namespace="arti",
+            reference=description.contract.identity.reference,
+            namespace=description.contract.identity.namespace,
             name=description.contract.identity.name,
             version=description.contract.identity.version,
             origin="builtin",
@@ -355,7 +391,7 @@ def list_formulas() -> tuple[RecallFormulaDescription, ...]:
             portable=True,
             description=description.summary,
         )
-        for formula_id, description in BUILTIN_RECALL_FORMULAS.items()
+        for description in BUILTIN_RECALL_FORMULAS.values()
         if description.contract.identity is not None
     )
     return tuple(
@@ -364,18 +400,14 @@ def list_formulas() -> tuple[RecallFormulaDescription, ...]:
 
 
 def describe_formula(reference: str) -> RecallFormulaDescription:
-    from .recall_formula import (
-        BUILTIN_RECALL_FORMULA_ALIASES,
-        BUILTIN_RECALL_FORMULAS,
-    )
+    from .recall_formula import BUILTIN_RECALL_FORMULAS
 
-    builtin_id = BUILTIN_RECALL_FORMULA_ALIASES.get(reference, reference)
-    builtin = BUILTIN_RECALL_FORMULAS.get(builtin_id)
+    builtin = BUILTIN_RECALL_FORMULAS.get(reference)
     if builtin is not None:
         assert builtin.contract.identity is not None
         return RecallFormulaDescription(
-            reference=builtin_id,
-            namespace="arti",
+            reference=builtin.contract.identity.reference,
+            namespace=builtin.contract.identity.namespace,
             name=builtin.contract.identity.name,
             version=builtin.contract.identity.version,
             origin="builtin",

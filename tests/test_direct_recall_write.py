@@ -9,12 +9,13 @@ from torch import nn
 from arti.blocks import ARTIResidualBlock
 from arti.config import ARTIConfig, STATE_RECALL_COMPOSITION_FACTOR
 from arti.layers import ARTILatentRecallField, ARTIRecallWriteLayer
-from arti.recall_formula import FactorSpec, FormulaIdentity, RecallFormulaContract
+from arti.recall_formula import FactorSpec, RecallFormulaContract
+from arti.recall_registry import RecallFormulaId
 
 
 class _IdentityNextStateFormula(nn.Module):
     recall_formula_contract = RecallFormulaContract(
-        identity=FormulaIdentity("tests/identity-next-state", 1),
+        identity=RecallFormulaId.parse("tests/identity-next-state@1"),
         factors=(FactorSpec("unused", init="zero"),),
         identity_preserving=True,
     )
@@ -26,7 +27,7 @@ class _IdentityNextStateFormula(nn.Module):
 
 class _SharedRouteFormula(nn.Module):
     recall_formula_contract = RecallFormulaContract(
-        identity=FormulaIdentity("tests/shared-route", 1),
+        identity=RecallFormulaId.parse("tests/shared-route@1"),
         factors=(
             FactorSpec("left", route="pair", init="zero"),
             FactorSpec("right", route="pair", init="zero"),
@@ -40,7 +41,7 @@ class _SharedRouteFormula(nn.Module):
 
 class _IndependentRouteFormula(nn.Module):
     recall_formula_contract = RecallFormulaContract(
-        identity=FormulaIdentity("tests/independent-route", 1),
+        identity=RecallFormulaId.parse("tests/independent-route@1"),
         factors=(
             FactorSpec("left", route="left", init="normal"),
             FactorSpec("right", route="right", init="normal"),

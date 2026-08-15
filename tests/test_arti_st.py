@@ -98,7 +98,7 @@ def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Pa
     try:
         arti.load(saved.weights_path)
     except ValueError as exc:
-        assert "newer than ARTI" in str(exc)
+        assert "incompatible with ARTI" in str(exc)
     else:
         raise AssertionError("future alpha package should fail compatibility validation")
 

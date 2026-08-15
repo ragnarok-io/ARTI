@@ -1,11 +1,11 @@
 # Stability Policy
 
-ARTI 2.0.1 is published as a Stable Candidate. This label is a release stage,
+ARTI 3.0.0 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
-## Supported 2.x Surface
+## Supported 3.x Surface
 
-The following contracts are frozen across compatible 2.x releases:
+The following contracts are frozen across compatible 3.x releases:
 
 - Core tensor contracts for `[B, D]` and `[B, N, D]` inputs.
 - `arti.nn` core layers: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, and
@@ -33,17 +33,18 @@ Runtime Recall refinement controls were introduced as alpha APIs in 1.9.0.
 Their exact-depth semantics and atomic schedule validation are documented, but
 automatic schedule selection is not part of the supported surface.
 
-ARTI 2.0 removes the experimental `RecallTTTSession` API. Current Recall,
+ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
+Formula contract/manifest schema v2. Current Recall,
 Formula, artifact, policy, and workspace APIs do not own an optimizer or an
 implicit online-training session.
 
 ## Compatibility
 
 - Patch releases fix defects without intentionally breaking supported APIs.
-- Minor 2.x releases may add optional parameters and APIs with compatible
+- Minor 3.x releases may add optional parameters and APIs with compatible
   defaults.
 - Breaking supported APIs requires a new major release.
-- ARTI 2.x reads valid format-version 1 `arti.st` artifacts produced by the
+- ARTI 3.x reads valid format-version 1 `arti.st` artifacts produced by the
   pre-public 0.x and public 1.x lines. Recall state migration preserves the
   value Bank and query basis but does not promise identical routing behavior.
   Artifact format compatibility is independent of the package version.
@@ -68,7 +69,7 @@ issues may require an exception, which must be documented.
 | JAX | Optional functional backend; smaller surface than PyTorch |
 | WebGPU | Alpha Python-first runtime for artifact v2 tensor graphs and explicit-state artifact v3 graphs |
 | Transformers, PEFT, Diffusers | Optional integrations |
-| Artifact format | `arti.st` format version 1 |
+| Artifact format | `arti.st` format version 1; Formula manifest schema version 2 |
 
 ## Promotion To Stable
 

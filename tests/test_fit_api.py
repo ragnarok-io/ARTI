@@ -23,7 +23,7 @@ from arti.recall_registry import UnknownRecallFormulaError, resolve_formula
 
 class FitRecallFormula(nn.Module):
     recall_formula_contract = arti.RecallFormulaContract(
-        identity=arti.FormulaIdentity("tests/fit-recall", 1),
+        identity=arti.RecallFormulaId.parse("tests/fit-recall@1"),
         factors=(
             arti.FactorSpec("content", init="normal", init_scale=0.02),
             arti.FactorSpec("gate", init="normal", init_scale=0.02),
@@ -42,7 +42,7 @@ class FitRecallFormula(nn.Module):
 
 class SecondFitRecallFormula(nn.Module):
     recall_formula_contract = arti.RecallFormulaContract(
-        identity=arti.FormulaIdentity("tests/fit-recall-second", 1),
+        identity=arti.RecallFormulaId.parse("tests/fit-recall-second@1"),
         factors=(
             arti.FactorSpec("gain", init="zero"),
             arti.FactorSpec("shift", init="zero"),

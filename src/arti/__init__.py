@@ -1,7 +1,7 @@
 """ARTI public API.
 
 ARTI is a PyTorch-first latent tensor dynamics package. The root namespace
-exports the supported 2.x surface for downstream projects: core ARTI layers,
+exports the supported 3.x surface for downstream projects: core ARTI layers,
 activation/workspace modules, runtime vocabulary helpers, glyph/text tensor
 renderers, participant context builders, membrane routing helpers, source
 integrity utilities, fit/adaptation helpers, and backend diagnostics.
@@ -73,8 +73,15 @@ from .membrane import (
 )
 from .models import ARTIClassifier
 from .nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, Recall, RecallRefiner, StatefulRecall, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
-from .recall_formula import FactorSpec, FormulaIdentity, RecallFormulaContract, check_recall_formula
-from .recall_registry import describe_formula, list_formulas, register_formula
+from .recall_formula import (
+    FactorSpec,
+    RecallFormulaContract,
+    RecallFormulaExecutionSpec,
+    RecallFormulaLock,
+    formula_dtype_supported,
+    validate_formula,
+)
+from .recall_registry import RecallFormulaId, describe_formula, list_formulas, register_formula
 from .visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
 from .outputs import ARTIOutput
 from .pulse import PulseCompressor, PulseOutput, assert_pulse_distinct, fixed_width_pulse_ids, pulse_compress, pulse_distinctness_report
@@ -126,9 +133,12 @@ __all__ = [
     "ARTILatentRecallField",
     "Recall",
     "FactorSpec",
-    "FormulaIdentity",
+    "RecallFormulaId",
     "RecallFormulaContract",
-    "check_recall_formula",
+    "RecallFormulaExecutionSpec",
+    "RecallFormulaLock",
+    "formula_dtype_supported",
+    "validate_formula",
     "register_formula",
     "list_formulas",
     "describe_formula",

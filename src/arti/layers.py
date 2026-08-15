@@ -37,7 +37,7 @@ from .nn import Half
 if TYPE_CHECKING:
     from .recall_policy import RecallParameterTag
 from .outputs import ARTIOutput
-from .recall_formula import RecallFormulaContract, check_recall_formula
+from .recall_formula import RecallFormulaContract, formula_dtype_supported, validate_formula
 from .utils import assert_floating_tensor, detach_diagnostics
 
 
@@ -438,7 +438,7 @@ class ARTILatentRecallField(nn.Module):
                 if reference.is_floating_point():
                     probe_kwargs["dtype"] = reference.dtype
             probe = torch.zeros(hidden_dim, **probe_kwargs)
-            formula_contract = check_recall_formula(formula, probe)
+            formula_contract = validate_formula(formula, probe)
             composition_factor = formula_contract.factor_count
         composition_name = (
             "custom Recall formula" if formula is not None else f"{value_composition} Recall"
@@ -1158,13 +1158,38 @@ class ARTILatentRecallField(nn.Module):
 
         if self.formula is None:
             raise RuntimeError("custom Recall composition requires a formula module")
+        if self.formula_contract is None:
+            raise RuntimeError("custom Recall composition requires a formula contract")
+        if not formula_dtype_supported(
+            z.dtype,
+            self.formula_contract.execution.supported_dtypes,
+        ):
+            raise TypeError(
+                "Recall formula execution contract does not support "
+                f"dtype {z.dtype}; supported dtypes are "
+                f"{self.formula_contract.execution.supported_dtypes!r}"
+            )
         flat_state = z.reshape(-1, z.shape[-1])
         flat_factors = factors.reshape(
             -1,
             self.composition_factor,
             factors.shape[-1],
         )
-        next_state = torch.vmap(self.formula)(flat_state, flat_factors).reshape_as(z)
+        if (
+            self.formula_contract is not None
+            and self.formula_contract.execution.vectorization == "batched"
+        ):
+            next_state = self.formula(flat_state, flat_factors).reshape_as(z)
+        else:
+            randomness = (
+                "error"
+                if self.formula_contract.execution.deterministic
+                else "different"
+            )
+            next_state = torch.vmap(
+                self.formula,
+                randomness=randomness,
+            )(flat_state, flat_factors).reshape_as(z)
         if not isinstance(next_state, Tensor):
             raise TypeError("Recall formula must return one next-state Tensor")
         if next_state.shape != z.shape:

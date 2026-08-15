@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .functional import half
+from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
 
 if TYPE_CHECKING:
@@ -1818,12 +1819,14 @@ class Recall(nn.Module):
     masking, recognition, activation, and iterative application.
     """
 
+    output_semantics = "next_state"
+
     def __init__(
         self,
         dim: int,
         slots: int,
         *,
-        formula: str | nn.Module = "delta-v1",
+        formula: str | nn.Module = "arti/delta@1",
         steps: int = 1,
         min_steps: int = 1,
         tolerance: float | None = None,
@@ -1840,14 +1843,11 @@ class Recall(nn.Module):
         super().__init__()
         from .config import ARTIConfig
         from .layers import ARTIRecallWriteState
-        from .recall_formula import (
-            BUILTIN_RECALL_FORMULA_ALIASES,
-            BUILTIN_RECALL_FORMULAS,
-        )
-
+        from .recall_formula import BUILTIN_RECALL_FORMULAS
         formula_module: nn.Module | None
+        declared_contract: RecallFormulaContract | None = None
         if isinstance(formula, str):
-            formula_id = BUILTIN_RECALL_FORMULA_ALIASES.get(formula, formula)
+            formula_id = formula
             builtin = BUILTIN_RECALL_FORMULAS.get(formula_id)
             if builtin is None:
                 from .recall_registry import resolve_formula
@@ -1860,15 +1860,16 @@ class Recall(nn.Module):
                 formula_portable = registration.portable
                 manifest_id = registration.identity.base_id
                 manifest_version = str(registration.identity.version)
+                declared_contract = getattr(formula_module, "recall_formula_contract", None)
             else:
                 formula_module = None
-                assert builtin.legacy_value_composition is not None
-                value_composition = builtin.legacy_value_composition
+                value_composition = builtin.composition
                 formula_origin = "builtin"
                 formula_portable = True
                 assert builtin.contract.identity is not None
-                manifest_id = builtin.contract.identity.name
+                manifest_id = builtin.contract.identity.base_id
                 manifest_version = str(builtin.contract.identity.version)
+                declared_contract = builtin.contract
         elif isinstance(formula, nn.Module):
             formula_module = formula
             formula_id = "custom"
@@ -1877,6 +1878,7 @@ class Recall(nn.Module):
             formula_portable = False
             manifest_id = "custom"
             manifest_version = "1"
+            declared_contract = getattr(formula_module, "recall_formula_contract", None)
         else:
             raise TypeError("formula must be a versioned formula ID or torch.nn.Module")
 
@@ -1915,12 +1917,34 @@ class Recall(nn.Module):
             identity_init_bank=identity_init,
             formula=formula_module,
         )
+        self._formula_contract = self.state.recall.formula_contract or declared_contract
+        if self._formula_contract is None:
+            self._formula_contract = RecallFormulaContract(
+                factors=tuple(FactorSpec(name) for name in self.factor_names),
+            )
+        self._formula_lock = RecallFormulaLock.bind(
+            self._formula_contract,
+            hidden_dim=self.dim,
+            slots=self.slots,
+        )
 
     @property
     def formula(self) -> nn.Module | None:
         """Return the local custom/registered Formula, if one is in use."""
 
         return self.state.recall.formula
+
+    @property
+    def formula_contract(self) -> RecallFormulaContract:
+        """Return the immutable mathematical contract used by this Recall."""
+
+        return self._formula_contract
+
+    @property
+    def formula_lock(self) -> RecallFormulaLock:
+        """Return the shape/backend lock for artifact and deployment checks."""
+
+        return self._formula_lock
 
     @property
     def factor_names(self) -> tuple[str, ...]:
@@ -1947,7 +1971,7 @@ class Recall(nn.Module):
             origin=self.formula_origin,
             portable=self.formula_portable,
             layout=layout,
-            capabilities=("torch.eager",),
+            capabilities=self._formula_lock.capabilities,
         )
 
     def forward(
@@ -2127,8 +2151,8 @@ class RecallRefiner(nn.Module):
 
 Pulse = LearnedPulse
 
-from .stateful_recall import StatefulRecall
-from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
+from .stateful_recall import StatefulRecall  # noqa: E402
+from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput  # noqa: E402
 __all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "Recall", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
 
 
