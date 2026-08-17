@@ -187,7 +187,7 @@ class _ComponentBundle(nn.Module):
 
 
 class ARTIPretrained:
-    """Stateful ``scan -> plan -> apply -> fit -> export`` workflow."""
+    """Stateful ``scan -> plan -> apply -> fit -> export -> detach`` workflow."""
 
     def __init__(
         self,
@@ -483,6 +483,15 @@ class ARTIPretrained:
         }
         lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return PretrainedExportResult(saved=saved, plan_path=plan_path, lock_path=lock_path)
+
+    def detach(self) -> Any:
+        """Remove all ARTI insertions and restore the provider model in place."""
+
+        for builder in self.projects.values():
+            builder.detach()
+        self.applied = False
+        self.fit_result = None
+        return self.model
 
     def load_weights(
         self,

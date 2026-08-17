@@ -37,7 +37,7 @@ def _sha256(path):
 @pytest.mark.parametrize(
     "module,inputs,output_shape",
     [
-        (Half().eval(), {"x": torch.randn(2, 5, 4)}, ["batch", "tokens", 4]),
+        (Half(stochastic=False).eval(), {"x": torch.randn(2, 5, 4)}, ["batch", "tokens", 4]),
         (Fold(k=3, dim=4).eval(), {"x": torch.randn(2, 5, 4), "mask": torch.ones(2, 5)}, ["batch", 3, 4]),
         (LearnedPulse(k=3, dim=4).eval(), {"x": torch.randn(2, 5, 4), "q": torch.rand(2, 5, 1), "mask": torch.ones(2, 5)}, ["batch", 3, 4]),
     ],
@@ -175,9 +175,9 @@ def test_web_export_requires_eval_float32_and_declared_inputs(tmp_path):
     with pytest.raises(ValueError, match="module.eval"):
         export(Half(), tmp_path / "training", example_inputs={"x": torch.randn(1, 3, 4)})
     with pytest.raises(ValueError, match="float32"):
-        export(Half().eval(), tmp_path / "dtype", example_inputs={"x": torch.randn(1, 3, 4).double()})
+        export(Half(stochastic=False).eval(), tmp_path / "dtype", example_inputs={"x": torch.randn(1, 3, 4).double()})
     with pytest.raises(TypeError, match="unexpected keyword argument"):
-        export(Half().eval(), tmp_path / "q", example_inputs={"x": torch.randn(1, 3, 4), "q": torch.ones(1, 3)})
+        export(Half(stochastic=False).eval(), tmp_path / "q", example_inputs={"x": torch.randn(1, 3, 4), "q": torch.ones(1, 3)})
 
 
 def test_web_contract_schema_and_generated_types_are_python_owned():

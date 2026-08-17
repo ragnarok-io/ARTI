@@ -249,7 +249,10 @@ def test_assembly_is_canonical_and_remove_rebuilds_fresh_result(tmp_path: Path) 
     )
 
     probe = torch.randn(2, 3, 6)
-    assert torch.equal(rebuilt_ac(probe), fresh_ac(probe))
+    torch.manual_seed(71)
+    expected = rebuilt_ac(probe)
+    torch.manual_seed(71)
+    assert torch.equal(expected, fresh_ac(probe))
 
 
 def test_grouped_recall_assembly_concatenates_values_keys_and_groups(tmp_path: Path) -> None:

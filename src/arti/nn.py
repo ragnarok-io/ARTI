@@ -12,13 +12,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .functional import half
+from .functional import _half_survival, half
 from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
 
 if TYPE_CHECKING:
     from .recall_manifest import RecallFormulaManifest
     from .usage import Layer
+
+
+def _half_inverse_base(base: float) -> float:
+    eps = 1e-6
+    clipped = min(max(float(base), eps), 1.0 - eps)
+    normalized = min(max((clipped - eps) / (1.0 - 2.0 * eps), eps), 1.0 - eps)
+    return math.log(normalized / (1.0 - normalized))
+
+
+def _half_inverse_softplus(value: float) -> float:
+    target = max(float(value) - 1e-6, 1e-6)
+    return target if target > 20.0 else math.log(math.expm1(target))
+
+
+def _half_repr_value(value: float | Tensor) -> float:
+    return float(value.detach().cpu()) if isinstance(value, Tensor) else float(value)
 
 
 @lru_cache(maxsize=1)
@@ -87,6 +103,11 @@ class Half(nn.Module):
     ``threshold`` fade by ``base ** D`` where ``D`` is the scaled salience
     deficit. With the default ``base=0.5``, each unit of insufficient salience
     halves feature survival.
+
+    ``stochastic`` selects sampled Bernoulli survival; ``learnable`` makes the
+    salience curve parameters trainable. These are independent options and
+    neither one follows the module's ``train``/``eval`` state. A learnable
+    stochastic Half uses a straight-through estimator for its survival curve.
     """
 
     def __init__(
@@ -95,7 +116,8 @@ class Half(nn.Module):
         base: float = 0.5,
         scale: float = 1.0,
         *,
-        stochastic: bool = False,
+        stochastic: bool = True,
+        learnable: bool = False,
     ) -> None:
         super().__init__()
         if not math.isfinite(threshold):
@@ -104,10 +126,46 @@ class Half(nn.Module):
             raise ValueError("base must be in the interval (0, 1]")
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("scale must be positive")
-        self.threshold = float(threshold)
-        self.base = float(base)
-        self.scale = float(scale)
         self.stochastic = bool(stochastic)
+        self.learnable = bool(learnable)
+        self._threshold_init = float(threshold)
+        self._base_init = float(base)
+        self._scale_init = float(scale)
+        if self.learnable:
+            self._threshold = nn.Parameter(torch.tensor(float(threshold)))
+            self._base_logit = nn.Parameter(torch.tensor(_half_inverse_base(base)))
+            self._scale_raw = nn.Parameter(torch.tensor(_half_inverse_softplus(scale)))
+        else:
+            self._threshold_value = float(threshold)
+            self._base_value = float(base)
+            self._scale_value = float(scale)
+
+    @property
+    def threshold(self) -> float | Tensor:
+        return self._threshold if self.learnable else self._threshold_value
+
+    @property
+    def base(self) -> float | Tensor:
+        if not self.learnable:
+            return self._base_value
+        eps = 1e-6
+        return eps + (1.0 - 2.0 * eps) * torch.sigmoid(self._base_logit)
+
+    @property
+    def scale(self) -> float | Tensor:
+        if not self.learnable:
+            return self._scale_value
+        return F.softplus(self._scale_raw) + 1e-6
+
+    def survival(self, x: Tensor) -> Tensor:
+        """Return the differentiable survival probability ``q(x)``."""
+
+        return _half_survival(
+            x,
+            threshold=self.threshold,
+            base=self.base,
+            scale=self.scale,
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         return half(
@@ -116,13 +174,19 @@ class Half(nn.Module):
             base=self.base,
             scale=self.scale,
             stochastic=self.stochastic,
-            training=self.training,
+            straight_through=self.learnable,
         )
 
     def extra_repr(self) -> str:
-        args = [f"threshold={self.threshold:g}", f"base={self.base:g}", f"scale={self.scale:g}"]
-        if self.stochastic:
-            args.append("stochastic=True")
+        args = [
+            f"threshold={_half_repr_value(self.threshold):g}",
+            f"base={_half_repr_value(self.base):g}",
+            f"scale={_half_repr_value(self.scale):g}",
+        ]
+        if not self.stochastic:
+            args.append("stochastic=False")
+        if self.learnable:
+            args.append("learnable=True")
         return ", ".join(args)
 
 

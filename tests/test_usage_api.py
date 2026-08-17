@@ -100,6 +100,7 @@ def test_progressive_layer_arti_st_roundtrip(tmp_path) -> None:
     selected = arti.profile("recall", recall_slots=6)
     source = ann.Layer(8, features=selected).eval()
     x = torch.randn(2, 4, 8)
+    torch.manual_seed(91)
     expected = source(x).y
     path = tmp_path / "progressive.arti.st"
 
@@ -108,4 +109,5 @@ def test_progressive_layer_arti_st_roundtrip(tmp_path) -> None:
     result = arti.load(path, model=restored)
 
     assert result.manifest["architecture"]["config"]["features"] == selected.to_dict()
+    torch.manual_seed(91)
     assert torch.allclose(restored(x).y, expected)

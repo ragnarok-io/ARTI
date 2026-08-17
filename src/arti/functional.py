@@ -8,25 +8,13 @@ import torch
 from torch import Tensor
 
 
-def half(
+def _half_survival(
     x: Tensor,
     *,
-    threshold: float | Tensor = 1.0,
-    base: float | Tensor = 0.5,
-    scale: float | Tensor = 1.0,
-    stochastic: bool = False,
-    training: bool = False,
-    generator: torch.Generator | None = None,
+    threshold: float | Tensor,
+    base: float | Tensor,
+    scale: float | Tensor,
 ) -> Tensor:
-    """Salience-conditioned Half activation.
-
-    ``half`` computes elementwise salience as ``abs(x)``, converts insufficient
-    salience into ``D = relu((threshold - salience) / scale)``, then applies
-    ``q = base ** D``. Deterministic mode returns ``q * x``. In stochastic
-    training mode, ``q`` is used as the survival probability and dropped
-    features are set to zero without inverted-dropout rescaling.
-    """
-
     if isinstance(base, Tensor):
         if torch.any(~torch.isfinite(base) | (base <= 0) | (base > 1)):
             raise ValueError("base must be in the interval (0, 1]")
@@ -52,21 +40,49 @@ def half(
     scale_value = scale.to(device=x.device, dtype=x.dtype) if isinstance(scale, Tensor) else scale
     deficit = torch.relu((threshold_value - x.abs()) / scale_value)
     if not isinstance(base, Tensor) and base == 1.0:
-        survival = torch.ones_like(deficit)
-    elif not isinstance(base, Tensor) and base == 0.5:
-        survival = torch.exp(-math.log(2.0) * deficit)
-    elif not isinstance(base, Tensor):
-        survival = torch.exp(deficit * math.log(base))
-    else:
-        base_t = base.to(device=x.device, dtype=x.dtype)
-        survival = torch.pow(base_t, deficit)
-    if stochastic and training:
+        return torch.ones_like(deficit)
+    if not isinstance(base, Tensor) and base == 0.5:
+        return torch.exp(-math.log(2.0) * deficit)
+    if not isinstance(base, Tensor):
+        return torch.exp(deficit * math.log(base))
+    base_t = base.to(device=x.device, dtype=x.dtype)
+    return torch.pow(base_t, deficit)
+
+
+def half(
+    x: Tensor,
+    *,
+    threshold: float | Tensor = 1.0,
+    base: float | Tensor = 0.5,
+    scale: float | Tensor = 1.0,
+    stochastic: bool = True,
+    straight_through: bool = False,
+    generator: torch.Generator | None = None,
+) -> Tensor:
+    """Salience-conditioned Half activation.
+
+    ``half`` computes elementwise salience as ``abs(x)``, converts insufficient
+    salience into ``D = relu((threshold - salience) / scale)``, then applies
+    ``q = base ** D``. Deterministic mode returns ``q * x``. In stochastic
+    mode, ``q`` is used as the survival probability and dropped features are
+    set to zero without inverted-dropout rescaling. The stochastic choice is
+    explicit and is not tied to a module's ``train``/``eval`` state.
+
+    ``straight_through`` keeps the sampled forward value while using the
+    differentiable survival probability in the backward pass. It is useful
+    when the salience curve is learnable.
+    """
+
+    survival = _half_survival(x, threshold=threshold, base=base, scale=scale)
+    if stochastic:
         try:
             mask = torch.bernoulli(survival, generator=generator)
         except TypeError:
             if generator is not None:
                 raise
             mask = torch.bernoulli(survival)
+        if straight_through:
+            mask = mask + survival - survival.detach()
         return mask * x
     return survival * x
 

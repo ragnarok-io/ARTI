@@ -883,6 +883,7 @@ def test_fit_uses_registered_formula_and_records_artifact_contract(
     torch.testing.assert_close(source_model(sample), expected_base, rtol=0.0, atol=0.0)
 
     source_wrapper.adapter.layer.state.set_state_input_retention(0.375)
+    torch.manual_seed(101)
     expected = source_model(sample)
     assert not torch.equal(expected, expected_base)
     artifact = source.export(tmp_path / "formula-recall.pt")
@@ -895,6 +896,7 @@ def test_fit_uses_registered_formula_and_records_artifact_contract(
     assert isinstance(fresh_wrapper, ARTIAdapterWrapper)
     assert isinstance(fresh_wrapper.adapter.layer.state.recall.formula, FitRecallFormula)
     assert fresh_wrapper.adapter.layer.state.state_input_retention == 0.375
+    torch.manual_seed(101)
     torch.testing.assert_close(fresh(sample), expected)
 
     incompatible = nn.Sequential(nn.Linear(8, 8))
@@ -972,6 +974,7 @@ def test_direct_recall_artifact_rehydrates_without_output_bridge(
     assert isinstance(source_wrapper, ARTIAdapterWrapper)
     with torch.no_grad():
         source_wrapper.adapter.layer.state.recall.bank.normal_(std=0.02)
+    torch.manual_seed(102)
     expected = source_model(sample)
     artifact = source.export(tmp_path / "direct-recall.pt")
 
@@ -983,6 +986,7 @@ def test_direct_recall_artifact_rehydrates_without_output_bridge(
     assert isinstance(fresh_wrapper, ARTIAdapterWrapper)
     assert fresh_wrapper.adapter.direct_recall is True
     assert not hasattr(fresh_wrapper.adapter, "out")
+    torch.manual_seed(102)
     torch.testing.assert_close(fresh(sample), expected)
 
 

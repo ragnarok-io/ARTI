@@ -223,6 +223,8 @@ def _validate_supported_mode(module: nn.Module) -> None:
     if isinstance(module, Half):
         if module.stochastic:
             raise ValueError("stochastic Half is not supported by Web export")
+        if module.learnable:
+            raise ValueError("learnable Half is not supported by Web export")
         return
     if isinstance(module, Fold):
         if module.dim is None:

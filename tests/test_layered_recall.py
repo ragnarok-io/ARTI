@@ -54,8 +54,10 @@ def test_local_trajectory_loss_accepts_per_layer_baseline_scales() -> None:
     clean = torch.randn(2, 4, 8)
     corrupt = clean.clone()
     corrupt[:, 1] = 0
+    torch.manual_seed(61)
     raw = arti.layered_recall_trajectory_loss(model, clean, corrupt)
     scales = {path: value.detach() for path, value in raw.per_layer_mse.items()}
+    torch.manual_seed(61)
     normalized = arti.layered_recall_trajectory_loss(model, clean, corrupt, layer_scales=scales)
 
     assert torch.allclose(normalized.repair_loss, torch.ones_like(normalized.repair_loss), atol=1e-5)

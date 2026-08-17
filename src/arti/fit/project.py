@@ -42,11 +42,13 @@ from .insertion import (
     AdapterInsertionPlan,
     InsertionSpec,
     adapters_enabled,
+    get_parent_module,
     insert_adapters,
     iter_adapter_wrappers,
     mark_recall_state_banks_calibrated,
     reset_recall_queries,
     plan_adapters,
+    set_child_module,
 )
 from .objectives import infer_objectives, resolve_objectives
 from .plugins import default_strategy_for, get_plugin, plugin_report
@@ -73,6 +75,7 @@ class ARTIProject:
         self.default_max_extra_params: int | str | None = None
         self.inserted = ()
         self.insert_attempted = False
+        self._prior_trainability: dict[str, bool] | None = None
         self.insertion_plan: AdapterInsertionPlan | None = None
         self.fit_steps = 0
         self.runtime_causal = False
@@ -385,6 +388,10 @@ class ARTIProject:
         boundary_mask_key: str | None = None,
         require_runtime_context: bool = False,
     ) -> "ARTIProject":
+        if self.inserted:
+            raise RuntimeError(
+                "ARTI adapters are already inserted; call detach() before inserting again"
+            )
         if self.scan_report is None:
             self.scan()
         default_where = default_strategy_for(self.plugins)
@@ -444,6 +451,10 @@ class ARTIProject:
             boundary_mask_key=boundary_mask_key,
             require_runtime_context=require_runtime_context,
         )
+        self._prior_trainability = {
+            name: parameter.requires_grad
+            for name, parameter in self.model.named_parameters()
+        }
         if freeze_base:
             for param in self.model.parameters():
                 param.requires_grad = False
@@ -458,6 +469,33 @@ class ARTIProject:
         self.insertion_plan = None
         self.insert_attempted = True
         return self
+
+    def detach(self) -> nn.Module:
+        """Remove this project's adapters and restore the host model in place."""
+
+        if not self.inserted:
+            return self.model
+        for item in self.inserted:
+            parent, child_name = get_parent_module(self.model, item.module_path)
+            child = (
+                parent[int(child_name)]
+                if child_name.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList))
+                else getattr(parent, child_name)
+            )
+            if not isinstance(child, ARTIAdapterWrapper):
+                raise RuntimeError(
+                    f"ARTI adapter at {item.module_path!r} was replaced outside ARTI"
+                )
+            set_child_module(parent, child_name, child.base)
+
+        if self._prior_trainability is not None:
+            for name, parameter in self.model.named_parameters():
+                if name in self._prior_trainability:
+                    parameter.requires_grad_(self._prior_trainability[name])
+        self.inserted = ()
+        self.insert_attempted = False
+        self.applied_artifact = None
+        return self.model
 
     def plan_insert(
         self,

@@ -32,6 +32,7 @@ def test_grouped_recall_state_dict_round_trip_is_exact(tmp_path):
     )
     layer = ARTILayer(**kwargs).eval()
     x = torch.randn(2, 5, 8)
+    torch.manual_seed(81)
     expected = layer(x).y
     path = tmp_path / "grouped-recall.pt"
     torch.save(layer.state_dict(), path)
@@ -39,6 +40,7 @@ def test_grouped_recall_state_dict_round_trip_is_exact(tmp_path):
     loaded = ARTILayer(**kwargs).eval()
     loaded.load_state_dict(torch.load(path, weights_only=True))
 
+    torch.manual_seed(81)
     assert torch.equal(loaded(x).y, expected)
 
 

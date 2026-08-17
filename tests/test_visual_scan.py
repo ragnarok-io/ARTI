@@ -66,11 +66,14 @@ def test_visual_scan_is_batch_mask_and_gradient_compatible() -> None:
 def test_visual_scan_is_invariant_to_paired_frame_order_without_persistence() -> None:
     cfg = config(persistence_steps=0)
     scan = arti.VisualScan(cfg).eval()
+    scan.pulse.half_act.stochastic = False
     frames = torch.randn(2, 4, 1, 8, 8)
     shifts = torch.tensor(cfg.shifts)
     order = torch.tensor([2, 0, 3, 1])
 
+    torch.manual_seed(101)
     direct = scan(frames, shifts)
+    torch.manual_seed(101)
     shuffled = scan(frames[:, order], shifts[order])
 
     assert torch.allclose(direct, shuffled, atol=1e-6, rtol=1e-5)
@@ -140,6 +143,7 @@ def test_visual_scan_config_and_arti_st_roundtrip(tmp_path) -> None:
     model = arti.VisualScan(cfg).eval()
     frames = torch.randn(2, 4, 1, 8, 8)
     shifts = torch.tensor(cfg.shifts)
+    torch.manual_seed(102)
     expected = model(frames, shifts)
     path = tmp_path / "visual-scan.arti.st"
 
@@ -147,6 +151,7 @@ def test_visual_scan_config_and_arti_st_roundtrip(tmp_path) -> None:
     restored = arti.VisualScan.from_config(cfg.to_dict()).eval()
     arti.load(path, model=restored)
 
+    torch.manual_seed(102)
     assert torch.allclose(restored(frames, shifts), expected)
 
 

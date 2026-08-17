@@ -74,6 +74,7 @@ def test_train_save_reload_and_forward_consistency(tmp_path) -> None:
     loss.backward()
     optimizer.step()
     model.eval()
+    torch.manual_seed(7)
     expected = model(x).detach()
     artifact = tmp_path / "tiny.recall.arti.st"
     model.arti.save(artifact)
@@ -83,6 +84,7 @@ def test_train_save_reload_and_forward_consistency(tmp_path) -> None:
     arti.ARTI.load(restored, artifact)
     restored.eval()
 
+    torch.manual_seed(7)
     assert torch.equal(expected, restored(x))
     assert restored.arti.summary().trainable_parameters == model.arti.summary().trainable_parameters
     with pytest.raises(ValueError, match="topology"):

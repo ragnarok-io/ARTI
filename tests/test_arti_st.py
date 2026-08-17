@@ -23,11 +23,13 @@ def test_arti_st_core_layer_round_trip_preserves_output(tmp_path: Path) -> None:
     model = core_layer()
     x = torch.randn(2, 4, 6)
     coord = torch.randn(2, 4, 2)
+    torch.manual_seed(301)
     expected = model(x, coord=coord).y.detach()
 
     saved = arti.save(model, tmp_path / "arti.st")
     restored = core_layer()
     loaded = arti.load(saved.weights_path, model=restored)
+    torch.manual_seed(301)
     actual = restored(x, coord=coord).y.detach()
 
     assert torch.allclose(actual, expected)

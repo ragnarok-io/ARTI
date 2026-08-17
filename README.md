@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.0 is a **Stable Candidate**. The 3.x surface is the current
+Version 3.0.2 is a **Stable Candidate**. The 3.x surface is the current
 Formula contract line; it intentionally does not preserve the 2.x Formula
 symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -47,6 +47,19 @@ pnpm add @arti-fit/web@alpha
 ```
 
 ## What Is New In 3.0
+
+The 3.0.2 maintenance release completes the explicit Half survival policy and
+keeps the reversible pretrained-model workflow: after `fit` and `arti.st`
+export, a fresh model can reload the artifact and the workflow can `detach()`
+without losing the native model class, methods, or original trainability
+settings.
+
+`Half` now makes sampling an explicit activation option. `Half(stochastic=True)`
+(the default) samples each feature using its survival probability in both train
+and eval modes; `Half(stochastic=False)` returns the deterministic `q * x`
+path. Set `learnable=True` to train the threshold, base, and scale of the
+survival curve. The learned q curve is available through `half.survival(x)`;
+the stochastic learned path uses a straight-through estimator.
 
 ARTI 3.0 makes the current Recall architecture the public default. Recall now
 uses a fixed query basis, host-dimensional Bank values, versioned Formula
@@ -107,6 +120,27 @@ project.insert()
 This is not a model-specific patch list. ARTI temporarily packs the selected
 tensor into `[B, D]` or `[B, N, D]`, applies the configured tensor layer, and
 restores the original rank and output container.
+
+For provider-backed pretrained workflows, keep the lifecycle explicit:
+
+```python
+workflow = arti.pretrained(model, provider="transformers")
+workflow.scan(sample_batch).plan(where="mlp", scale="tiny")
+workflow.apply()
+workflow.fit(train_data)
+exported = workflow.export("arti.st")
+
+restored = arti.pretrained(fresh_model, provider="transformers")
+restored.scan(sample_batch).plan(where="mlp", scale="tiny")
+restored.apply()
+restored.load_weights(exported.saved.weights_path)
+tokens = restored.generate(**inputs)
+restored.detach()
+```
+
+`detach()` removes only the adapters owned by that workflow, restores the
+pre-attachment `requires_grad` settings, and leaves the host model's native
+API available.
 
 ## Build Reusable Recall Experts
 
@@ -299,7 +333,10 @@ print(info["recall_steps_executed"])
 ```
 
 `Recall` routes trainable Bank factors and applies a versioned formula to the
-current state. Its deterministic default uses `Half` on each proposed update.
+current state. Its default activation is the public `Half` policy; choose
+`activation="none"` to disable it, or use an explicit `Half(stochastic=False)`
+when a deterministic survival path is required. Module `train()` / `eval()`
+does not silently change the selected Half policy.
 Built-in formulas use canonical IDs: `arti/delta@1`, `arti/affine@1`, and
 `arti/state@1`. Legacy short names are rejected rather than silently mapped to
 a different implementation.

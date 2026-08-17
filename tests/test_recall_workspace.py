@@ -141,7 +141,11 @@ def test_recall_workspace_state_dict_round_trip() -> None:
     target.load_state_dict(source.state_dict())
     queries = torch.randn(2, 4, 4)
     candidates = torch.randn(2, 7, 4)
-    torch.testing.assert_close(source(queries, candidates), target(queries, candidates))
+    torch.manual_seed(72)
+    expected = source(queries, candidates)
+    torch.manual_seed(72)
+    actual = target(queries, candidates)
+    torch.testing.assert_close(expected, actual)
 
 
 def test_recall_workspace_can_condition_unfold_on_current_queries() -> None:

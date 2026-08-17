@@ -11,7 +11,7 @@ import arti.torch as arti_torch
 
 def test_half_function_matches_salience_formula() -> None:
     x = torch.tensor([-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
-    y = F.half(x)
+    y = F.half(x, stochastic=False)
     deficit = torch.relu(1.0 - x.abs())
     expected = torch.pow(torch.tensor(0.5), deficit) * x
     assert torch.allclose(y, expected)
@@ -20,7 +20,7 @@ def test_half_function_matches_salience_formula() -> None:
 
 
 def test_half_module_is_activation_like_and_stateless() -> None:
-    layer = arti_nn.Half()
+    layer = arti_nn.Half(stochastic=False)
     assert list(layer.parameters()) == []
     x = torch.randn(3, 4, requires_grad=True)
     y = layer(x)
@@ -63,22 +63,51 @@ def test_half_rejects_nonfinite_tensor_parameters(
         arti_nn.Half(**kwargs)(torch.ones(2, 3))
 
 
-def test_half_stochastic_only_applies_in_training_mode() -> None:
-    x = torch.full((4096,), 0.0)
+def test_half_stochastic_mode_is_independent_of_module_mode() -> None:
+    weak = torch.full((4096,), 0.25)
     layer = arti_nn.Half(stochastic=True)
-    layer.train()
-    train_y = layer(x + 1.0)
-    assert torch.equal(train_y, x + 1.0)
 
-    weak = torch.full((4096,), 0.0)
-    train_weak = layer(weak + 0.25)
-    survived = (train_weak != 0).float().mean().item()
+    torch.manual_seed(19)
+    layer.train()
+    train_y = layer(weak)
+    torch.manual_seed(19)
+    layer.eval()
+    eval_y = layer(weak)
+
+    assert torch.equal(train_y, eval_y)
+    survived = (train_y != 0).float().mean().item()
     assert 0.45 < survived < 0.75
 
-    layer.eval()
-    eval_y = layer(weak + 0.25)
-    expected = F.half(weak + 0.25)
-    assert torch.allclose(eval_y, expected)
+
+def test_half_learnable_survival_curve_has_parameters_and_gradients() -> None:
+    layer = arti_nn.Half(stochastic=False, learnable=True)
+    assert {name for name, _ in layer.named_parameters()} == {
+        "_threshold",
+        "_base_logit",
+        "_scale_raw",
+    }
+    x = torch.full((8, 4), 0.25, requires_grad=True)
+    q = layer.survival(x)
+    assert torch.isfinite(q).all()
+    q.mean().backward()
+    assert all(parameter.grad is not None for parameter in layer.parameters())
+    assert all(torch.isfinite(parameter.grad).all() for parameter in layer.parameters())
+
+
+def test_half_learnable_stochastic_mode_uses_surrogate_gradient() -> None:
+    layer = arti_nn.Half(stochastic=True, learnable=True)
+    x = torch.full((8, 4), 0.25, requires_grad=True)
+    torch.manual_seed(23)
+    layer(x).sum().backward()
+    assert all(parameter.grad is not None for parameter in layer.parameters())
+
+
+def test_half_learnable_parameters_round_trip() -> None:
+    layer = arti_nn.Half(threshold=0.75, base=0.25, scale=0.5, stochastic=False, learnable=True)
+    restored = arti_nn.Half(threshold=0.75, base=0.25, scale=0.5, stochastic=False, learnable=True)
+    restored.load_state_dict(layer.state_dict())
+    x = torch.randn(3, 4)
+    assert torch.equal(restored.survival(x), layer.survival(x))
 
 
 def test_half_public_namespaces() -> None:

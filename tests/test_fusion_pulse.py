@@ -14,7 +14,9 @@ def test_fusion_pulse_stacked_and_concat_paths_are_equivalent() -> None:
     sources = tuple(torch.randn(2, 4, 6) for _ in range(3))
     masks = tuple(torch.rand(2, 4) > 0.2 for _ in range(3))
 
+    torch.manual_seed(310)
     stacked = fusion(torch.stack(sources, dim=1), mask=torch.stack(masks, dim=1))
+    torch.manual_seed(310)
     concatenated = fusion.concat(*sources, masks=masks)
 
     assert stacked.shape == (2, 5, 6)
@@ -171,7 +173,11 @@ def test_fusion_pulse_state_dict_round_trip() -> None:
     target.load_state_dict(source.state_dict())
     pulses = torch.randn(2, 4, 3, 4)
 
-    torch.testing.assert_close(source(pulses), target(pulses))
+    torch.manual_seed(34)
+    expected = source(pulses)
+    torch.manual_seed(34)
+    actual = target(pulses)
+    torch.testing.assert_close(expected, actual)
 
 
 def test_fusion_pulse_device_and_dtype_smoke() -> None:
