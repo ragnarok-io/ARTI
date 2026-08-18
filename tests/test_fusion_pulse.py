@@ -8,6 +8,28 @@ import arti.torch as arti_torch
 from arti.nn import FusionPulse
 
 
+def test_fusion_pulse_is_deterministic_by_default() -> None:
+    torch.manual_seed(30)
+    fusion = FusionPulse(k=3, dim=4, hidden_dim=8).eval()
+    pulses = torch.randn(2, 4, 5, 4)
+
+    torch.manual_seed(301)
+    first = fusion(pulses)
+    torch.manual_seed(302)
+    second = fusion(pulses)
+
+    assert fusion.half_stochastic is False
+    assert fusion.half_act.stochastic is False
+    torch.testing.assert_close(first, second)
+
+
+def test_fusion_pulse_stochastic_half_requires_explicit_opt_in() -> None:
+    fusion = FusionPulse(k=3, dim=4, half_stochastic=True)
+
+    assert fusion.half_stochastic is True
+    assert fusion.half_act.stochastic is True
+
+
 def test_fusion_pulse_stacked_and_concat_paths_are_equivalent() -> None:
     torch.manual_seed(31)
     fusion = FusionPulse(k=5, dim=6).eval()

@@ -17,6 +17,11 @@ from safetensors.torch import load_file, save_file
 from torch import Tensor
 
 from ._version import __version__
+from .component_graph import (
+    component_graph as build_component_graph,
+    validate_component_graph,
+    verify_component_graph,
+)
 
 
 ARTI_ST_FORMAT = "arti.st"
@@ -383,6 +388,9 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("arti.st weight_scope is invalid")
     if not isinstance(manifest.get("architecture"), dict):
         raise ValueError("arti.st architecture must be a dictionary")
+    component_graph_value = manifest["architecture"].get("component_graph")
+    if component_graph_value is not None:
+        validate_component_graph(component_graph_value)
     weights = manifest.get("weights")
     if not isinstance(weights, dict) or not isinstance(weights.get("tensor_count"), int):
         raise ValueError("arti.st weights record is invalid")
@@ -462,6 +470,7 @@ def _architecture_payload(model: nn.Module, config: Mapping[str, Any] | None) ->
         "module": model.__class__.__module__,
         "class_name": model.__class__.__qualname__,
         "config": _json_normalize({} if resolved is None else resolved),
+        "component_graph": build_component_graph(model),
     }
 
 
@@ -477,6 +486,9 @@ def _verify_model_architecture(model: nn.Module, architecture: Mapping[str, Any]
             "arti.st architecture does not match target model: "
             f"expected {expected_module}.{expected_class}, got {actual_module}.{actual_class}"
         )
+    component_graph_value = architecture.get("component_graph")
+    if component_graph_value is not None:
+        verify_component_graph(model, component_graph_value)
 
 
 def _extract_legacy_state(payload: Any) -> tuple[dict[str, Tensor], str, str | None]:

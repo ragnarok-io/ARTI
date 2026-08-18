@@ -14,6 +14,24 @@ neural-network-native mechanisms. ``Pulse`` is the default learned pulse layer;
 
 from ._version import __version__
 from .backend import available_backends, planned_backends
+from .component_graph import (
+    COMPONENT_GRAPH_FORMAT,
+    COMPONENT_GRAPH_VERSION,
+    ComponentGraphError,
+    component_closure_fingerprint,
+    component_graph,
+    validate_component_graph,
+    verify_component_graph,
+)
+from .component_registry import (
+    ComponentRef,
+    component_catalog,
+    component_ref,
+    component_spec,
+    get_component_registry,
+    register_component,
+    resolve_component,
+)
 from .attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIExpertSet, ARTILayerInfo, discover_layers
 from .attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
 from .attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, recall_alignment_objective, resolve_attachment_objective
@@ -170,6 +188,20 @@ __all__ = [
     "pareto_layered_recall",
     "screen_layered_recall_candidate",
     "Layer",
+    "COMPONENT_GRAPH_FORMAT",
+    "COMPONENT_GRAPH_VERSION",
+    "ComponentGraphError",
+    "component_closure_fingerprint",
+    "component_graph",
+    "validate_component_graph",
+    "verify_component_graph",
+    "ComponentRef",
+    "component_catalog",
+    "component_ref",
+    "component_spec",
+    "get_component_registry",
+    "register_component",
+    "resolve_component",
     "FeatureConfig",
     "features",
     "profile",

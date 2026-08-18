@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from arti.nn import Fold, Half, LearnedPulse, StatefulRecall
+from arti.nn import Fold, FusionPulse, Half, LearnedPulse, StatefulRecall
 from arti.web import ARTIWebTensorMetadata, artifact_schema, export, export_stateful_recall, render_artifact_typescript, render_typescript_contract, stateful_artifact_schema
 
 
@@ -169,6 +169,12 @@ def test_generated_artifact_typescript_fixture_is_current_and_compiled_by_web_bu
 def test_web_export_rejects_unsupported_modes(tmp_path, module, message):
     with pytest.raises(ValueError, match=message):
         export(module, tmp_path / "bad", example_inputs={"x": torch.randn(1, 3, 4)})
+
+
+def test_web_export_rejects_stochastic_fusion_pulse(tmp_path):
+    module = FusionPulse(k=2, dim=4, half_stochastic=True).eval()
+    with pytest.raises(ValueError, match="FusionPulse.*half_stochastic=False"):
+        export(module, tmp_path / "bad-fusion", example_inputs={"pulses": torch.randn(1, 2, 3, 4)})
 
 
 def test_web_export_requires_eval_float32_and_declared_inputs(tmp_path):

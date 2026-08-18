@@ -69,7 +69,7 @@ def generate(root: Path) -> None:
     q5 = torch.sigmoid(torch.randn(2, 5, 1))
     q7 = torch.sigmoid(torch.randn(3, 7, 1))
 
-    _write_fixture(root, "half", Half().eval(), {"x": x5}, {"x": x7}, {"atol": 1e-5, "rtol": 1e-5})
+    _write_fixture(root, "half", Half(stochastic=False).eval(), {"x": x5}, {"x": x7}, {"atol": 1e-5, "rtol": 1e-5})
     _write_fixture(root, "fold-salience", Fold(k=3, dim=4).eval(), {"x": x5, "mask": mask5}, {"x": x7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
     _write_fixture(root, "fold-q", Fold(k=3, dim=4).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})
     _write_fixture(root, "learned-pulse", LearnedPulse(k=3, dim=4, hidden_dim=6).eval(), {"x": x5, "q": q5, "mask": mask5}, {"x": x7, "q": q7, "mask": mask7}, {"atol": 1e-4, "rtol": 1e-3})

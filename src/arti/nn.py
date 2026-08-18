@@ -1420,6 +1420,7 @@ class FusionPulse(nn.Module):
         hidden_dim: int | None = None,
         salience_heads: int = 1,
         half_threshold: float = 4.0,
+        half_stochastic: bool = False,
         salience_scale: float = 8.0,
         similarity_threshold: float = 0.8,
         representative_target: float = 0.9,
@@ -1459,6 +1460,7 @@ class FusionPulse(nn.Module):
         self.hidden_dim = hidden
         self.salience_heads = int(salience_heads)
         self.half_threshold = float(half_threshold)
+        self.half_stochastic = bool(half_stochastic)
         self.salience_scale = float(salience_scale)
         self.similarity_threshold = float(similarity_threshold)
         self.representative_target = float(representative_target)
@@ -1482,7 +1484,7 @@ class FusionPulse(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, dim),
         )
-        self.half_act = Half(threshold=half_threshold)
+        self.half_act = Half(threshold=half_threshold, stochastic=self.half_stochastic)
         self.unfold = UnFold(
             dim=dim,
             exposed=k,

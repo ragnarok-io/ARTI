@@ -2,7 +2,7 @@
 
 ## Supported Version
 
-Security fixes are provided for the current public 1.x release line.
+Security fixes are provided for the current public 3.x release line.
 
 ## Trust Boundaries
 

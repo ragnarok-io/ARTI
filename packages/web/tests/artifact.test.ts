@@ -5,7 +5,7 @@ import { parseLock, parseManifest, sha256, verifyFile } from '../src/artifact.js
 Object.defineProperty(globalThis, 'crypto', {value: webcrypto});
 const hash = '0'.repeat(64);
 const manifest = {
-  format: 'arti.web', format_version: 2, package_version: '0.2.0',
+  format: 'arti.web', format_version: 2, package_version: 'test',
   producer: {backend: 'torch', graph_format: 'onnx'},
   module: {type: 'tests.GenericAffine', config: {}},
   runtime: {dtype: 'float32', opset_version: 18, execution_providers: ['webgpu', 'wasm']},

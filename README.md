@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.2 is a **Stable Candidate**. The 3.x surface is the current
+Version 3.0.3 is a **Stable Candidate**. The 3.x surface is the current
 Formula contract line; it intentionally does not preserve the 2.x Formula
 symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -48,7 +48,7 @@ pnpm add @arti-fit/web@alpha
 
 ## What Is New In 3.0
 
-The 3.0.2 maintenance release completes the explicit Half survival policy and
+The 3.0.3 maintenance release completes the explicit Half survival policy and
 keeps the reversible pretrained-model workflow: after `fit` and `arti.st`
 export, a fresh model can reload the artifact and the workflow can `detach()`
 without losing the native model class, methods, or original trainability
@@ -489,6 +489,24 @@ arti.migrate_pt("legacy-state.pt", "layer.arti.st")
 
 Artifact hashes detect modification relative to their lock files; they are not
 publisher signatures. Obtain models and weights from trusted sources.
+
+### Inspect Composite Components
+
+ARTI keeps composition as ordinary PyTorch composition. The optional component
+graph records nested ARTI modules, mount paths, typed application bindings,
+shared parameter objects, and a closure fingerprint without importing code from
+an artifact:
+
+```python
+graph = arti.component_graph(model)
+arti.validate_component_graph(graph)
+saved = arti.save(model, "model.arti.st")
+```
+
+The graph is an inspectable architecture contract; it does not change tensor
+execution or require a special composite base class. Unregistered PyTorch
+modules remain opaque nodes, and legacy `arti.st` manifests without a graph
+remain loadable.
 
 ## Public Modules
 

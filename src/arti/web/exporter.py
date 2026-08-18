@@ -247,6 +247,8 @@ def _validate_supported_mode(module: nn.Module) -> None:
             raise ValueError("Web export requires LearnedPulse dropout=0")
         return
     if isinstance(module, FusionPulse):
+        if module.half_act.stochastic:
+            raise ValueError("Web export requires FusionPulse half_stochastic=False")
         if module.unfold.hard_backend != "sort":
             raise ValueError("Web export currently supports FusionPulse with UnFold sort only")
 
@@ -499,6 +501,7 @@ def _module_config(module: nn.Module):
             "hidden_dim": module.hidden_dim,
             "salience_heads": module.salience_heads,
             "half_threshold": module.half_threshold,
+            "half_stochastic": module.half_act.stochastic,
             "salience_scale": module.salience_scale,
             "unfold_backend": module.unfold.hard_backend,
         }

@@ -2136,7 +2136,9 @@ class ARTIRecallWriteState(nn.Module):
         self.recall_activation = (
             nn.Identity()
             if config.recall_value_composition == "state"
-            else Half()
+            # The product write hotpath is a deterministic compiled kernel;
+            # stochastic survival remains available through public Half.
+            else Half(stochastic=False)
             if config.recall_activation == "half"
             else nn.Identity()
         )

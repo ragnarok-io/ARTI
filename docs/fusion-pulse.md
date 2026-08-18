@@ -16,6 +16,11 @@ z = fusion.concat(left, right)
 assert z.shape == (4, 8, 64)
 ```
 
+`FusionPulse` uses deterministic `Half` survival by default so repeated
+inference and Web export are reproducible. To explicitly opt into sampled
+survival for an experiment, set `half_stochastic=True`; stochastic FusionPulse
+is rejected by the Web exporter.
+
 The operation is:
 
 ```text
