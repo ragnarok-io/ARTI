@@ -38,6 +38,12 @@ export(
 )
 ```
 
+Composite modules such as `LearnedPulse` and `StatefulRecall` use the
+deterministic `Half` path by default so Python reference outputs and exported
+ONNX graphs are reproducible. `half_stochastic=True` is an explicit runtime
+experiment; the Web exporter rejects that mode because stochastic sampling
+cannot provide a deterministic cross-provider artifact contract.
+
 The directory contains `arti-web.json`, `model.onnx`, `artifact.ts`, and
 `arti-web.lock.json`. Python generates the typed client from the same named
 tensor contract and records its hash in the lock. The example inputs define the deployment contract. If

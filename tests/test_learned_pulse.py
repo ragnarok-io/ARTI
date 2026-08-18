@@ -16,6 +16,26 @@ def test_learned_pulse_can_disable_half_independently() -> None:
     assert output.shape == (2, 3, 8)
 
 
+def test_learned_pulse_half_is_deterministic_by_default() -> None:
+    pulse = arti_nn.LearnedPulse(k=3, dim=8)
+    assert pulse.half_stochastic is False
+    assert pulse.half_act.stochastic is False
+
+    x = torch.randn(2, 5, 8)
+    torch.manual_seed(1)
+    first = pulse(x)
+    torch.manual_seed(2)
+    second = pulse(x)
+
+    assert torch.equal(first, second)
+
+
+def test_learned_pulse_stochastic_half_requires_explicit_opt_in() -> None:
+    pulse = arti_nn.LearnedPulse(k=3, dim=8, half_stochastic=True)
+    assert pulse.half_stochastic is True
+    assert pulse.half_act.stochastic is True
+
+
 def test_learned_pulse_compacts_to_fixed_pulses() -> None:
     pulse = arti_nn.LearnedPulse(k=4)
     x = torch.randn(2, 10, 6)

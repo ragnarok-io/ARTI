@@ -22,6 +22,18 @@ def _identity_recall(dim=4, slots=4):
     return module
 
 
+def test_stateful_recall_half_is_deterministic_by_default():
+    module = StatefulRecall(4, slots=3)
+    assert module.half_stochastic is False
+    assert module.survival.stochastic is False
+
+
+def test_stateful_recall_stochastic_half_requires_explicit_opt_in():
+    module = StatefulRecall(4, slots=3, half_stochastic=True)
+    assert module.half_stochastic is True
+    assert module.survival.stochastic is True
+
+
 def test_stateful_recall_observes_then_recognizes_without_parameter_updates():
     module = _identity_recall()
     parameters_before = {name: value.detach().clone() for name, value in module.named_parameters()}

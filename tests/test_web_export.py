@@ -164,6 +164,7 @@ def test_generated_artifact_typescript_fixture_is_current_and_compiled_by_web_bu
         (Fold(k=2, dim=4, mode="attention").eval(), "mode='soft'"),
         (Fold(k=2).eval(), "explicit dim"),
         (LearnedPulse(k=2, dim=4, fold_topk=2).eval(), "topk"),
+        (LearnedPulse(k=2, dim=4, half_stochastic=True).eval(), "LearnedPulse.*half_stochastic=False"),
     ],
 )
 def test_web_export_rejects_unsupported_modes(tmp_path, module, message):
@@ -175,6 +176,12 @@ def test_web_export_rejects_stochastic_fusion_pulse(tmp_path):
     module = FusionPulse(k=2, dim=4, half_stochastic=True).eval()
     with pytest.raises(ValueError, match="FusionPulse.*half_stochastic=False"):
         export(module, tmp_path / "bad-fusion", example_inputs={"pulses": torch.randn(1, 2, 3, 4)})
+
+
+def test_stateful_web_export_rejects_stochastic_half(tmp_path):
+    module = StatefulRecall(4, slots=3, half_stochastic=True).eval()
+    with pytest.raises(ValueError, match="StatefulRecall.*half_stochastic=False"):
+        export_stateful_recall(module, tmp_path / "bad-stateful", example_x=torch.randn(1, 3, 4))
 
 
 def test_web_export_requires_eval_float32_and_declared_inputs(tmp_path):

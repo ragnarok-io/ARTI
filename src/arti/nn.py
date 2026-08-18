@@ -1228,6 +1228,7 @@ class LearnedPulse(nn.Module):
         fold_heads: int = 1,
         q_topk: int | None = None,
         use_half: bool = True,
+        half_stochastic: bool = False,
     ) -> None:
         super().__init__()
         if dim is not None and dim <= 0:
@@ -1253,6 +1254,7 @@ class LearnedPulse(nn.Module):
         self.fold_topk = None if fold_topk is None else int(fold_topk)
         self.q_topk = None if q_topk is None else int(q_topk)
         self.use_half = bool(use_half)
+        self.half_stochastic = bool(half_stochastic) if self.use_half else False
         self.temperature = 1.0
         self.eps = 1e-6
         self.dropout = nn.Dropout(dropout)
@@ -1284,7 +1286,7 @@ class LearnedPulse(nn.Module):
             self.assignment_head = None
             self.fold = Fold(k=k, dim=dim, hidden_dim=hidden_dim, dropout=dropout, mode=fold_mode, topk=fold_topk, heads=fold_heads)
 
-        self.half_act = Half() if self.use_half else nn.Identity()
+        self.half_act = Half(stochastic=self.half_stochastic) if self.use_half else nn.Identity()
         if refine and dim is not None and refine_mode == "mlp":
             self.refine = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
         elif refine and dim is not None:
@@ -1396,6 +1398,8 @@ class LearnedPulse(nn.Module):
             args.append(f"q_topk={self.q_topk}")
         if not self.use_half:
             args.append("use_half=False")
+        elif self.half_stochastic:
+            args.append("half_stochastic=True")
         return ", ".join(args)
 
 

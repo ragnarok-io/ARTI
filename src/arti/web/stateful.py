@@ -66,6 +66,8 @@ def export_stateful_recall(
         raise TypeError("module must be StatefulRecall")
     if module.training:
         raise ValueError("stateful Web export requires module.eval()")
+    if module.half_stochastic:
+        raise ValueError("stateful Web export requires StatefulRecall half_stochastic=False")
     if example_x.dtype != torch.float32 or example_x.device.type != "cpu":
         raise ValueError("stateful Web export requires CPU float32 example_x")
     if example_x.ndim != 3 or example_x.shape[-1] != module.dim:
@@ -117,7 +119,8 @@ def export_stateful_recall(
         "producer": {"backend": "torch", "graph_format": "onnx"},
         "module": {"type": f"{type(module).__module__}.{type(module).__qualname__}", "config": {
             "dim": module.dim, "slots": module.slots, "key_dim": module.key_dim,
-            "use_half": module.use_half, "write_rate": module.write_rate, "decay": module.decay, "learnable_dynamics": module.learnable_dynamics,
+            "use_half": module.use_half, "half_stochastic": module.half_stochastic,
+            "write_rate": module.write_rate, "decay": module.decay, "learnable_dynamics": module.learnable_dynamics,
         }},
         "runtime": {"dtype": "float32", "opset_version": opset_version, "execution_providers": ["webgpu", "wasm"]},
         "state": [

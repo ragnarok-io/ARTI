@@ -245,6 +245,8 @@ def _validate_supported_mode(module: nn.Module) -> None:
             raise ValueError("Web export does not support LearnedPulse topk modes")
         if module.dropout.p != 0:
             raise ValueError("Web export requires LearnedPulse dropout=0")
+        if module.half_stochastic:
+            raise ValueError("Web export requires LearnedPulse half_stochastic=False")
         return
     if isinstance(module, FusionPulse):
         if module.half_act.stochastic:
@@ -493,6 +495,7 @@ def _module_config(module: nn.Module):
             "refine_mode": module.refine_mode,
             "fold_mode": module.fold_mode,
             "use_half": module.use_half,
+            "half_stochastic": module.half_stochastic,
         }
     if isinstance(module, FusionPulse):
         return {

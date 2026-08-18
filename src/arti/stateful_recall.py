@@ -31,6 +31,7 @@ class StatefulRecall(nn.Module):
         write_rate: float = 0.75,
         decay: float = 0.999,
         use_half: bool = True,
+        half_stochastic: bool = False,
         learnable_dynamics: bool = True,
     ) -> None:
         super().__init__()
@@ -49,6 +50,7 @@ class StatefulRecall(nn.Module):
         self.recognition_threshold = float(recognition_threshold)
         self.recognition_temperature = float(recognition_temperature)
         self.use_half = bool(use_half)
+        self.half_stochastic = bool(half_stochastic) if self.use_half else False
         self.learnable_dynamics = bool(learnable_dynamics)
 
         self.query = nn.Linear(dim, resolved_key_dim, bias=False)
@@ -59,7 +61,7 @@ class StatefulRecall(nn.Module):
         self.slot_anchors = nn.Parameter(torch.randn(slots, resolved_key_dim) * resolved_key_dim**-0.5)
         self.write_rate_logit = nn.Parameter(_logit(write_rate), requires_grad=learnable_dynamics)
         self.decay_logit = nn.Parameter(_logit(decay), requires_grad=learnable_dynamics)
-        self.survival = Half() if use_half else nn.Identity()
+        self.survival = Half(stochastic=self.half_stochastic) if self.use_half else nn.Identity()
 
     @property
     def write_rate(self) -> float:
