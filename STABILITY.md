@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.4 is published as a Stable Candidate. This label is a release stage,
+ARTI 3.0.5 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 3.x Surface
@@ -32,6 +32,11 @@ part of the frozen core surface.
 Runtime Recall refinement controls were introduced as alpha APIs in 1.9.0.
 Their exact-depth semantics and atomic schedule validation are documented, but
 automatic schedule selection is not part of the supported surface.
+
+`arti.alpha.TargetBankUpdater` is introduced in 3.0.5 as an alpha API. It
+repeatedly addresses the Bank being updated, supports an optional private Bank
+partition, and applies bounded write refinement. Its training objectives and
+task-specific state lifecycle remain application concerns.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

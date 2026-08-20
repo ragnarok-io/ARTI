@@ -111,6 +111,7 @@ def main() -> None:
                 "-c",
                     (
                     "import arti, arti.functional, arti.torch, arti.jax, arti.web; "
+                    "from arti.alpha import TargetBankUpdater, WriteRefinePolicy; "
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
                     "import arti.cli; "
@@ -142,6 +143,9 @@ def main() -> None:
                     "assert arti.torch.ARTIHostBridge is arti.ARTIHostBridge; "
                     "assert callable(arti.Half); "
                     "assert arti.torch.Half is arti.Half; "
+                    "assert arti.component_ref(TargetBankUpdater(4, 3)) == 'arti/target-bank-updater@1'; "
+                    "assert arti.component_ref(arti.resolve_component('arti/target-bank-updater@2', hidden_dim=4, slots=3)) == 'arti/target-bank-updater@2'; "
+                    "assert WriteRefinePolicy.adaptive(max_steps=4, min_steps=2).budget.max_steps == 4; "
                     "assert callable(arti.Recall); "
                     "assert arti.nn.Recall is arti.Recall; "
                     "assert arti.torch.Recall is arti.Recall; "

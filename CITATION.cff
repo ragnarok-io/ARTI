@@ -5,8 +5,8 @@ type: software
 authors:
   - name: Thiocy
     website: "https://github.com/Thiocy"
-version: 3.0.4
-date-released: 2026-08-19
+version: 3.0.5
+date-released: 2026-08-21
 repository-code: "https://github.com/ragnarok-io/ARTI"
 url: "https://github.com/ragnarok-io/ARTI"
 license: MIT

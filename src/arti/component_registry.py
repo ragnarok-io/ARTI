@@ -137,6 +137,7 @@ class ComponentRef:
 
 ConfigBuilder = Callable[[Any], Mapping[str, Any]]
 DependencyBuilder = Callable[[Any], Sequence[str]]
+Factory = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,7 @@ class ComponentRegistration:
     config_schema_version: int = 1
     state_schema_version: int = 1
     aliases: tuple[str, ...] = ()
+    factory: Factory | None = None
     config_builder: ConfigBuilder | None = None
     dependency_builder: DependencyBuilder | None = None
 
@@ -230,6 +232,7 @@ class ComponentRegistry:
         aliases: Sequence[str] = (),
         config_schema_version: int = 1,
         state_schema_version: int = 1,
+        factory: Factory | None = None,
         config_builder: ConfigBuilder | None = None,
         dependency_builder: DependencyBuilder | None = None,
     ) -> ComponentRegistration:
@@ -244,13 +247,19 @@ class ComponentRegistry:
             aliases=tuple(aliases),
             config_schema_version=config_schema_version,
             state_schema_version=state_schema_version,
+            factory=component_type if factory is None else factory,
             config_builder=config_builder,
             dependency_builder=dependency_builder,
         )
-        aliases_to_add = set(registration.aliases) | {identity.mechanism_id, identity.name, component_type.__name__}
         with self._lock:
-            if reference in self._by_reference or any(alias in self._by_alias or alias in self._by_reference for alias in aliases_to_add):
-                raise DuplicateComponentError(f"component identity or alias is already registered: {reference}")
+            if reference in self._by_reference or reference in self._by_alias:
+                raise DuplicateComponentError(f"component reference is already registered: {reference}")
+            aliases_to_add = set(registration.aliases)
+            for alias in {identity.mechanism_id, identity.name, component_type.__name__}:
+                if alias not in self._by_alias and alias not in self._by_reference:
+                    aliases_to_add.add(alias)
+            if any(alias in self._by_alias or alias in self._by_reference for alias in aliases_to_add):
+                raise DuplicateComponentError(f"component alias is already registered: {sorted(aliases_to_add)}")
             self._by_reference[reference] = registration
             for alias in aliases_to_add:
                 self._by_alias[alias] = registration
@@ -269,7 +278,14 @@ class ComponentRegistry:
         return registration
 
     def registration_for(self, value: Any) -> ComponentRegistration | None:
+        if value is None:
+            return None
         with self._lock:
+            preferred_reference = getattr(value, "_component_reference", None)
+            if isinstance(preferred_reference, str):
+                preferred = self._by_reference.get(preferred_reference)
+                if preferred is not None and isinstance(value, preferred.component_type):
+                    return preferred
             for registration in self._by_reference.values():
                 if type(value) is registration.component_type:
                     return registration
@@ -290,9 +306,38 @@ def _build_default_registry() -> ComponentRegistry:
     from .layers import ARTIDynamicStateLayer, ARTILatentRecallField, ARTILatentTensorLayer, ARTILayer, ARTIPhaseMixer, ARTIVirtualInterfaceMixer
     from .nn import Fold, FusionPulse, Half, LearnedPulse, Recall, RecallRefiner, UnFold
     from .pulse import PulseCompressor
+    from .recall_refine import RefineBudget, RefineStop
+    from .target_bank import TargetBankUpdater, WriteRefinePolicy
 
     def add(reference: str, component_type: type[Any], **kwargs: Any) -> None:
         registry.register(reference, component_type=component_type, **kwargs)
+
+    def coupled_target_bank_updater_factory(**kwargs: Any) -> TargetBankUpdater:
+        requested = kwargs.get("target_coupling", "required_after_bootstrap")
+        if requested != "required_after_bootstrap":
+            raise ValueError(
+                "arti/target-bank-updater@2 requires "
+                "target_coupling='required_after_bootstrap'"
+            )
+        kwargs["target_coupling"] = "required_after_bootstrap"
+        return TargetBankUpdater(**kwargs)
+
+    def target_bank_config(component: TargetBankUpdater) -> Mapping[str, Any]:
+        return {
+            "hidden_dim": component.hidden_dim,
+            "slots": component.slots,
+            "workspace_dim": component.workspace_dim,
+            "private_slots": component.private_slots,
+            "query_seed": component.query_seed,
+            "target_coupling": component.target_coupling,
+            "policy": component.policy,
+        }
+
+    def target_bank_dependencies(component: TargetBankUpdater) -> Sequence[str]:
+        result = ["arti/write-refine-policy@1", "arti/refine-budget@1"]
+        if component.policy.stop is not None:
+            result.append("arti/refine-stop@1")
+        return result
 
     alpha = "alpha"
     add("arti/half@1", Half, lifecycle=alpha, config_schema_version=2, config_builder=_fields("_threshold_init", "_base_init", "_scale_init", "stochastic", "learnable"))
@@ -303,6 +348,56 @@ def _build_default_registry() -> ComponentRegistry:
     add("arti/fusion-pulse@1", FusionPulse, lifecycle=alpha)
     add("arti/recall@1", Recall, lifecycle=alpha, config_builder=_fields("dim", "slots", "formula_id", "formula_origin"))
     add("arti/recall-refiner@1", RecallRefiner, lifecycle=alpha, config_builder=_fields("steps", "learnable_step_scale"))
+    add(
+        "arti/target-bank-updater@1",
+        TargetBankUpdater,
+        lifecycle=alpha,
+        variant="target-addressable",
+        config_builder=target_bank_config,
+        dependency_builder=target_bank_dependencies,
+    )
+    add(
+        "arti/target-bank-updater@2",
+        TargetBankUpdater,
+        lifecycle=alpha,
+        variant="target-coupled-after-bootstrap",
+        config_schema_version=2,
+        factory=coupled_target_bank_updater_factory,
+        config_builder=target_bank_config,
+        dependency_builder=target_bank_dependencies,
+    )
+    add(
+        "arti/write-refine-policy@1",
+        WriteRefinePolicy,
+        lifecycle=alpha,
+        variant="runtime-only",
+        config_builder=lambda component: {
+            "budget": component.budget,
+            "stop": component.stop,
+            "exposure_schedule": component.exposure_schedule,
+        },
+        dependency_builder=lambda component: (
+            "arti/refine-budget@1",
+            *(("arti/refine-stop@1",) if component.stop is not None else ()),
+        ),
+    )
+    add(
+        "arti/refine-budget@1",
+        RefineBudget,
+        lifecycle=alpha,
+        variant="runtime-only",
+        config_builder=lambda component: {
+            "max_steps": component.max_steps,
+            "min_steps": component.min_steps,
+        },
+    )
+    add(
+        "arti/refine-stop@1",
+        RefineStop,
+        lifecycle=alpha,
+        variant="runtime-only",
+        config_builder=lambda component: asdict(component),
+    )
     add("arti/layer@1", ARTILayer, lifecycle=alpha)
     add("arti/latent-tensor-layer@1", ARTILatentTensorLayer, lifecycle=alpha)
     add("arti/dynamic-state@1", ARTIDynamicStateLayer, lifecycle=alpha)
@@ -325,7 +420,11 @@ def register_component(reference: str, **kwargs: Any) -> ComponentRegistration:
 
 def resolve_component(reference_or_alias: str, **kwargs: Any) -> Any:
     registration = get_component_registry().resolve_registration(reference_or_alias)
-    return registration.component_type(**kwargs)
+    if registration.factory is None:
+        raise ComponentRegistryError(
+            f"component {registration.reference!r} has no executable factory"
+        )
+    return registration.factory(**kwargs)
 
 
 def component_ref(value: Any) -> str:

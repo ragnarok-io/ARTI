@@ -13,6 +13,7 @@ neural-network-native mechanisms. ``Pulse`` is the default learned pulse layer;
 """
 
 from ._version import __version__
+from . import alpha
 from .backend import available_backends, planned_backends
 from .component_graph import (
     COMPONENT_GRAPH_FORMAT,

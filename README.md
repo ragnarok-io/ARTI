@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.4 is a **Stable Candidate**. The 3.x surface is the current
+Version 3.0.5 is a **Stable Candidate**. The 3.x surface is the current
 Formula contract line; it intentionally does not preserve the 2.x Formula
 symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -48,8 +48,9 @@ pnpm add @arti-fit/web@alpha
 
 ## What Is New In 3.0
 
-The 3.0.4 maintenance release completes the explicit Half survival policy and
-keeps the reversible pretrained-model workflow: after `fit` and `arti.st`
+The 3.0.5 maintenance release adds an explicitly versioned, target-addressable
+forward memory updater under `arti.alpha` and keeps the reversible
+pretrained-model workflow: after `fit` and `arti.st`
 export, a fresh model can reload the artifact and the workflow can `detach()`
 without losing the native model class, methods, or original trainability
 settings.
@@ -60,6 +61,25 @@ and eval modes; `Half(stochastic=False)` returns the deterministic `q * x`
 path. Set `learnable=True` to train the threshold, base, and scale of the
 survival curve. The learned q curve is available through `half.survival(x)`;
 the stochastic learned path uses a straight-through estimator.
+
+`TargetBankUpdater` treats the Bank being changed as an addressable Recall
+partition. Each bounded write-refine step reads the current Bank, applies a
+Formula transition, updates the Bank, and lets the next step address the new
+state. An optional private partition may participate in the read, but only the
+target Bank is changed. The API remains alpha and is deliberately separate
+from optimizers, event logs, and task-specific training loops:
+
+```python
+from arti.alpha import TargetBankUpdater, WriteRefinePolicy
+
+updater = TargetBankUpdater(
+    hidden_dim=64,
+    slots=32,
+    target_coupling="required_after_bootstrap",
+    policy=WriteRefinePolicy.adaptive(max_steps=8, min_steps=2),
+)
+next_bank = updater(trace, bank, exposure=1.0)
+```
 
 ARTI 3.0 makes the current Recall architecture the public default. Recall now
 uses a fixed query basis, host-dimensional Bank values, versioned Formula
