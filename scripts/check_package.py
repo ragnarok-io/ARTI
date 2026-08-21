@@ -42,6 +42,13 @@ def main() -> None:
     with tarfile.open(sdists[0], mode="r:gz") as archive:
         members = [member.name.replace("\\", "/") for member in archive.getmembers()]
     relative_members = [name.split("/", 1)[1] if "/" in name else name for name in members]
+    unsafe = sorted(
+        name
+        for name in relative_members
+        if name.startswith(("/", "\\")) or ".." in Path(name).parts
+    )
+    if unsafe:
+        raise SystemExit(f"sdist contains unsafe member paths: {unsafe[:5]}")
     leaked = sorted(
         name
         for name in relative_members
@@ -51,9 +58,55 @@ def main() -> None:
         raise SystemExit(f"sdist contains local-only paths: {leaked[:5]}")
     if "LICENSE" not in relative_members:
         raise SystemExit("sdist is missing the root LICENSE file")
+    allowed_sdist_files = {
+        ".gitignore",
+        "AI_ASSISTANCE.md",
+        "AUTHORS.md",
+        "CITATION.cff",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "PKG-INFO",
+        "README.md",
+        "SECURITY.md",
+        "STABILITY.md",
+        "pyproject.toml",
+        "uv.lock",
+    }
+    allowed_sdist_prefixes = (
+        "docs/",
+        "examples/",
+        "src/arti/",
+        "tests/",
+    )
+    unexpected = sorted(
+        name
+        for name in relative_members
+        if name
+        and name not in allowed_sdist_files
+        and not name.startswith(allowed_sdist_prefixes)
+    )
+    if unexpected:
+        raise SystemExit(f"sdist contains paths outside the release allowlist: {unexpected[:5]}")
 
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    expected_version = str(project["project"]["version"])
     with zipfile.ZipFile(wheels[0]) as wheel:
         names = set(wheel.namelist())
+        unsafe = sorted(
+            name
+            for name in names
+            if name.startswith(("/", "\\")) or ".." in Path(name).parts
+        )
+        if unsafe:
+            raise SystemExit(f"wheel contains unsafe member paths: {unsafe[:5]}")
+        dist_info_prefix = f"arti_fit-{expected_version}.dist-info/"
+        unexpected = sorted(
+            name
+            for name in names
+            if not name.startswith(("arti/", dist_info_prefix))
+        )
+        if unexpected:
+            raise SystemExit(f"wheel contains paths outside the release allowlist: {unexpected[:5]}")
         required = {
             "arti/__init__.py",
             "arti/_version.py",
@@ -67,6 +120,9 @@ def main() -> None:
             "arti/web/contract.py",
             "arti/web/exporter.py",
             "arti/serialization.py",
+            "arti/reversible_topology.py",
+            "arti/topology.py",
+            "arti/alpha/__init__.py",
             "arti/providers.py",
             "arti/pretrained.py",
             "arti/pretrained_cli.py",
@@ -90,6 +146,47 @@ def main() -> None:
         if missing:
             raise SystemExit(f"wheel is missing expected files: {missing}")
 
+    uv = shutil.which("uv")
+    if uv is None:
+        raise SystemExit("uv is required for isolated distribution installation checks")
+    for distribution in (wheels[0], sdists[0]):
+        with tempfile.TemporaryDirectory(prefix="arti-install-smoke-") as tmp:
+            target = Path(tmp) / "target"
+            run(
+                [
+                    uv,
+                    "pip",
+                    "install",
+                    "--python",
+                    sys.executable,
+                    "--target",
+                    str(target),
+                    "--no-deps",
+                    "--no-build-isolation",
+                    str(distribution),
+                ]
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(target)
+            env["ARTI_INSTALL_ROOT"] = str(target)
+            env["ARTI_EXPECTED_VERSION"] = expected_version
+            run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import arti, os, pathlib; "
+                        "root = pathlib.Path(os.environ['ARTI_INSTALL_ROOT']).resolve(); "
+                        "assert pathlib.Path(arti.__file__).resolve().parent == root / 'arti'; "
+                        "assert arti.__version__ == os.environ['ARTI_EXPECTED_VERSION']; "
+                        "from arti.alpha import Fold, UnFold; "
+                        "assert arti.component_ref(Fold(active_count=2)) == 'arti/fold@2'; "
+                        "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'"
+                    ),
+                ],
+                env=env,
+            )
+
     with tempfile.TemporaryDirectory(prefix="arti-wheel-smoke-") as tmp:
         target = Path(tmp) / "target"
         target.mkdir()
@@ -103,15 +200,14 @@ def main() -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(target) + os.pathsep + env.get("PYTHONPATH", "")
         env["ARTI_WHEEL_ROOT"] = str(target)
-        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        env["ARTI_EXPECTED_VERSION"] = str(project["project"]["version"])
+        env["ARTI_EXPECTED_VERSION"] = expected_version
         run(
             [
                 sys.executable,
                 "-c",
                     (
                     "import arti, arti.functional, arti.torch, arti.jax, arti.web; "
-                    "from arti.alpha import TargetBankUpdater, WriteRefinePolicy; "
+                    "from arti.alpha import Fold as TopologyFold, TargetBankUpdater, UnFold as TopologyUnFold, WriteRefinePolicy; "
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
                     "import arti.cli; "
@@ -146,6 +242,9 @@ def main() -> None:
                     "assert arti.component_ref(TargetBankUpdater(4, 3)) == 'arti/target-bank-updater@1'; "
                     "assert arti.component_ref(arti.resolve_component('arti/target-bank-updater@2', hidden_dim=4, slots=3)) == 'arti/target-bank-updater@2'; "
                     "assert WriteRefinePolicy.adaptive(max_steps=4, min_steps=2).budget.max_steps == 4; "
+                    "assert arti.component_ref(TopologyFold(active_count=2)) == 'arti/fold@2'; "
+                    "assert arti.component_ref(TopologyUnFold(active_count=2)) == 'arti/unfold@2'; "
+                    "assert TopologyFold(active_count=2)(__import__('torch').zeros(1, 3, 4)).active.shape == (1, 2, 4); "
                     "assert callable(arti.Recall); "
                     "assert arti.nn.Recall is arti.Recall; "
                     "assert arti.torch.Recall is arti.Recall; "

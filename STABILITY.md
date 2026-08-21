@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.5 is published as a Stable Candidate. This label is a release stage,
+ARTI 3.0.6 is published as a Stable Candidate. This label is a release stage,
 not a separate package version and not an LTS promise.
 
 ## Supported 3.x Surface
@@ -38,6 +38,13 @@ repeatedly addresses the Bank being updated, supports an optional private Bank
 partition, and applies bounded write refinement. Its training objectives and
 task-specific state lifecycle remain application concerns.
 
+`arti.alpha.Fold` and `arti.alpha.UnFold` are introduced in 3.0.6 as the
+versioned `arti/fold@2` and `arti/unfold@2` reversible-topology operations.
+They preserve every original tensor instance through a recorded permutation;
+their learned topology policies and Bank Formula policies remain alpha. The
+supported `arti.nn.Fold` and `arti.nn.UnFold` names continue to resolve to the
+existing `@1` contracts.
+
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,
 Formula, artifact, policy, and workspace APIs do not own an optimizer or an
@@ -67,7 +74,7 @@ issues may require an exception, which must be documented.
 
 | Component | Stable Candidate support |
 | --- | --- |
-| Python | 3.10, 3.11, 3.12 |
+| Python | 3.10 or newer; release CI validates 3.10, 3.11, and 3.12 |
 | PyTorch | 2.2 or newer |
 | CPU | Supported |
 | NVIDIA CUDA | Supported through CUDA-enabled PyTorch |

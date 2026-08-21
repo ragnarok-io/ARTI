@@ -308,6 +308,28 @@ def _build_default_registry() -> ComponentRegistry:
     from .pulse import PulseCompressor
     from .recall_refine import RefineBudget, RefineStop
     from .target_bank import TargetBankUpdater, WriteRefinePolicy
+    from .reversible_topology import (
+        FOLD_RECORD_SCHEMA_VERSION,
+        FOLD_STATE_SCHEMA_VERSION,
+        FixedTopologyPolicy,
+        FoldRecord,
+        FoldedTensor,
+        InverseTopologyContract,
+        ReversibleTopology,
+        TopologyFold,
+        TopologyUnFold,
+    )
+    from .topology import (
+        BankFormulaTopologyPolicy,
+        FixedTopologyQuery,
+        LearnedTopologyPolicy,
+        SoftTopKTopologySurrogate,
+        StablePriorityPartition,
+        TopologyAction,
+        TopologyFormulaLock,
+        TopologyOperandBank,
+        TopologyPriorityFormula,
+    )
 
     def add(reference: str, component_type: type[Any], **kwargs: Any) -> None:
         registry.register(reference, component_type=component_type, **kwargs)
@@ -343,6 +365,169 @@ def _build_default_registry() -> ComponentRegistry:
     add("arti/half@1", Half, lifecycle=alpha, config_schema_version=2, config_builder=_fields("_threshold_init", "_base_init", "_scale_init", "stochastic", "learnable"))
     add("arti/fold@1", Fold, lifecycle=alpha, config_builder=_fields("k", "dim", "hidden_dim", "temperature", "mode", "topk", "heads", "eps"))
     add("arti/unfold@1", UnFold, lifecycle=alpha, config_builder=_fields("dim", "exposed", "guide_dim", "condition_dim", "hidden_dim", "temperature", "sinkhorn_steps", "max_length", "layout_mode"))
+    add(
+        "arti/fixed-topology-policy@1",
+        FixedTopologyPolicy,
+        lifecycle=alpha,
+        variant="fixed-index",
+        config_builder=lambda component: component.topology_contract(),
+    )
+    add(
+        "arti/topology-action@1",
+        TopologyAction,
+        lifecycle=alpha,
+        variant="priority-operands",
+        config_builder=lambda component: {
+            "shape": list(component.priority.shape),
+            "dtype": str(component.priority.dtype),
+        },
+    )
+    add(
+        "arti/stable-priority-partition@1",
+        StablePriorityPartition,
+        lifecycle=alpha,
+        variant="valid-first-stable-sort",
+    )
+    add(
+        "arti/topology-surrogate@1",
+        SoftTopKTopologySurrogate,
+        lifecycle=alpha,
+        variant="soft-top-k-vjp",
+        config_builder=_fields("temperature"),
+    )
+    add(
+        "arti/learned-topology-policy@1",
+        LearnedTopologyPolicy,
+        lifecycle=alpha,
+        variant="equivariant-scorer",
+        config_builder=lambda component: component.topology_contract(),
+        dependency_builder=lambda _component: ("arti/topology-surrogate@1",),
+    )
+    add(
+        "arti/topology-priority-formula@1",
+        TopologyPriorityFormula,
+        lifecycle=alpha,
+        variant="affine-priority",
+        config_builder=lambda component: {
+            "contract": component.contract,
+            "trainable": component.trainable,
+        },
+    )
+    add(
+        "arti/topology-formula-lock@1",
+        TopologyFormulaLock,
+        lifecycle=alpha,
+        variant="formula-binding",
+    )
+    add(
+        "arti/fixed-topology-query@1",
+        FixedTopologyQuery,
+        lifecycle=alpha,
+        variant="deterministic-projection",
+        config_builder=lambda component: component.topology_contract(),
+    )
+    add(
+        "arti/topology-operand-bank@1",
+        TopologyOperandBank,
+        lifecycle=alpha,
+        variant="fixed-address-values",
+        config_builder=lambda component: component.structure_contract,
+    )
+    add(
+        "arti/bank-formula-topology-policy@1",
+        BankFormulaTopologyPolicy,
+        lifecycle=alpha,
+        variant="fixed-query-bank-formula",
+        config_builder=lambda component: {
+            "dim": component.dim,
+            "key_dim": component.key_dim,
+            "query_seed": component.query_seed,
+            "ordered_banks": [bank.structure_contract for bank in component.banks],
+            "bank_weights": component.bank_weights.detach().cpu().tolist(),
+            "query": component.query.topology_contract(),
+            "formula": {
+                "ref": component.formula._component_reference,
+                "contract_fingerprint": component.formula.contract.fingerprint,
+                "factor_dim": component.formula.contract.factor_dim,
+            },
+            "diagnostics": component.diagnostics,
+            "diagnostic_slot_limit": component.diagnostic_slot_limit,
+        },
+        dependency_builder=lambda component: (
+            component.query._component_reference,
+            component.formula._component_reference,
+            *(bank._component_reference for bank in component.banks),
+        ),
+    )
+    add(
+        "arti/reversible-topology@1",
+        ReversibleTopology,
+        lifecycle=alpha,
+        variant="permutation-partition",
+        config_builder=lambda component: {
+            "active_count": component.active_count,
+            "axis": component.axis,
+            "policy_ref": component.policy._component_reference,
+            "operator_ref": component.operator._component_reference,
+            "surrogate_ref": (
+                None
+                if component.surrogate is None
+                else component.surrogate._component_reference
+            ),
+            "inverse": "recorded-permutation",
+            "record_ref": "arti/fold-record@1",
+        },
+        dependency_builder=lambda component: tuple(
+            child._component_reference
+            for child in (component.policy, component.operator, component.surrogate)
+            if child is not None and hasattr(child, "_component_reference")
+        ),
+    )
+    add(
+        "arti/inverse-topology-contract@1",
+        InverseTopologyContract,
+        lifecycle=alpha,
+        variant="recorded-permutation-inverse",
+        config_builder=lambda component: component.topology_contract(),
+    )
+    add(
+        "arti/fold@2",
+        TopologyFold,
+        lifecycle=alpha,
+        variant="reversible-forward",
+        config_schema_version=2,
+        config_builder=lambda component: {
+            "topology_ref": component.topology._component_reference,
+            "active_count": component.topology.active_count,
+            "axis": component.topology.axis,
+            "record_ref": "arti/fold-record@1",
+        },
+        dependency_builder=lambda _component: ("arti/reversible-topology@1",),
+    )
+    add(
+        "arti/unfold@2",
+        TopologyUnFold,
+        lifecycle=alpha,
+        variant="recorded-inverse",
+        config_schema_version=2,
+        config_builder=lambda component: component.inverse_contract.topology_contract(),
+        dependency_builder=lambda _component: ("arti/inverse-topology-contract@1",),
+    )
+    add(
+        "arti/fold-record@1",
+        FoldRecord,
+        lifecycle=alpha,
+        variant="runtime-record",
+        state_schema_version=FOLD_RECORD_SCHEMA_VERSION,
+    )
+    add(
+        "arti/fold-state@1",
+        FoldedTensor,
+        lifecycle=alpha,
+        variant="runtime-state",
+        state_schema_version=FOLD_STATE_SCHEMA_VERSION,
+        dependency_builder=lambda _component: ("arti/fold-record@1",),
+    )
     add("arti/pulse@1", LearnedPulse, lifecycle=alpha, variant="learned", aliases=("Pulse", "LearnedPulse"))
     add("arti/pulse-legacy@1", PulseCompressor, lifecycle="legacy", variant="explicit", aliases=("PulseCompressor",))
     add("arti/fusion-pulse@1", FusionPulse, lifecycle=alpha)

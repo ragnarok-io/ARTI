@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.5 is a **Stable Candidate**. The 3.x surface is the current
+Version 3.0.6 is a **Stable Candidate**. The 3.x surface is the current
 Formula contract line; it intentionally does not preserve the 2.x Formula
 symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
 
@@ -48,8 +48,9 @@ pnpm add @arti-fit/web@alpha
 
 ## What Is New In 3.0
 
-The 3.0.5 maintenance release adds an explicitly versioned, target-addressable
-forward memory updater under `arti.alpha` and keeps the reversible
+The 3.0.6 maintenance release adds versioned reversible topology operations
+under `arti.alpha`, alongside the target-addressable forward memory updater,
+and keeps the reversible
 pretrained-model workflow: after `fit` and `arti.st`
 export, a fresh model can reload the artifact and the workflow can `detach()`
 without losing the native model class, methods, or original trainability
@@ -80,6 +81,27 @@ updater = TargetBankUpdater(
 )
 next_bank = updater(trace, bank, exposure=1.0)
 ```
+
+`arti.alpha.Fold` (`arti/fold@2`) selects a fixed-size active workspace by
+reordering tensor instances and records the complete permutation. The paired
+`arti.alpha.UnFold` (`arti/unfold@2`) restores the original topology exactly;
+it never predicts or reconstructs discarded values because no values are
+discarded:
+
+```python
+from arti.alpha import Fold, UnFold
+
+fold = Fold(active_count=16)
+unfold = UnFold(active_count=16)
+state = fold(x, mask)
+state = state.replace(active=block(state.active))
+result = unfold(state)
+```
+
+Learned and Bank Formula topology policies can decide which instances enter
+the active workspace without mixing tensor values. The existing
+`arti.nn.Fold` and `arti.nn.UnFold` remain the `@1` contracts. See
+[Reversible topology](docs/reversible-topology.md).
 
 ARTI 3.0 makes the current Recall architecture the public default. Recall now
 uses a fixed query basis, host-dimensional Bank values, versioned Formula
