@@ -25,13 +25,18 @@ from .component_graph import (
     verify_component_graph,
 )
 from .component_registry import (
+    COMPONENT_PROVENANCE_VERSION,
+    ComponentCompatibilityError,
     ComponentRef,
     component_catalog,
+    component_graph_fingerprint,
+    component_provenance,
     component_ref,
     component_spec,
     get_component_registry,
     register_component,
     resolve_component,
+    validate_component_provenance,
 )
 from .attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIExpertSet, ARTILayerInfo, discover_layers
 from .attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
@@ -111,6 +116,24 @@ from .recall_experts import RECALL_BANK_ARTIFACT_KIND, RECALL_BANK_ARTIFACT_VERS
 from .runtime_vocab import LiteralInput, LiteralOutputHead, LiteralVocabCache, LiteralVocabModel, OutputLexiconContext, RuntimeVocabEncoder, RuntimeVocabHead, RuntimeVocabInput, RuntimeVocabModel, RuntimeVocabPulseAdapter, attach_runtime_vocab_semantics, flatten_vocab_tensor, gather_runtime_vocab, permute_runtime_vocab, remap_token_ids
 from .source_integrity import SOURCE_INTEGRITY_MODES, SourceIntegrityBasis, SourceIntegrityCarrier, SourceIntegrityReport, assert_source_integrity, decode_source_tokens, encode_source_tokens, make_source_integrity_basis, read_sources, source_basis_orthogonality_loss, source_integrity_loss, source_integrity_report, superpose_sources
 from .serialization import ARTI_ST_FORMAT, ARTI_ST_FORMAT_VERSION, ARTILoadResult, ARTISaveResult, load, migrate_pt, save
+from .survival import (
+    DuplicateSurvivalError,
+    ExponentialSurvival,
+    InvalidSurvivalRefError,
+    SurvivalDescription,
+    SurvivalOperator,
+    SurvivalRef,
+    SurvivalRegistration,
+    SurvivalRegistry,
+    SurvivalRegistryError,
+    UnknownSurvivalError,
+    describe_survival,
+    list_survivals,
+    register_survival,
+    resolve_survival,
+    survival_is_registered,
+    validate_survival_config,
+)
 from .text_bitmap import BitmapTextConfig, BitmapTextRenderer, BitmapVocabReport, assert_bitmap_vocab_distinct, bitmap_vocab_report, render_text_bitmap, render_text_vocab
 from .text_tensor import TEXT_CONTROL_CHANNELS, TEXT_IDENTITY_MODES, TextControlKind, TextTensorConfig, TextTensorLayout, TextTensorRenderer, render_text_layout, render_text_tensor
 from .tensor_boundary import TensorLayout
@@ -120,6 +143,7 @@ from .usage import FeatureConfig, features, layer_profiles, profile
 
 __all__ = [
     "ARTI",
+    "alpha",
     "ARTIAttachConfig",
     "ARTIAttachTrainingConfig",
     "ARTIAttachment",
@@ -197,17 +221,38 @@ __all__ = [
     "validate_component_graph",
     "verify_component_graph",
     "ComponentRef",
+    "COMPONENT_PROVENANCE_VERSION",
+    "ComponentCompatibilityError",
     "component_catalog",
+    "component_graph_fingerprint",
+    "component_provenance",
     "component_ref",
     "component_spec",
     "get_component_registry",
     "register_component",
     "resolve_component",
+    "validate_component_provenance",
     "FeatureConfig",
     "features",
     "profile",
     "layer_profiles",
     "Half",
+    "DuplicateSurvivalError",
+    "ExponentialSurvival",
+    "InvalidSurvivalRefError",
+    "SurvivalDescription",
+    "SurvivalOperator",
+    "SurvivalRef",
+    "SurvivalRegistration",
+    "SurvivalRegistry",
+    "SurvivalRegistryError",
+    "UnknownSurvivalError",
+    "describe_survival",
+    "list_survivals",
+    "register_survival",
+    "resolve_survival",
+    "survival_is_registered",
+    "validate_survival_config",
     "UnFold",
     "Fold",
     "Pulse",

@@ -285,6 +285,23 @@ class FoldedTensor:
 
 
 @dataclass(frozen=True)
+class _ActiveTopologyOverlay:
+    """Pulse-internal active-K view over an unchanged original substrate."""
+
+    base: Tensor
+    active: Tensor
+    active_mask: Tensor
+    record: FoldRecord
+
+    def replace_active(self, active: Tensor) -> "_ActiveTopologyOverlay":
+        if active.shape != self.active.shape:
+            raise ValueError("overlay active replacement must preserve shape")
+        if active.device != self.active.device or active.dtype != self.active.dtype:
+            raise ValueError("overlay active replacement must preserve device and dtype")
+        return _ActiveTopologyOverlay(self.base, active, self.active_mask, self.record)
+
+
+@dataclass(frozen=True)
 class UnfoldedTensor:
     """A restored tensor and its mask in the original host topology."""
 
@@ -332,6 +349,46 @@ def _unfold_state(
     elif not mask_lineage_matches:
         raise ValueError("FoldedTensor mask lineage does not match its record")
     return UnfoldedTensor(restored, restored_mask)
+
+
+def _materialize_overlay(
+    state: _ActiveTopologyOverlay,
+    *,
+    active_count: int,
+    axis: int,
+    topology_ref: str,
+    contract_fingerprint: str,
+) -> UnfoldedTensor:
+    if not isinstance(state, _ActiveTopologyOverlay):
+        raise TypeError("overlay unfold requires an internal active topology overlay")
+    record = state.record
+    if (
+        record.producer_ref != "arti/fold@2"
+        or record.inverse_ref != "arti/unfold@2"
+        or record.topology_ref != topology_ref
+        or record.active_count != active_count
+        or record.axis != axis
+        or record.topology_config_fingerprint != contract_fingerprint
+    ):
+        raise ValueError("active topology overlay is incompatible with UnFold@2")
+    if state.base.shape != record.original_shape:
+        raise ValueError("overlay base shape does not match FoldRecord")
+    permutation = record._trusted_permutation()
+    _validate_permutation(permutation, length=record.original_length)
+    active_index = permutation[..., :active_count]
+    expected_mask = torch.gather(record._trusted_original_mask(), -1, active_index)
+    if torch.compiler.is_compiling():
+        torch._assert_async(
+            torch.eq(state.active_mask, expected_mask).all(),
+            "overlay active mask violates FoldRecord lineage",
+        )
+    elif not torch.equal(state.active_mask, expected_mask):
+        raise ValueError("overlay active mask violates FoldRecord lineage")
+    scatter_index = active_index.unsqueeze(-1).expand(
+        *active_index.shape, state.base.shape[-1]
+    )
+    value = state.base.scatter(-2, scatter_index, state.active)
+    return UnfoldedTensor(value, record._trusted_original_mask().clone())
 
 
 class InverseTopologyContract(nn.Module):
@@ -506,7 +563,13 @@ class ReversibleTopology(nn.Module):
     def contract_fingerprint(self) -> str:
         return self._contract_fingerprint
 
-    def fold(self, x: Tensor, mask: Tensor | None = None) -> FoldedTensor:
+    def _plan_fold(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+        *,
+        observed: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor | None, FoldRecord]:
         if x.ndim < 2:
             raise ValueError("x must have shape [..., N, D]")
         length = x.shape[-2]
@@ -524,13 +587,46 @@ class ReversibleTopology(nn.Module):
             if mask.device != x.device:
                 raise ValueError("mask and x must share a device")
             valid = mask
+        if observed is None:
+            policy_mask = valid
+        else:
+            if observed.shape != x.shape[:-1] or observed.dtype != torch.bool:
+                raise ValueError("observed must be boolean with shape x.shape[:-1]")
+            if observed.device != x.device:
+                raise ValueError("observed and x must share a device")
+            observed_is_valid = (~observed | valid).all()
+            enough_observed = (observed.sum(dim=-1) >= self.active_count).all()
+            compiler = getattr(torch, "compiler", None)
+            is_compiling = bool(compiler is not None and compiler.is_compiling())
+            if is_compiling:
+                torch._assert_async(
+                    observed_is_valid,
+                    "observed support must be a subset of validity",
+                )
+                torch._assert_async(
+                    enough_observed,
+                    "observed support must contain at least active_count values",
+                )
+            else:
+                if not bool(observed_is_valid):
+                    raise ValueError("observed support must be a subset of validity")
+                if not bool(enough_observed):
+                    raise ValueError(
+                        "observed support must contain at least active_count values"
+                    )
+            policy_mask = observed
 
         # Topology parameters learn through the declared surrogate. Tensor
         # values retain only the gradient of the executed hard lineage.
-        proposal = self.policy(x.detach(), valid)
+        policy_input = torch.where(
+            policy_mask.unsqueeze(-1),
+            x.detach(),
+            torch.zeros_like(x),
+        )
+        proposal = self.policy(policy_input, policy_mask)
         if not isinstance(proposal, TopologyProposal):
             raise TypeError("topology policy must return TopologyProposal")
-        permutation = self.operator(proposal.action, valid)
+        permutation = self.operator(proposal.action, policy_mask)
         needs_surrogate = (
             self.training
             and self.policy.training
@@ -541,14 +637,33 @@ class ReversibleTopology(nn.Module):
             )
         )
         surrogate_assignment = (
-            self.surrogate(proposal.action, valid, self.active_count)
+            self.surrogate(proposal.action, policy_mask, self.active_count)
             if needs_surrogate
             else None
         )
-        gather_index = permutation.unsqueeze(-1).expand(*permutation.shape, x.shape[-1])
-        packed = torch.gather(x, -2, gather_index)
-        packed_mask = torch.gather(valid, -1, permutation)
-        active = packed[..., : self.active_count, :].clone()
+        record = FoldRecord(
+            permutation=permutation,
+            original_mask=valid,
+            original_shape=x.shape,
+            axis=self.axis,
+            active_count=self.active_count,
+            topology_config_fingerprint=self.contract_fingerprint,
+            producer_provenance_fingerprint=self.producer_provenance_fingerprint,
+        )
+        return valid, permutation, surrogate_assignment, record
+
+    def _gather_active(
+        self,
+        x: Tensor,
+        valid: Tensor,
+        permutation: Tensor,
+        surrogate_assignment: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        active_index = permutation[..., : self.active_count]
+        gather_index = active_index.unsqueeze(-1).expand(
+            *active_index.shape, x.shape[-1]
+        )
+        active = torch.gather(x, -2, gather_index).clone()
         if surrogate_assignment is not None:
             expected = (*x.shape[:-2], self.active_count, x.shape[-2])
             if surrogate_assignment.shape != expected:
@@ -563,19 +678,62 @@ class ReversibleTopology(nn.Module):
                 "...kn,...nd->...kd", surrogate_assignment, finite_detached
             )
             active = _HardValueSoftTopology.apply(active, soft_active)
-        folded = packed[..., self.active_count :, :].clone()
-        active_mask = packed_mask[..., : self.active_count].clone()
-        folded_mask = packed_mask[..., self.active_count :].clone()
-        record = FoldRecord(
-            permutation=permutation,
-            original_mask=valid,
-            original_shape=x.shape,
-            axis=self.axis,
-            active_count=self.active_count,
-            topology_config_fingerprint=self.contract_fingerprint,
-            producer_provenance_fingerprint=self.producer_provenance_fingerprint,
+        active_mask = torch.gather(valid, -1, active_index).clone()
+        return active, active_mask
+
+    def fold(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+    ) -> FoldedTensor:
+        valid, permutation, surrogate_assignment, record = self._plan_fold(x, mask)
+        active, active_mask = self._gather_active(
+            x, valid, permutation, surrogate_assignment
         )
+        folded_index = permutation[..., self.active_count :]
+        gather_index = folded_index.unsqueeze(-1).expand(
+            *folded_index.shape, x.shape[-1]
+        )
+        folded = torch.gather(x, -2, gather_index).clone()
+        folded_mask = torch.gather(valid, -1, folded_index).clone()
         return FoldedTensor(active, folded, active_mask, folded_mask, record)
+
+    def _fold_observed(
+        self,
+        x: Tensor,
+        mask: Tensor | None,
+        observed: Tensor,
+    ) -> FoldedTensor:
+        """Pulse-only full transport with an observation-bounded policy domain."""
+
+        valid, permutation, surrogate_assignment, record = self._plan_fold(
+            x, mask, observed=observed
+        )
+        active, active_mask = self._gather_active(
+            x, valid, permutation, surrogate_assignment
+        )
+        folded_index = permutation[..., self.active_count :]
+        gather_index = folded_index.unsqueeze(-1).expand(
+            *folded_index.shape, x.shape[-1]
+        )
+        folded = torch.gather(x, -2, gather_index).clone()
+        folded_mask = torch.gather(valid, -1, folded_index).clone()
+        return FoldedTensor(active, folded, active_mask, folded_mask, record)
+
+    def _fold_overlay(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+        *,
+        observed: Tensor | None = None,
+    ) -> _ActiveTopologyOverlay:
+        valid, permutation, surrogate_assignment, record = self._plan_fold(
+            x, mask, observed=observed
+        )
+        active, active_mask = self._gather_active(
+            x, valid, permutation, surrogate_assignment
+        )
+        return _ActiveTopologyOverlay(x, active, active_mask, record)
 
     def unfold(self, state: FoldedTensor) -> UnfoldedTensor:
         return _unfold_state(
@@ -623,8 +781,24 @@ class TopologyFold(nn.Module):
             raise ValueError("topology cannot be combined with topology construction options")
         self.topology = topology
 
-    def forward(self, x: Tensor, mask: Tensor | None = None) -> FoldedTensor:
+    def forward(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+    ) -> FoldedTensor:
         return self.topology.fold(x, mask)
+
+    def _observed(self, x: Tensor, mask: Tensor, observed: Tensor) -> FoldedTensor:
+        return self.topology._fold_observed(x, mask, observed)
+
+    def _overlay(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+        *,
+        observed: Tensor | None = None,
+    ) -> _ActiveTopologyOverlay:
+        return self.topology._fold_overlay(x, mask, observed=observed)
 
 
 class TopologyUnFold(nn.Module):
@@ -656,6 +830,15 @@ class TopologyUnFold(nn.Module):
 
     def forward(self, state: FoldedTensor) -> UnfoldedTensor:
         return self.inverse_contract(state)
+
+    def _overlay(self, state: _ActiveTopologyOverlay) -> UnfoldedTensor:
+        return _materialize_overlay(
+            state,
+            active_count=self.inverse_contract.active_count,
+            axis=self.inverse_contract.axis,
+            topology_ref=self.inverse_contract.topology_ref,
+            contract_fingerprint=self.inverse_contract.contract_fingerprint,
+        )
 
 
 __all__ = [

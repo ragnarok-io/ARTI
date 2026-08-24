@@ -13,9 +13,10 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 is a **Stable Candidate**. The 3.x surface is the current
-Formula contract line; it intentionally does not preserve the 2.x Formula
-symbols or manifest schema. See [Stability](STABILITY.md) and [Security](SECURITY.md).
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.7a1 is a
+prerelease for new versioned composition contracts under `arti.alpha`; it does
+not promote those components to the stable surface. See
+[Stability](STABILITY.md) and [Security](SECURITY.md).
 
 ## Install
 
@@ -23,6 +24,12 @@ Add ARTI to a project with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv add arti-fit
+```
+
+To evaluate the 3.0.7 alpha line explicitly:
+
+```bash
+uv add --prerelease allow "arti-fit==3.0.7a1"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -45,6 +52,26 @@ The alpha browser runtime is published separately:
 ```bash
 pnpm add @arti-fit/web@alpha
 ```
+
+## What Is New In 3.0.7 Alpha
+
+`arti.alpha.AdaptivePulse` (`arti/pulse@2`) is a manifest-bound composition of
+optional observation, Half, reversible Fold/UnFold, Formula intervention,
+selective compute, Bank update, and reunion aggregation stages. Disabled
+stages are true identity operations and are omitted from the component
+dependency graph.
+
+`AdaptiveObservation` provides bounded fixed, learned, or Bank-conditioned
+observation trajectories. Identity, bounded state-affine, and Fourier shift
+operators are independently selectable. Fourier observation supports eager
+training and compiled forward; compiled FFT backward is deliberately not
+claimed. See [Adaptive observation](docs/adaptive-observation.md).
+
+The vNext contracts keep value transport, support masks, typed operands,
+component provenance, and execution budgets explicit. These APIs are alpha:
+the release establishes composable tensor contracts, not a task-performance
+claim. See [Component provenance](docs/component-provenance.md) for the
+canonical identity and dependency rules.
 
 ## What Is New In 3.0
 

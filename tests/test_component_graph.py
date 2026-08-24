@@ -32,7 +32,7 @@ def test_component_graph_describes_nested_components_and_bindings() -> None:
 
     assert graph["format"] == "arti.component.graph"
     assert graph["root"] == "node-0000"
-    assert any(node["ref"] == "arti/recall@1" for node in graph["nodes"])
+    assert any(node["ref"] == "arti/recall@2" for node in graph["nodes"])
     assert any(node["ref"] == "arti/half@1" for node in graph["nodes"])
     assert graph["bindings"] == [{"kind": "data", "from": "recall.output", "to": "half.input"}]
     assert graph["closure_fingerprint"] == arti.component_closure_fingerprint(graph)

@@ -159,6 +159,14 @@ training forward.
 
 ## Validation Boundary
 
+In the 3.0.7 alpha composition path, Fold@2 and UnFold@2 may be hosted by
+`AdaptivePulse`. The Pulse stage graph records both operations as separate
+canonical components while binding them to the same reversible-topology
+contract. Observation, Formula intervention, and selective compute may change
+which instances are active or how active values are processed; they do not
+change the recorded inverse or permit the folded payload to enter the active
+block implicitly.
+
 The public contract guarantees exact transport, complete lineage, bounded
 active workspace size, explicit surrogate gradients, and fail-closed record
 validation. It does not claim task-quality improvement or training-time speedup.

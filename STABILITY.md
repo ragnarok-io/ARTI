@@ -1,7 +1,9 @@
 # Stability Policy
 
-ARTI 3.0.6 is published as a Stable Candidate. This label is a release stage,
-not a separate package version and not an LTS promise.
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.7a1 is a
+prerelease for the versioned vNext composition contracts described below; it
+does not promote those alpha components to the supported surface and is not an
+LTS promise.
 
 ## Supported 3.x Surface
 
@@ -44,6 +46,14 @@ They preserve every original tensor instance through a recorded permutation;
 their learned topology policies and Bank Formula policies remain alpha. The
 supported `arti.nn.Fold` and `arti.nn.UnFold` names continue to resolve to the
 existing `@1` contracts.
+
+`arti.alpha.AdaptivePulse`, `AdaptiveObservation`, FormulaAttention,
+SelectiveCompute, typed topology operands, and the Pulse stage graph are
+introduced for controlled experimentation in 3.0.7a1. Their canonical
+component identities, support-mask contracts, and disabled-stage identity
+semantics are versioned, but their stage composition and performance are not
+part of the Stable Candidate surface. Fourier observation currently supports
+eager training and compiled forward; compiled FFT backward is not promised.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

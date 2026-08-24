@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import Tensor
@@ -49,6 +50,74 @@ def _half_survival(
     return torch.pow(base_t, deficit)
 
 
+def _normalize_half_context_axes(
+    context_axes: int | Sequence[int],
+    ndim: int,
+) -> tuple[int, ...]:
+    """Normalize explicit axes used by contextual Half's salience summary."""
+
+    raw_axes = (context_axes,) if isinstance(context_axes, int) else tuple(context_axes)
+    if not raw_axes:
+        raise ValueError("context_axes must contain at least one axis")
+    normalized: list[int] = []
+    for axis in raw_axes:
+        if not isinstance(axis, int):
+            raise TypeError("context_axes must contain integers")
+        resolved = axis + ndim if axis < 0 else axis
+        if resolved < 0 or resolved >= ndim:
+            raise ValueError(f"context axis {axis} is invalid for rank {ndim}")
+        if resolved not in normalized:
+            normalized.append(resolved)
+    return tuple(normalized)
+
+
+def _half_contextual_survival(
+    x: Tensor,
+    *,
+    threshold: float | Tensor,
+    base: float | Tensor,
+    scale: float | Tensor,
+    context_axes: int | Sequence[int],
+    context_gain: float,
+) -> Tensor:
+    """Compute same-shape survival with a bounded salience context."""
+
+    if not math.isfinite(context_gain) or context_gain < 0:
+        raise ValueError("context_gain must be finite and non-negative")
+    axes = _normalize_half_context_axes(context_axes, x.ndim)
+    salience = x.abs()
+    scale_value = scale.to(device=x.device, dtype=x.dtype) if isinstance(scale, Tensor) else scale
+    context = torch.tanh(salience.mean(dim=axes, keepdim=True) / scale_value)
+    effective_salience = salience + context_gain * context
+    return _half_survival(
+        effective_salience,
+        threshold=threshold,
+        base=base,
+        scale=scale,
+    )
+
+
+def _validate_half_survival(x: Tensor, survival: Tensor) -> Tensor:
+    """Validate and align a custom same-shape survival tensor."""
+
+    if not isinstance(survival, Tensor):
+        raise TypeError("custom survival must return a Tensor")
+    if survival.shape != x.shape:
+        raise ValueError(
+            f"custom survival must have the same shape as x; got {tuple(survival.shape)} "
+            f"for x={tuple(x.shape)}"
+        )
+    if not survival.is_floating_point():
+        raise TypeError("custom survival must return a floating-point Tensor")
+    if survival.device != x.device:
+        raise ValueError("custom survival and x must be on the same device")
+    if not torch.isfinite(survival).all():
+        raise ValueError("custom survival must contain only finite values")
+    if torch.any(survival < 0) or torch.any(survival > 1):
+        raise ValueError("custom survival values must be in the interval [0, 1]")
+    return survival.to(dtype=x.dtype)
+
+
 def half(
     x: Tensor,
     *,
@@ -58,22 +127,54 @@ def half(
     stochastic: bool = True,
     straight_through: bool = False,
     generator: torch.Generator | None = None,
+    survival_fn: Callable[[Tensor], Tensor] | None = None,
+    context_mode: str = "none",
+    context_axes: int | Sequence[int] = -1,
+    context_gain: float = 0.25,
 ) -> Tensor:
     """Salience-conditioned Half activation.
 
     ``half`` computes elementwise salience as ``abs(x)``, converts insufficient
     salience into ``D = relu((threshold - salience) / scale)``, then applies
-    ``q = base ** D``. Deterministic mode returns ``q * x``. In stochastic
-    mode, ``q`` is used as the survival probability and dropped features are
-    set to zero without inverted-dropout rescaling. The stochastic choice is
-    explicit and is not tied to a module's ``train``/``eval`` state.
+    ``q = base ** D``. With ``context_mode="contextual"``, bounded salience
+    evidence over ``context_axes`` influences the same-shape survival tensor.
+    Deterministic mode returns ``q * x``. In stochastic mode, ``q`` is used as
+    the survival probability and dropped features are set to zero without
+    inverted-dropout rescaling. The stochastic choice is explicit and is not
+    tied to a module's ``train``/``eval`` state.
 
     ``straight_through`` keeps the sampled forward value while using the
     differentiable survival probability in the backward pass. It is useful
     when the salience curve is learnable.
+
+    ``survival_fn`` may replace the built-in salience calculation. It must
+    return a finite floating-point tensor with exactly ``x.shape`` and values
+    in ``[0, 1]``.
     """
 
-    survival = _half_survival(x, threshold=threshold, base=base, scale=scale)
+    if not isinstance(x, Tensor):
+        raise TypeError("x must be a Tensor")
+    if context_mode not in {"none", "contextual"}:
+        raise ValueError("context_mode must be 'none' or 'contextual'")
+    if not math.isfinite(context_gain) or context_gain < 0:
+        raise ValueError("context_gain must be finite and non-negative")
+    if survival_fn is not None and not callable(survival_fn):
+        raise TypeError("survival_fn must be callable")
+    if survival_fn is not None and context_mode != "none":
+        raise ValueError("survival_fn cannot be combined with context_mode")
+    if survival_fn is not None:
+        survival = _validate_half_survival(x, survival_fn(x))
+    elif context_mode == "contextual":
+        survival = _half_contextual_survival(
+            x,
+            threshold=threshold,
+            base=base,
+            scale=scale,
+            context_axes=context_axes,
+            context_gain=context_gain,
+        )
+    else:
+        survival = _half_survival(x, threshold=threshold, base=base, scale=scale)
     if stochastic:
         try:
             mask = torch.bernoulli(survival, generator=generator)

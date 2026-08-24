@@ -260,6 +260,8 @@ class TargetBankUpdater(nn.Module):
         )
         if write_mask_b is None:
             write_mask_b = target_mask_b
+        if bool((write_mask_b & ~target_mask_b).any()):
+            raise ValueError("write_mask cannot address invalid target slots")
         if _addressable_target is not None:
             addressable_b = _addressable_target.unsqueeze(0) if squeeze else _addressable_target
             if addressable_b.shape != target_b.shape:

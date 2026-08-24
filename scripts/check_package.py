@@ -120,8 +120,18 @@ def main() -> None:
             "arti/web/contract.py",
             "arti/web/exporter.py",
             "arti/serialization.py",
+            "arti/survival.py",
             "arti/reversible_topology.py",
             "arti/topology.py",
+            "arti/adaptive_pulse.py",
+            "arti/aggregate.py",
+            "arti/formula_attention.py",
+            "arti/observation.py",
+            "arti/observation_bank.py",
+            "arti/selective_recall.py",
+            "arti/typed_topology.py",
+            "arti/vnext_contracts.py",
+            "arti/vnext_pipeline.py",
             "arti/alpha/__init__.py",
             "arti/providers.py",
             "arti/pretrained.py",
@@ -238,6 +248,10 @@ def main() -> None:
                     "assert callable(arti.ARTIHostBridge); "
                     "assert arti.torch.ARTIHostBridge is arti.ARTIHostBridge; "
                     "assert callable(arti.Half); "
+                    "assert callable(arti.ExponentialSurvival); "
+                    "assert callable(arti.register_survival); "
+                    "assert callable(arti.resolve_survival); "
+                    "assert arti.describe_survival('arti/survival@1').portable; "
                     "assert arti.torch.Half is arti.Half; "
                     "assert arti.component_ref(TargetBankUpdater(4, 3)) == 'arti/target-bank-updater@1'; "
                     "assert arti.component_ref(arti.resolve_component('arti/target-bank-updater@2', hidden_dim=4, slots=3)) == 'arti/target-bank-updater@2'; "
@@ -261,6 +275,12 @@ def main() -> None:
                     "assert callable(arti.LearnedPulse); "
                     "assert arti.torch.LearnedPulse is arti.LearnedPulse; "
                     "assert callable(arti.RecallRefiner); "
+                    "assert callable(arti.alpha.AdaptivePulse); "
+                    "assert callable(arti.alpha.AdaptiveObservation); "
+                    "assert callable(arti.alpha.FormulaAttention); "
+                    "assert callable(arti.alpha.SelectiveCompute); "
+                    "refs = {row['ref'] for row in arti.component_catalog()}; "
+                    "assert {'arti/pulse@2', 'arti/adaptive-observation@1', 'arti/formula-attention@1'} <= refs; "
                     "assert arti.torch.RecallRefiner is arti.RecallRefiner; "
                     "assert callable(arti.RecallCapacityPlan); "
                     "assert callable(arti.RecallCapacityDecision); "

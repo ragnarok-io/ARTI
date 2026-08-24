@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+from copy import deepcopy
+
 import pytest
 import torch
 
@@ -104,6 +107,143 @@ def test_active_and_folded_mutations_return_to_their_host_slots_only() -> None:
     torch.testing.assert_close(folded_result, expected_folded, rtol=0, atol=0)
 
 
+def test_active_overlay_matches_canonical_transport_and_gradients() -> None:
+    torch.manual_seed(113)
+    left = alpha.ReversibleTopology(
+        active_count=3,
+        policy=alpha.LearnedTopologyPolicy(dim=4),
+    )
+    right = deepcopy(left)
+    x_left = torch.randn(2, 8, 4, requires_grad=True)
+    x_right = x_left.detach().clone().requires_grad_()
+    weight = torch.randn(2, 8, 4)
+
+    canonical = left.fold(x_left)
+    canonical_value = left.unfold(
+        canonical.replace(active=torch.tanh(canonical.active) + 0.25)
+    ).value
+
+    fold, unfold = right.operations()
+    overlay = fold._overlay(x_right)
+    assert overlay.base is x_right
+    assert overlay.active.numel() == 2 * 3 * 4
+    overlay_value = unfold._overlay(
+        overlay.replace_active(torch.tanh(overlay.active) + 0.25)
+    ).value
+
+    torch.testing.assert_close(overlay_value, canonical_value, rtol=0, atol=0)
+    (canonical_value * weight).sum().backward()
+    (overlay_value * weight).sum().backward()
+    torch.testing.assert_close(x_right.grad, x_left.grad, rtol=0, atol=0)
+    for left_parameter, right_parameter in zip(
+        left.policy.parameters(), right.policy.parameters(), strict=True
+    ):
+        torch.testing.assert_close(
+            right_parameter.grad, left_parameter.grad, rtol=0, atol=0
+        )
+
+
+def test_fold2_public_signatures_do_not_expose_pulse_observation_support() -> None:
+    assert "observed" not in inspect.signature(alpha.ReversibleTopology.fold).parameters
+    assert "observed" not in inspect.signature(alpha.Fold.forward).parameters
+
+
+def test_active_overlay_rejects_tampered_non_bijection_record() -> None:
+    topology = alpha.ReversibleTopology(active_count=2)
+    fold, unfold = topology.operations()
+    overlay = fold._overlay(torch.randn(1, 4, 3))
+    broken = overlay.record._trusted_permutation().clone()
+    broken[..., 1] = broken[..., 0]
+    object.__setattr__(overlay.record, "_permutation", broken)
+
+    with pytest.raises(ValueError, match="complete per-sample bijection"):
+        unfold._overlay(overlay)
+
+
+def test_observation_batch_is_planned_once_with_independent_topologies() -> None:
+    class CountingPolicy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x: torch.Tensor, mask: torch.Tensor):
+            self.calls += 1
+            return alpha.TopologyProposal(alpha.TopologyAction(x[..., 0]))
+
+        def topology_contract(self) -> dict[str, object]:
+            return {"ref": "test/counting-policy@1"}
+
+    policy = CountingPolicy()
+    topology = alpha.ReversibleTopology(active_count=1, policy=policy)
+    x = torch.tensor([[[[9.0], [1.0], [0.0]], [[0.0], [1.0], [9.0]]]])
+    overlay = topology._fold_overlay(x, torch.ones(1, 2, 3, dtype=torch.bool))
+
+    assert policy.calls == 1
+    assert overlay.record.permutation[0, 0, 0].item() == 0
+    assert overlay.record.permutation[0, 1, 0].item() == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_active_overlay_cuda_inductor_fullgraph() -> None:
+    topology = alpha.ReversibleTopology(
+        active_count=3,
+        policy=alpha.FixedTopologyPolicy(order=[5, 1, 3, 0, 4, 2]),
+    ).cuda()
+    fold, unfold = topology.operations()
+
+    class OverlayModule(torch.nn.Module):
+        def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            state = fold._overlay(x, mask)
+            return unfold._overlay(state.replace_active(state.active * 2)).value
+
+    compiled = torch.compile(OverlayModule().cuda(), backend="inductor", fullgraph=True)
+    x = torch.randn(2, 6, 4, device="cuda", requires_grad=True)
+    mask = torch.ones(2, 6, dtype=torch.bool, device="cuda")
+    actual = compiled(x, mask)
+    actual.sum().backward()
+
+    assert actual.shape == x.shape
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_learned_active_overlay_cuda_fullgraph_preserves_policy_gradient() -> None:
+    class OverlayModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.topology = alpha.ReversibleTopology(
+                3, policy=alpha.LearnedTopologyPolicy(dim=4)
+            )
+            self.fold, self.unfold = self.topology.operations()
+
+        def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            overlay = self.fold._overlay(x, mask)
+            return self.unfold._overlay(
+                overlay.replace_active(overlay.active.square())
+            ).value
+
+    eager = OverlayModule().cuda().train()
+    compiled_source = OverlayModule().cuda().train()
+    compiled_source.load_state_dict(eager.state_dict())
+    compiled = torch.compile(compiled_source, backend="inductor", fullgraph=True)
+    x1 = torch.randn(2, 9, 4, device="cuda", requires_grad=True)
+    x2 = x1.detach().clone().requires_grad_()
+    mask = torch.ones(2, 9, dtype=torch.bool, device="cuda")
+
+    y1 = eager(x1, mask)
+    y2 = compiled(x2, mask)
+    torch.testing.assert_close(y2, y1)
+    y1.sum().backward()
+    y2.sum().backward()
+    torch.testing.assert_close(x2.grad, x1.grad)
+    for eager_parameter, compiled_parameter in zip(
+        eager.parameters(), compiled_source.parameters(), strict=True
+    ):
+        assert eager_parameter.grad is not None
+        assert compiled_parameter.grad is not None
+        torch.testing.assert_close(compiled_parameter.grad, eager_parameter.grad)
+
+
 def test_nested_topologies_unfold_in_lifo_order() -> None:
     x = _markers(batch=1, length=6, dim=2)
     outer = alpha.ReversibleTopology(
@@ -137,6 +277,21 @@ def test_value_gradient_follows_only_the_selected_transport_path() -> None:
     assert x.grad is not None
     expected = torch.tensor([[[2.0], [1.0], [2.0], [1.0]]])
     torch.testing.assert_close(x.grad, expected, rtol=0, atol=0)
+
+
+def test_fold_unfold_round_trip_preserves_arbitrary_cotangent() -> None:
+    x = _markers(batch=2, length=5, dim=3).requires_grad_()
+    cotangent = torch.randn_like(x)
+    topology = alpha.ReversibleTopology(
+        active_count=3,
+        policy=alpha.FixedTopologyPolicy(order=[4, 1, 3, 0, 2]),
+    )
+
+    restored = topology.unfold(topology.fold(x)).value
+    (restored * cotangent).sum().backward()
+
+    torch.testing.assert_close(restored, x, rtol=0, atol=0)
+    torch.testing.assert_close(x.grad, cotangent, rtol=0, atol=0)
 
 
 def test_invalid_permutation_fails_and_inverse_needs_only_transport_contract() -> None:
@@ -201,10 +356,22 @@ def test_component_versions_and_dependencies_are_explicit() -> None:
     assert arti.component_ref(new_fold.topology) == "arti/reversible-topology@1"
     assert arti.component_ref(new_fold.topology.policy) == "arti/fixed-topology-policy@1"
 
-    assert arti.component_spec(new_fold).dependencies == ("arti/reversible-topology@1",)
-    assert arti.component_spec(new_unfold).dependencies == (
+    provenance = arti.component_provenance(new_fold)
+    refs = {item["ref"] for item in provenance["components"]}
+    assert refs == {
+        "arti/fixed-topology-policy@1",
+        "arti/fold@2",
+        "arti/reversible-topology@1",
+        "arti/stable-priority-partition@1",
+    }
+    assert arti.validate_component_provenance(provenance) == provenance
+
+    inverse_provenance = arti.component_provenance(new_unfold)
+    inverse_refs = {item["ref"] for item in inverse_provenance["components"]}
+    assert inverse_refs == {
         "arti/inverse-topology-contract@1",
-    )
+        "arti/unfold@2",
+    }
     assert new_unfold.state_dict() == {}
 
 
@@ -267,6 +434,42 @@ def test_single_instance_has_an_empty_folded_payload() -> None:
     assert state.active.shape == (2, 1, 3)
     assert state.folded.shape == (2, 0, 3)
     assert torch.equal(topology.unfold(state).value, x)
+
+
+def test_private_observed_transport_is_distinct_from_public_fold_validity() -> None:
+    policy = alpha.LearnedTopologyPolicy(dim=3)
+    topology = alpha.ReversibleTopology(active_count=2, policy=policy)
+    first = torch.randn(2, 6, 3)
+    second = first.clone()
+    second[:, 3:] = torch.randn_like(second[:, 3:]) * 1000
+    validity = torch.ones(2, 6, dtype=torch.bool)
+    observed = torch.tensor([[True, True, True, False, False, False]]).expand(2, -1)
+
+    first_state = topology._fold_observed(first, validity, observed)
+    second_state = topology._fold_observed(second, validity, observed)
+
+    assert torch.equal(first_state.record.permutation, second_state.record.permutation)
+    torch.testing.assert_close(first_state.active, second_state.active, rtol=0, atol=0)
+    assert torch.equal(first_state.record.original_mask, validity)
+
+
+def test_observed_support_must_be_valid_and_cover_active_width() -> None:
+    topology = alpha.ReversibleTopology(active_count=2)
+    x = torch.randn(1, 4, 3)
+    validity = torch.tensor([[True, True, False, True]])
+
+    with pytest.raises(ValueError, match="subset of validity"):
+        topology._fold_observed(
+            x,
+            validity,
+            torch.tensor([[True, False, True, False]]),
+        )
+    with pytest.raises(ValueError, match="at least active_count"):
+        topology._fold_observed(
+            x,
+            validity,
+            torch.tensor([[True, False, False, False]]),
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

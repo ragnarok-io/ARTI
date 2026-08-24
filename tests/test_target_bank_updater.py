@@ -347,6 +347,22 @@ def test_write_mask_is_independent_from_readable_target_mask() -> None:
     assert not torch.allclose(result[write_mask], changed[write_mask])
 
 
+def test_write_mask_must_be_subset_of_readable_target_mask() -> None:
+    updater = _updater(steps=2)
+    trace, bank, trace_mask = _inputs()
+    target_mask = torch.tensor([[True, False, True], [True, True, True]])
+    write_mask = torch.tensor([[False, True, False], [False, False, True]])
+
+    with pytest.raises(ValueError, match="invalid target slots"):
+        updater(
+            trace,
+            bank,
+            trace_mask=trace_mask,
+            target_mask=target_mask,
+            write_mask=write_mask,
+        )
+
+
 def test_gradients_reach_trace_target_and_private_memory() -> None:
     updater = _updater(steps=3, private_slots=2)
     trace, bank, trace_mask = _inputs(requires_grad=True)

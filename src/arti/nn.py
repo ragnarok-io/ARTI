@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .functional import _half_survival, half
+from .functional import (
+    _half_contextual_survival,
+    _half_survival,
+    _validate_half_survival,
+    half,
+)
 from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
+from .survival import (
+    describe_survival,
+    resolve_survival,
+    survival_is_registered,
+    validate_survival_config,
+)
 from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
 
 if TYPE_CHECKING:
@@ -108,6 +119,18 @@ class Half(nn.Module):
     salience curve parameters trainable. These are independent options and
     neither one follows the module's ``train``/``eval`` state. A learnable
     stochastic Half uses a straight-through estimator for its survival curve.
+
+    ``context_mode="contextual"`` is an opt-in same-shape variant: bounded
+    salience evidence aggregated over explicit axes can affect a position's
+    survival, while the feature value is still only multiplied by ``q``.
+    Pointwise and contextual instances have separate component references in
+    the registry (``arti/half@1`` and ``arti/half@2``).
+
+    ``survival=...`` can replace the salience rule with a registered survival
+    reference or a local callable/module. The replacement must return a
+    floating-point tensor with exactly the same shape as ``x`` and values in
+    ``[0, 1]``. Registered builtin rules are artifact-safe; an unregistered
+    custom implementation is intentionally runtime-only.
     """
 
     def __init__(
@@ -118,6 +141,11 @@ class Half(nn.Module):
         *,
         stochastic: bool = True,
         learnable: bool = False,
+        context_mode: str = "none",
+        context_axes: int | Sequence[int] = -1,
+        context_gain: float = 0.25,
+        survival: str | nn.Module | Callable[[Tensor], Tensor] | None = None,
+        survival_config: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         if not math.isfinite(threshold):
@@ -126,11 +154,69 @@ class Half(nn.Module):
             raise ValueError("base must be in the interval (0, 1]")
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("scale must be positive")
+        if context_mode not in {"none", "contextual"}:
+            raise ValueError("context_mode must be 'none' or 'contextual'")
+        if not math.isfinite(context_gain) or context_gain < 0:
+            raise ValueError("context_gain must be finite and non-negative")
+        raw_context_axes = (context_axes,) if isinstance(context_axes, int) else tuple(context_axes)
+        if not raw_context_axes or any(not isinstance(axis, int) for axis in raw_context_axes):
+            raise ValueError("context_axes must contain at least one integer")
         self.stochastic = bool(stochastic)
         self.learnable = bool(learnable)
+        self.context_mode = context_mode
+        self.context_axes = raw_context_axes
+        self.context_gain = float(context_gain)
         self._threshold_init = float(threshold)
         self._base_init = float(base)
         self._scale_init = float(scale)
+        self._survival_operator: nn.Module | None = None
+        self._survival_callable: Callable[[Tensor], Tensor] | None = None
+        self._survival_ref: str | None = None
+        self._survival_portable = True
+        self._survival_runtime_only = False
+        self._survival_config = validate_survival_config(survival_config)
+        if survival is not None:
+            if (
+                threshold != 1.0
+                or base != 0.5
+                or scale != 1.0
+                or learnable
+                or context_mode != "none"
+            ):
+                raise ValueError(
+                    "custom survival owns threshold/base/scale/context; pass those "
+                    "through survival_config instead"
+                )
+            if isinstance(survival, str):
+                registration = resolve_survival(survival)
+                self._survival_config = validate_survival_config(survival_config)
+                self._survival_operator = registration.instantiate(self._survival_config)
+                self._survival_ref = registration.reference
+                self._survival_portable = registration.portable
+                self._survival_runtime_only = not registration.portable
+            elif isinstance(survival, nn.Module):
+                self._survival_operator = survival
+                reference = getattr(survival, "reference", None)
+                if isinstance(reference, str) and survival_is_registered(reference):
+                    description = describe_survival(reference)
+                    self._survival_ref = reference
+                    self._survival_portable = description.portable
+                    self._survival_runtime_only = not description.portable
+                    if survival_config is None:
+                        candidate = getattr(survival, "config", {})
+                        if callable(candidate):
+                            candidate = candidate()
+                        if isinstance(candidate, Mapping):
+                            self._survival_config = validate_survival_config(candidate)
+                else:
+                    self._survival_portable = False
+                    self._survival_runtime_only = True
+            elif callable(survival):
+                self._survival_callable = survival
+                self._survival_portable = False
+                self._survival_runtime_only = True
+            else:
+                raise TypeError("survival must be a registered reference, nn.Module, or callable")
         if self.learnable:
             self._threshold = nn.Parameter(torch.tensor(float(threshold)))
             self._base_logit = nn.Parameter(torch.tensor(_half_inverse_base(base)))
@@ -157,9 +243,91 @@ class Half(nn.Module):
             return self._scale_value
         return F.softplus(self._scale_raw) + 1e-6
 
+    @property
+    def survival_reference(self) -> str | None:
+        """Return the versioned identity of the configured survival rule."""
+
+        if self._survival_ref is not None:
+            return self._survival_ref
+        if self._survival_runtime_only:
+            return None
+        return (
+            "arti/survival@2"
+            if self.context_mode == "contextual"
+            else "arti/survival@1"
+        )
+
+    @property
+    def survival_operator(self) -> nn.Module | None:
+        """Return the custom survival module, if one was supplied."""
+
+        return self._survival_operator
+
+    @property
+    def survival_portable(self) -> bool:
+        return self._survival_portable
+
+    @property
+    def survival_runtime_only(self) -> bool:
+        return self._survival_runtime_only
+
+    @property
+    def survival_metadata(self) -> dict[str, Any]:
+        """Return code-free metadata for provenance and artifact checks."""
+
+        if self._survival_ref is None:
+            config: dict[str, Any] = {
+                "threshold": self._threshold_init,
+                "base": self._base_init,
+                "scale": self._scale_init,
+                "learnable": self.learnable,
+            }
+            if self.context_mode != "none":
+                config.update(
+                    {
+                        "context_mode": self.context_mode,
+                        "context_axes": list(self.context_axes),
+                        "context_gain": self.context_gain,
+                    }
+                )
+        else:
+            config = dict(self._survival_config)
+        return {
+            "ref": self.survival_reference,
+            "origin": "builtin" if self.survival_portable else "runtime",
+            "portable": self.survival_portable,
+            "runtime_only": self.survival_runtime_only,
+            "config": config,
+        }
+
+    def _custom_survival(self, x: Tensor) -> Tensor:
+        if self._survival_operator is not None:
+            result = self._survival_operator(x)
+        elif self._survival_callable is not None:
+            result = self._survival_callable(x)
+        else:
+            raise RuntimeError("custom survival implementation is not configured")
+        return _validate_half_survival(x, result)
+
+    def _custom_survival_has_trainable_parameters(self) -> bool:
+        return self._survival_operator is not None and any(
+            parameter.requires_grad for parameter in self._survival_operator.parameters()
+        )
+
     def survival(self, x: Tensor) -> Tensor:
         """Return the differentiable survival probability ``q(x)``."""
 
+        if self._survival_ref is not None or self._survival_operator is not None or self._survival_callable is not None:
+            return self._custom_survival(x)
+        if self.context_mode == "contextual":
+            return _half_contextual_survival(
+                x,
+                threshold=self.threshold,
+                base=self.base,
+                scale=self.scale,
+                context_axes=self.context_axes,
+                context_gain=self.context_gain,
+            )
         return _half_survival(
             x,
             threshold=self.threshold,
@@ -168,6 +336,13 @@ class Half(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        if self._survival_ref is not None or self._survival_operator is not None or self._survival_callable is not None:
+            return half(
+                x,
+                stochastic=self.stochastic,
+                straight_through=self._custom_survival_has_trainable_parameters(),
+                survival_fn=self._custom_survival,
+            )
         return half(
             x,
             threshold=self.threshold,
@@ -175,6 +350,9 @@ class Half(nn.Module):
             scale=self.scale,
             stochastic=self.stochastic,
             straight_through=self.learnable,
+            context_mode=self.context_mode,
+            context_axes=self.context_axes,
+            context_gain=self.context_gain,
         )
 
     def extra_repr(self) -> str:
@@ -187,7 +365,21 @@ class Half(nn.Module):
             args.append("stochastic=False")
         if self.learnable:
             args.append("learnable=True")
+        if self.context_mode != "none":
+            args.append(f"context_mode={self.context_mode!r}")
+            args.append(f"context_axes={self.context_axes!r}")
+            args.append(f"context_gain={self.context_gain:g}")
+        if self._survival_ref is not None or self._survival_operator is not None or self._survival_callable is not None:
+            args.append(f"survival={self.survival_reference!r}")
+            if self.survival_runtime_only:
+                args.append("runtime_only=True")
         return ", ".join(args)
+
+    @property
+    def _component_reference(self) -> str:
+        """Return the registry identity for this mathematical Half variant."""
+
+        return "arti/half@2" if self.context_mode == "contextual" else "arti/half@1"
 
 
 class _HardLayoutSoftGradient(torch.autograd.Function):
@@ -1890,6 +2082,7 @@ class Recall(nn.Module):
     """
 
     output_semantics = "next_state"
+    _component_reference = "arti/recall@2"
 
     def __init__(
         self,
@@ -2051,8 +2244,19 @@ class Recall(nn.Module):
         mask: Tensor | None = None,
         recall: Tensor | None = None,
         route_assignment: Tensor | None = None,
+        refine_policy=None,
+        route_plan=None,
         return_info: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        from .recall_refine import AdaptiveRefinePolicy, RecallRoutePlan, RefinePolicy
+
+        if refine_policy is not None and not isinstance(
+            refine_policy,
+            (RefinePolicy, AdaptiveRefinePolicy),
+        ):
+            raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
+        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
+            raise TypeError("route_plan must be a RecallRoutePlan or None")
         if not isinstance(x, Tensor) or not x.is_floating_point():
             raise TypeError("x must be a floating-point Tensor")
         if x.ndim not in {2, 3}:
@@ -2077,6 +2281,8 @@ class Recall(nn.Module):
             token_mask,
             recall,
             route_assignment,
+            refine_policy=refine_policy,
+            route_plan=route_plan,
         )
         output = next_state.squeeze(1) if was_vector else next_state
         if not return_info:

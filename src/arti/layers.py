@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from .recall_policy import RecallParameterTag
 from .outputs import ARTIOutput
 from .recall_formula import RecallFormulaContract, formula_dtype_supported, validate_formula
+from .recall_refine import AdaptiveRefinePolicy, RecallRoutePlan, RefinePolicy
 from .utils import assert_floating_tensor, detach_diagnostics
 
 
@@ -830,8 +832,13 @@ class ARTILatentRecallField(nn.Module):
         """Resolve one signed write multiplier from per-expert route mass."""
 
         if self._route_influence.numel() == 0:
-            return route.new_ones(route.shape[:-1])
+            return route.new_ones(route.shape[:2])
         route_width = self._route_width()
+        if route.ndim == 4:
+            if route.shape[-2:] != (self.composition_factor, route_width):
+                raise RuntimeError("Recall route plan has an incompatible factor layout")
+            influence = self._route_influence.to(device=route.device, dtype=route.dtype)
+            return torch.sum(route * influence, dim=-1).mean(dim=-1)
         if route.shape[-1] == 0 or route.shape[-1] % route_width:
             raise RuntimeError("Recall route is unavailable for signed expert influence")
         factor_count = route.shape[-1] // route_width
@@ -871,6 +878,187 @@ class ARTILatentRecallField(nn.Module):
 
         self._training_group_partitions = None
 
+    def route_plan_from_tensors(
+        self,
+        weights: Tensor,
+        indices: Tensor,
+        route: Tensor,
+        *,
+        detach: bool = True,
+    ) -> RecallRoutePlan:
+        """Normalize one Recall routing decision into a replayable plan."""
+
+        if self.training and self._training_group_partitions is not None:
+            raise ValueError("route plans cannot be captured from partitioned training routes")
+        if weights.shape[:2] != route.shape[:2]:
+            raise ValueError("route-plan source tensors must share [B,N]")
+        if self.routing == "dense":
+            if weights.shape[-1] != self.slots:
+                raise ValueError("dense route plans cannot include external Recall values")
+            weights = weights.reshape(*weights.shape[:2], self.composition_factor, -1)
+            slots_per_factor = self.slots // self.composition_factor
+            local = torch.arange(slots_per_factor, device=weights.device, dtype=torch.long)
+            offsets = torch.arange(
+                self.composition_factor,
+                device=weights.device,
+                dtype=torch.long,
+            ) * slots_per_factor
+            indices = (local.view(1, 1, 1, -1) + offsets.view(1, 1, -1, 1)).expand_as(
+                weights
+            )
+        elif self.value_composition == "single":
+            weights = weights.flatten(-2).unsqueeze(-2)
+            indices = indices.flatten(-2).unsqueeze(-2)
+        else:
+            weights = weights.reshape(*weights.shape[:2], self.composition_factor, -1)
+            indices = indices.reshape_as(weights)
+        route = route.reshape(*route.shape[:2], self.composition_factor, -1)
+        plan = RecallRoutePlan(
+            schema_version=1,
+            routing=self.routing,
+            value_composition=self.value_composition,
+            slots=self.slots,
+            composition_factor=self.composition_factor,
+            group_size=self.group_size,
+            layout_fingerprint=self._route_layout_fingerprint(),
+            weights=weights,
+            indices=indices,
+            route=route,
+        )
+        return plan.detach().clone() if detach else plan
+
+    def _route_layout_fingerprint(self) -> str:
+        """Identify route topology without binding mutable Bank values."""
+
+        contract = self.formula_contract
+        payload = json.dumps(
+            {
+                "schema": "arti/recall-route-layout@1",
+                "hidden_dim": self.hidden_dim,
+                "slots": self.slots,
+                "routing": self.routing,
+                "group_size": self.group_size,
+                "group_topk": self.group_topk,
+                "value_composition": self.value_composition,
+                "factor_names": self.factor_names,
+                "factor_route_names": self.factor_route_names,
+                "formula_contract": None if contract is None else contract.to_dict(),
+                "expert_names": self._expert_names,
+                "expert_route_ranges": self._expert_route_ranges,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _read_route_plan(
+        self,
+        z: Tensor,
+        plan: RecallRoutePlan,
+        *,
+        route_assignment: Tensor | None,
+        memory: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Gather current Bank values through a frozen routing decision."""
+
+        expected = (
+            self.routing,
+            self.value_composition,
+            self.slots,
+            self.composition_factor,
+            self.group_size,
+        )
+        actual = (
+            plan.routing,
+            plan.value_composition,
+            plan.slots,
+            plan.composition_factor,
+            plan.group_size,
+        )
+        if actual != expected:
+            raise ValueError("route_plan is incompatible with this Recall component")
+        if plan.layout_fingerprint != self._route_layout_fingerprint():
+            raise ValueError("route_plan layout fingerprint does not match this Recall component")
+        if plan.weights.shape[:2] != z.shape[:2]:
+            raise ValueError("route_plan batch and token dimensions must match z")
+        if plan.weights.device != z.device:
+            raise ValueError("route_plan must be on the same device as z")
+
+        weights = plan.weights.detach().to(dtype=z.dtype)
+        indices = plan.indices.detach()
+        route = plan.route.detach().to(dtype=z.dtype)
+        expected_k = (
+            self.slots // self.composition_factor
+            if self.routing == "dense"
+            else self.group_topk * self.group_size
+        )
+        if weights.shape[-1] != expected_k:
+            raise ValueError("route_plan selected-width does not match this Recall component")
+        route_width = self._route_width()
+        if route.shape[-1] != route_width:
+            raise ValueError("route_plan route width does not match this Recall component")
+        factor_width = self.slots // self.composition_factor
+        factor_offsets = torch.arange(
+            self.composition_factor,
+            device=z.device,
+            dtype=torch.long,
+        ).view(1, 1, -1, 1) * factor_width
+        valid_indices = (indices >= factor_offsets) & (indices < factor_offsets + factor_width)
+        torch._assert_async(torch.all(valid_indices), "route_plan indices cross Formula factors")
+        torch._assert_async(
+            torch.all(torch.isfinite(weights) & (weights >= 0)),
+            "route_plan weights must be finite and non-negative",
+        )
+        normalization_atol = max(1e-5, 4.0 * torch.finfo(weights.dtype).eps)
+        torch._assert_async(
+            torch.isclose(
+                weights.sum(dim=-1),
+                torch.ones_like(weights[..., 0]),
+                rtol=1e-4,
+                atol=normalization_atol,
+            ).all(),
+            "route_plan weights must sum to one per factor",
+        )
+        torch._assert_async(
+            torch.all(torch.isfinite(route) & (route >= 0)),
+            "route_plan route mass must be finite and non-negative",
+        )
+        torch._assert_async(
+            torch.isclose(
+                route.sum(dim=-1),
+                torch.ones_like(route[..., 0]),
+                rtol=1e-4,
+                atol=normalization_atol,
+            ).all(),
+            "route_plan route mass must sum to one per factor",
+        )
+        bank = memory
+        if bank is None:
+            bank = self.bank if self._bank_gradient_enabled else self.bank.detach()
+        if bank.device != z.device or bank.shape[-2:] != (self.slots, self.hidden_dim):
+            raise ValueError("route-plan memory must match Recall device, slots, and hidden_dim")
+        if bank.ndim not in {2, 3} or (bank.ndim == 3 and bank.shape[0] != z.shape[0]):
+            raise ValueError("route-plan memory must have shape [S,D] or [B,S,D]")
+
+        if bank.ndim == 2:
+            selected = torch.nn.functional.embedding(indices, bank)
+        else:
+            selected = self._select_explicit_values(bank, indices, sparse=False)
+        factors = (selected.to(dtype=z.dtype) * weights.unsqueeze(-1)).sum(dim=-2)
+        if self.value_composition == "single":
+            context = factors[..., 0, :]
+        elif self.value_composition == "product":
+            context = self._compose_product_write(z, factors[..., 0, :], factors[..., 1, :])
+        elif self.value_composition == "custom":
+            context = self._compose_custom_write(
+                z,
+                self._assign_factor_route_gradients(z, factors, route_assignment),
+            )
+        else:
+            context = self._compose_state_write(z, factors)
+        return context, weights, indices, route
+
     def forward(
         self,
         z: Tensor,
@@ -879,6 +1067,7 @@ class ARTILatentRecallField(nn.Module):
         selected_groups: Tensor | None = None,
         route_assignment: Tensor | None = None,
         memory: Tensor | None = None,
+        route_plan: RecallRoutePlan | None = None,
         _selected_groups_normalized: bool = False,
     ) -> _ARTIRecallRead:
         if recall is not None and (
@@ -888,15 +1077,25 @@ class ARTILatentRecallField(nn.Module):
         if selected_groups is not None and self.routing != "grouped":
             raise ValueError("selected_groups is only supported by grouped Recall routing")
 
-        context, weights, indices, route = self._read_bank(
-            z,
-            recall=recall,
-            selected_groups=selected_groups,
-            route_assignment=route_assignment,
-            memory=memory,
-            selected_groups_normalized=_selected_groups_normalized,
-            return_route=True,
-        )
+        if route_plan is not None:
+            if recall is not None or selected_groups is not None:
+                raise ValueError("route_plan cannot be combined with recall or selected_groups")
+            context, weights, indices, route = self._read_route_plan(
+                z,
+                route_plan,
+                route_assignment=route_assignment,
+                memory=memory,
+            )
+        else:
+            context, weights, indices, route = self._read_bank(
+                z,
+                recall=recall,
+                selected_groups=selected_groups,
+                route_assignment=route_assignment,
+                memory=memory,
+                selected_groups_normalized=_selected_groups_normalized,
+                return_route=True,
+            )
 
         if self.recognition_mode == "explicit":
             similarity = torch.cosine_similarity(z, context, dim=-1, eps=1e-6)
@@ -2380,8 +2579,31 @@ class ARTIRecallWriteState(nn.Module):
         mask: Tensor,
         recall: Tensor | None = None,
         route_assignment: Tensor | None = None,
+        refine_policy: RefinePolicy | AdaptiveRefinePolicy | None = None,
+        route_plan: RecallRoutePlan | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         self._calibrate_state_bank_once(z, mask)
+        if refine_policy is not None and not isinstance(
+            refine_policy,
+            (RefinePolicy, AdaptiveRefinePolicy),
+        ):
+            raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
+        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
+            raise TypeError("route_plan must be a RecallRoutePlan or None")
+        if route_plan is not None and recall is not None:
+            raise ValueError("route_plan does not support external recall tensors")
+
+        run_steps = self.config.recall_steps
+        min_steps = self.config.recall_min_steps
+        tolerance = self.config.recall_tolerance
+        if refine_policy is not None:
+            run_steps = refine_policy.max_steps
+            min_steps = refine_policy.min_steps
+            tolerance = (
+                refine_policy.tolerance
+                if isinstance(refine_policy, RefinePolicy)
+                else None
+            )
         initial = z
         cumulative_write = torch.zeros_like(z)
         active = mask.any(dim=1)
@@ -2391,13 +2613,14 @@ class ARTIRecallWriteState(nn.Module):
         step_update_ratio: list[Tensor] = []
         last_read: _ARTIRecallRead | None = None
 
-        for step in range(self.config.recall_steps):
+        for step in range(run_steps):
             # Re-route after every update so iterative Recall can select a new trace.
             read = self.recall(
                 z,
                 mask,
                 recall,
                 route_assignment=route_assignment,
+                route_plan=route_plan,
             )
             last_read = read
             raw_write = read.context
@@ -2427,20 +2650,30 @@ class ARTIRecallWriteState(nn.Module):
             steps_executed = steps_executed + active.to(z.dtype)
             step_active.append(active.to(z.dtype))
             step_update_ratio.append(update_ratio)
-            if (
-                self.config.recall_tolerance is not None
-                and step + 1 >= self.config.recall_min_steps
-            ):
-                active = active & (update_ratio.detach() > self.config.recall_tolerance)
+            if tolerance is not None and step + 1 >= min_steps:
+                active = active & (update_ratio.detach() > tolerance)
                 if not bool(torch.any(active)):
                     break
 
-        padding = self.config.recall_steps - len(step_active)
+        padding = run_steps - len(step_active)
         step_active.extend(torch.zeros_like(steps_executed) for _ in range(padding))
         step_update_ratio.extend(torch.zeros_like(update_ratio) for _ in range(padding))
         if self._replaces_state:
             cumulative_write = z - initial
-        assert last_read is not None
+        if last_read is None:
+            empty_weights = z.new_empty(z.shape[0], z.shape[1], 0)
+            empty_indices = torch.empty(
+                z.shape[0], z.shape[1], 0, device=z.device, dtype=torch.long
+            )
+            empty_route = z.new_empty(z.shape[0], z.shape[1], 0)
+            last_read = _ARTIRecallRead(
+                context=torch.zeros_like(z),
+                weights=empty_weights,
+                influence=torch.zeros_like(z),
+                recognition=z.new_zeros(z.shape[:2]),
+                indices=empty_indices,
+                route=empty_route,
+            )
         diagnostics = {
             "recall_bank_weights": last_read.weights,
             "recall_bank_indices": last_read.indices,
