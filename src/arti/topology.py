@@ -43,6 +43,12 @@ class TopologyProposal:
 
     action: TopologyAction
 
+    _component_reference: ClassVar[str] = "arti/topology-proposal@1"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.action, TopologyAction):
+            raise TypeError("TopologyProposal action must be a TopologyAction")
+
 
 class StablePriorityPartition(nn.Module):
     """Convert priorities into a valid-first, stable, complete permutation."""
@@ -66,6 +72,14 @@ class StablePriorityPartition(nn.Module):
             raise ValueError("topology priority must contain only finite values")
         ranked = priority.masked_fill(~mask, -torch.inf)
         return torch.argsort(ranked, dim=-1, descending=True, stable=True)
+
+    def topology_contract(self) -> dict[str, object]:
+        return {
+            "ref": self._component_reference,
+            "order": "stable-descending",
+            "tie_break": "original-index-ascending",
+            "validity": "valid-first",
+        }
 
 
 class SoftTopKTopologySurrogate(nn.Module):
@@ -165,6 +179,102 @@ class SoftTopKTopologySurrogate(nn.Module):
 
     def extra_repr(self) -> str:
         return f"temperature={self.temperature}"
+
+    def topology_contract(self) -> dict[str, object]:
+        return {
+            "ref": self._component_reference,
+            "temperature": self.temperature,
+            "equation": "cardinality-threshold-with-detached-rank-anchors",
+            "path": "backward-only",
+        }
+
+
+class PairwiseRankTopologySurrogate(SoftTopKTopologySurrogate):
+    """Pairwise soft-rank, soft-position estimator for hard topology.
+
+    This module never supplies forward values or a hard permutation.  It only
+    provides the differentiable assignment consumed by Fold's zero-valued VJP
+    carrier.
+    """
+
+    _component_reference: ClassVar[str] = "arti/topology-surrogate@2"
+
+    def __init__(
+        self,
+        temperature: float = 0.25,
+        *,
+        position_temperature: float = 0.10,
+    ) -> None:
+        super().__init__(temperature)
+        if not math.isfinite(position_temperature) or position_temperature <= 0:
+            raise ValueError("position_temperature must be finite and positive")
+        self.position_temperature = float(position_temperature)
+
+    def forward(self, action: TopologyAction, mask: Tensor, active_count: int) -> Tensor:
+        scores = action.priority
+        length = scores.shape[-1]
+        if not 1 <= active_count <= length:
+            raise ValueError("active_count must be in [1, instance_count]")
+        if mask.dtype != torch.bool or mask.shape != scores.shape:
+            raise ValueError("mask must be boolean and match topology priority")
+        if mask.device != scores.device:
+            raise ValueError("mask and topology priority must share a device")
+
+        compute_dtype = (
+            torch.float32
+            if scores.dtype in {torch.float16, torch.bfloat16}
+            else scores.dtype
+        )
+        working = scores.to(compute_dtype)
+        valid = mask.to(compute_dtype)
+
+        # r_i = sum_j sigmoid((s_j - s_i) / temperature).  Invalid j terms
+        # are removed, while invalid i positions are excluded downstream.
+        pairwise = torch.sigmoid(
+            (working.unsqueeze(-2) - working.unsqueeze(-1)) / self.temperature
+        )
+        soft_rank = (pairwise * valid.unsqueeze(-2)).sum(dim=-1)
+        positions = torch.arange(
+            active_count, device=scores.device, dtype=compute_dtype
+        ).reshape((1,) * (scores.ndim - 1) + (active_count, 1))
+        logits = -(
+            (soft_rank.unsqueeze(-2) - positions).square()
+            / self.position_temperature
+        )
+        logits = logits.masked_fill(
+            ~mask.unsqueeze(-2), torch.finfo(compute_dtype).min
+        )
+        assignment = torch.softmax(logits, dim=-1) * valid.unsqueeze(-2)
+
+        valid_count = mask.sum(dim=-1, keepdim=True)
+        rank_index = torch.arange(active_count, device=scores.device).reshape(
+            (1,) * (scores.ndim - 1) + (active_count, 1)
+        )
+        valid_rank = rank_index < valid_count.unsqueeze(-2)
+        assignment = torch.where(
+            valid_rank,
+            assignment,
+            torch.zeros_like(assignment),
+        )
+        return assignment.to(scores.dtype)
+
+    def topology_contract(self) -> dict[str, object]:
+        return {
+            "ref": self._component_reference,
+            "rank_temperature": self.temperature,
+            "position_temperature": self.position_temperature,
+            "soft_rank": "r_i=sum_j sigmoid((s_j-s_i)/rank_temperature)",
+            "soft_position": (
+                "W[p,i]=softmax_i(-(r_i-p)^2/position_temperature)"
+            ),
+            "path": "backward-only",
+        }
+
+    def extra_repr(self) -> str:
+        return (
+            f"temperature={self.temperature}, "
+            f"position_temperature={self.position_temperature}"
+        )
 
 
 class LearnedTopologyPolicy(nn.Module):

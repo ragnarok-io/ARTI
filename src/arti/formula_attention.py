@@ -371,10 +371,13 @@ class SelectiveCompute(nn.Module):
         factors: Tensor | None = None,
         *,
         visibility: Tensor | None = None,
+        formula_route: object | None = None,
         return_info: bool = False,
     ) -> ActiveWorkspace | tuple[ActiveWorkspace, SelectiveComputeInfo]:
         if not isinstance(workspace, ActiveWorkspace):
             raise TypeError("SelectiveCompute requires ActiveWorkspace")
+        if formula_route is not None:
+            raise ValueError("SelectiveCompute does not consume formula_route")
         self.limits.admit_tensor(workspace.value, name="SelectiveCompute active")
         if factors is None:
             factors = workspace.value.new_empty((*workspace.value.shape[:-1], 0))

@@ -260,7 +260,13 @@ class TargetBankUpdater(nn.Module):
         )
         if write_mask_b is None:
             write_mask_b = target_mask_b
-        if bool((write_mask_b & ~target_mask_b).any()):
+        invalid_write = (write_mask_b & ~target_mask_b).any()
+        if torch.compiler.is_compiling() or invalid_write.device.type != "cpu":
+            torch._assert_async(
+                ~invalid_write,
+                "write_mask cannot address invalid target slots",
+            )
+        elif bool(invalid_write):
             raise ValueError("write_mask cannot address invalid target slots")
         if _addressable_target is not None:
             addressable_b = _addressable_target.unsqueeze(0) if squeeze else _addressable_target
@@ -302,7 +308,7 @@ class TargetBankUpdater(nn.Module):
 
         for step in range(max_steps):
             active_before = active
-            if not bool(active_before.any()):
+            if not torch.compiler.is_compiling() and not bool(active_before.any()):
                 break
             memory_target = current if addressable_b is None else addressable_b
             query = torch.nn.functional.linear(state, self.query_weight.to(state))
@@ -573,7 +579,10 @@ class TargetBankUpdater(nn.Module):
             value = value.expand(batch_size)
         if value.ndim != 1 or value.shape[0] != batch_size:
             raise ValueError("exposure must be a scalar or have shape [B]")
-        if not bool(torch.isfinite(value).all()) or bool((value < 0).any()):
+        valid = torch.isfinite(value).all() & (value >= 0).all()
+        if torch.compiler.is_compiling() or valid.device.type != "cpu":
+            torch._assert_async(valid, "exposure must be finite and non-negative")
+        elif not bool(valid):
             raise ValueError("exposure must be finite and non-negative")
         return value
 

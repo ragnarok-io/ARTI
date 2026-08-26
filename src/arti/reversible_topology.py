@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 from typing import ClassVar, Sequence
 
 import torch
@@ -28,6 +29,23 @@ FOLD_RECORD_SCHEMA_VERSION = 1
 FOLD_STATE_SCHEMA_VERSION = 1
 
 
+@dataclass(frozen=True)
+class _TopologySourceBinding:
+    source: nn.Module
+    source_ref: str
+    contract_fingerprint: str
+    input_count: int
+    instance_axes: tuple[int | None, ...] | None
+    provenance_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _PreparedTopologySourceInputs:
+    payload: Tensor
+    values: tuple[Tensor, ...]
+    binding: _TopologySourceBinding
+
+
 class _HardValueSoftTopology(torch.autograd.Function):
     """Return hard values exactly while routing a VJP to soft topology."""
 
@@ -43,6 +61,30 @@ class _HardValueSoftTopology(torch.autograd.Function):
 def _sha256_json(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_component_ref(value: object, *, role: str) -> str:
+    reference = getattr(value, "_component_reference", None)
+    if not isinstance(reference, str):
+        raise TypeError(f"{role} must expose a stable component reference")
+    name = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
+    if re.fullmatch(rf"{name}/{name}@[1-9][0-9]*", reference) is None:
+        raise ValueError(f"{role} component reference must be canonical")
+    return reference
+
+
+def _json_contract(value: object, *, role: str) -> dict[str, object]:
+    contract_method = getattr(value, "topology_contract", None)
+    if not callable(contract_method):
+        raise TypeError(f"{role} must expose topology_contract()")
+    contract = contract_method()
+    if not isinstance(contract, dict):
+        raise TypeError(f"{role} topology_contract() must return a dict")
+    try:
+        json.dumps(contract, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{role} topology contract must be JSON-serializable") from error
+    return contract
 
 
 def _transport_contract_fingerprint(*, active_count: int, axis: int) -> str:
@@ -516,7 +558,7 @@ class ReversibleTopology(nn.Module):
             self.surrogate, SoftTopKTopologySurrogate
         ):
             raise TypeError(
-                "ReversibleTopology@1 requires SoftTopKTopologySurrogate@1"
+                "ReversibleTopology@1 requires a canonical topology surrogate"
             )
         self._contract_fingerprint = self._make_contract_fingerprint()
         self._producer_provenance_fingerprint = self._make_producer_fingerprint()
@@ -528,12 +570,10 @@ class ReversibleTopology(nn.Module):
         )
 
     def _make_producer_fingerprint(self) -> str:
-        contract = getattr(self.policy, "topology_contract", None)
-        if not callable(contract):
-            raise TypeError("topology policy must expose topology_contract()")
+        policy_contract = _json_contract(self.policy, role="topology policy")
         return _sha256_json(
             {
-                "policy": contract(),
+                "policy": policy_contract,
                 "operator_ref": self.operator._component_reference,
                 "surrogate": (
                     None
@@ -543,6 +583,28 @@ class ReversibleTopology(nn.Module):
                         "temperature": self.surrogate.temperature,
                         "path": "backward-only",
                     }
+                ),
+            }
+        )
+
+    def _source_provenance_fingerprint(self, source: nn.Module) -> str:
+        source_ref = _canonical_component_ref(source, role="topology source")
+        source_contract = _json_contract(source, role="topology source")
+        if source_contract.get("ref") != source_ref:
+            raise ValueError("topology source contract ref must match its component reference")
+        input_schema = source_contract.get("input_schema")
+        if not isinstance(input_schema, (list, tuple)):
+            raise ValueError("topology source contract must declare an input_schema sequence")
+        return _sha256_json(
+            {
+                "source_ref": source_ref,
+                "source_contract": source_contract,
+                "proposal_ref": TopologyProposal._component_reference,
+                "operator": self.operator.topology_contract(),
+                "surrogate": (
+                    None
+                    if self.surrogate is None
+                    else self.surrogate.topology_contract()
                 ),
             }
         )
@@ -681,6 +743,236 @@ class ReversibleTopology(nn.Module):
         active_mask = torch.gather(valid, -1, active_index).clone()
         return active, active_mask
 
+    def fold_from_source(
+        self,
+        x: Tensor,
+        *,
+        source: nn.Module,
+        source_inputs: tuple[Tensor, ...],
+        mask: Tensor | None = None,
+        observed: Tensor | None = None,
+        require_source_axes: bool = False,
+    ) -> FoldedTensor:
+        """Fold from an eager caller-owned source using its declared contract."""
+
+        return self._fold_from_source(
+            x,
+            source=source,
+            source_inputs=source_inputs,
+            mask=mask,
+            observed=observed,
+            require_source_axes=require_source_axes,
+            _source_binding=None,
+        )
+
+    def _fold_from_source(
+        self,
+        x: Tensor,
+        *,
+        source: nn.Module,
+        source_inputs: tuple[Tensor, ...] | _PreparedTopologySourceInputs,
+        mask: Tensor | None = None,
+        observed: Tensor | None = None,
+        require_source_axes: bool = False,
+        _source_binding: _TopologySourceBinding | None = None,
+    ) -> FoldedTensor:
+        """Fold payload from a caller-owned source without passing payload implicitly.
+
+        Source inputs aligned to the instance axis are redacted by observation
+        support before the source runs. Callers remain responsible for the
+        provenance of explicitly supplied source inputs.
+        """
+
+        if not isinstance(source, nn.Module):
+            raise TypeError("topology source must be an nn.Module")
+        if isinstance(source_inputs, _PreparedTopologySourceInputs):
+            if source_inputs.payload is not x:
+                raise ValueError(
+                    "prepared topology source inputs belong to another payload"
+                )
+            if _source_binding is None or source_inputs.binding is not _source_binding:
+                raise ValueError(
+                    "prepared topology source inputs belong to another binding"
+                )
+            source_values = source_inputs.values
+        else:
+            if torch.compiler.is_compiling():
+                raise RuntimeError(
+                    "compiled topology source execution requires "
+                    "Fold.prepare_source_inputs(payload, source_inputs)"
+                )
+            source_values = source_inputs
+        if not isinstance(source_values, tuple) or not all(
+            isinstance(item, Tensor) for item in source_values
+        ):
+            raise TypeError("source_inputs must be a tuple of Tensors")
+        if x.ndim < 2 or x.shape[-2] == 0:
+            raise ValueError("x must have shape [..., N, D] with at least one instance")
+        if self.active_count > x.shape[-2]:
+            raise ValueError(
+                f"active_count={self.active_count} exceeds input length {x.shape[-2]}"
+            )
+        valid = (
+            torch.ones(x.shape[:-1], dtype=torch.bool, device=x.device)
+            if mask is None
+            else mask
+        )
+        if valid.shape != x.shape[:-1] or valid.dtype != torch.bool:
+            raise ValueError("mask must be boolean with shape x.shape[:-1]")
+        if valid.device != x.device:
+            raise ValueError("mask and x must share a device")
+        if observed is None:
+            policy_mask = valid
+        else:
+            if observed.shape != x.shape[:-1] or observed.dtype != torch.bool:
+                raise ValueError("observed must be boolean with shape x.shape[:-1]")
+            if observed.device != x.device:
+                raise ValueError("observed and x must share a device")
+            observed_is_valid = (~observed | valid).all()
+            enough_observed = (observed.sum(dim=-1) >= self.active_count).all()
+            if torch.compiler.is_compiling():
+                torch._assert_async(
+                    observed_is_valid,
+                    "observed support must be a subset of validity",
+                )
+                torch._assert_async(
+                    enough_observed,
+                    "observed support must contain at least active_count values",
+                )
+            else:
+                if not bool(observed_is_valid):
+                    raise ValueError("observed support must be a subset of validity")
+                if not bool(enough_observed):
+                    raise ValueError(
+                        "observed support must contain at least active_count values"
+                    )
+            policy_mask = observed
+
+        if _source_binding is None:
+            if torch.compiler.is_compiling():
+                raise RuntimeError(
+                    "compiled topology source execution requires "
+                    "Fold.bind_source_contract(source) before compilation"
+                )
+            source_contract = _json_contract(source, role="topology source")
+            input_schema = source_contract.get("input_schema")
+            if not isinstance(input_schema, (list, tuple)):
+                raise ValueError(
+                    "topology source contract must declare an input_schema sequence"
+                )
+            source_input_count = len(input_schema)
+            declared_axes = source_contract.get("input_instance_axes")
+            source_instance_axes = (
+                None if declared_axes is None else tuple(declared_axes)
+            )
+            source_provenance_fingerprint = None
+        else:
+            if source is not _source_binding.source:
+                raise ValueError("topology source does not match the bound source")
+            source_input_count = _source_binding.input_count
+            source_instance_axes = _source_binding.instance_axes
+            source_provenance_fingerprint = _source_binding.provenance_fingerprint
+        if source_input_count != len(source_values):
+            raise ValueError("source_inputs do not match the declared input_schema")
+        instance_axes = source_instance_axes
+        if instance_axes is None:
+            if require_source_axes:
+                raise ValueError(
+                    "topology source contract must declare input_instance_axes"
+                )
+            instance_axes = [
+                policy_mask.ndim - 1
+                if item.ndim >= policy_mask.ndim
+                and item.shape[: policy_mask.ndim] == policy_mask.shape
+                else None
+                for item in source_values
+            ]
+        if (
+            not isinstance(instance_axes, (list, tuple))
+            or len(instance_axes) != len(source_values)
+            or any(axis is not None and not isinstance(axis, int) for axis in instance_axes)
+        ):
+            raise ValueError(
+                "input_instance_axes must contain one integer or null per source input"
+            )
+        for item in source_values:
+            if item is x:
+                raise ValueError("payload must not enter topology source_inputs")
+
+        propose = getattr(source, "propose", None)
+        if not callable(propose):
+            raise TypeError("topology source must expose propose(*source_inputs, mask=mask)")
+        bounded_inputs: list[Tensor] = []
+        expected_axis = policy_mask.ndim - 1
+        for item, axis in zip(source_values, instance_axes, strict=True):
+            if axis is None:
+                bounded_inputs.append(item)
+                continue
+            normalized_axis = axis if axis >= 0 else item.ndim + axis
+            if (
+                normalized_axis != expected_axis
+                or item.ndim < policy_mask.ndim
+                or item.shape[: policy_mask.ndim] != policy_mask.shape
+            ):
+                raise ValueError(
+                    "declared source instance axis does not match payload support"
+                )
+            broadcast_mask = policy_mask.reshape(
+                *policy_mask.shape,
+                *((1,) * (item.ndim - policy_mask.ndim)),
+            )
+            bounded_inputs.append(
+                torch.where(broadcast_mask, item, torch.zeros_like(item))
+            )
+        proposal = propose(*tuple(bounded_inputs), mask=policy_mask)
+        if not isinstance(proposal, TopologyProposal):
+            raise TypeError("topology source must return TopologyProposal")
+        priority = proposal.action.priority
+        if priority.shape != valid.shape:
+            raise ValueError("topology proposal priority must match payload mask shape")
+        if priority.device != x.device:
+            raise ValueError("topology proposal and payload must share a device")
+
+        permutation = self.operator(proposal.action, policy_mask)
+        has_trainable_source = any(
+            parameter.requires_grad for parameter in source.parameters()
+        )
+        needs_surrogate = (
+            self.training
+            and source.training
+            and torch.is_grad_enabled()
+            and self.surrogate is not None
+            and (has_trainable_source or priority.requires_grad)
+        )
+        surrogate_assignment = (
+            self.surrogate(proposal.action, policy_mask, self.active_count)
+            if needs_surrogate
+            else None
+        )
+        record = FoldRecord(
+            permutation=permutation,
+            original_mask=valid,
+            original_shape=x.shape,
+            axis=self.axis,
+            active_count=self.active_count,
+            topology_config_fingerprint=self.contract_fingerprint,
+            producer_provenance_fingerprint=(
+                self._source_provenance_fingerprint(source)
+                if source_provenance_fingerprint is None
+                else source_provenance_fingerprint
+            ),
+        )
+        active, active_mask = self._gather_active(
+            x, valid, permutation, surrogate_assignment
+        )
+        folded_index = permutation[..., self.active_count :]
+        gather_index = folded_index.unsqueeze(-1).expand(
+            *folded_index.shape, x.shape[-1]
+        )
+        folded = torch.gather(x, -2, gather_index).clone()
+        folded_mask = torch.gather(valid, -1, folded_index).clone()
+        return FoldedTensor(active, folded, active_mask, folded_mask, record)
+
     def fold(
         self,
         x: Tensor,
@@ -763,6 +1055,7 @@ class TopologyFold(nn.Module):
         active_count: int | None = None,
         policy: nn.Module | None = None,
         operator: StablePriorityPartition | None = None,
+        surrogate: SoftTopKTopologySurrogate | None = None,
         axis: int = -2,
     ) -> None:
         super().__init__()
@@ -770,16 +1063,106 @@ class TopologyFold(nn.Module):
             if active_count is None:
                 raise ValueError("active_count is required when topology is omitted")
             topology = ReversibleTopology(
-                active_count, policy=policy, operator=operator, axis=axis
+                active_count,
+                policy=policy,
+                operator=operator,
+                surrogate=surrogate,
+                axis=axis,
             )
         elif (
             active_count is not None
             or policy is not None
             or operator is not None
+            or surrogate is not None
             or axis != -2
         ):
             raise ValueError("topology cannot be combined with topology construction options")
         self.topology = topology
+        self._source_binding: _TopologySourceBinding | None = None
+
+    def bind_source_contract(self, source: nn.Module) -> TopologyFold:
+        """Bind caller-owned source metadata before compiled execution.
+
+        The source module remains caller-owned. Only its immutable execution
+        contract is bound to this Fold operation, so fullgraph execution does
+        not perform Python reflection or JSON serialization in the hot path.
+        """
+
+        if not isinstance(source, nn.Module):
+            raise TypeError("topology source must be an nn.Module")
+        source_ref = _canonical_component_ref(source, role="topology source")
+        contract = _json_contract(source, role="topology source")
+        if contract.get("ref") != source_ref:
+            raise ValueError(
+                "topology source contract ref must match its component reference"
+            )
+        input_schema = contract.get("input_schema")
+        if not isinstance(input_schema, (list, tuple)):
+            raise ValueError(
+                "topology source contract must declare an input_schema sequence"
+            )
+        axes = contract.get("input_instance_axes")
+        if axes is not None and (
+            not isinstance(axes, (list, tuple))
+            or len(axes) != len(input_schema)
+            or any(axis is not None and not isinstance(axis, int) for axis in axes)
+        ):
+            raise ValueError(
+                "input_instance_axes must contain one integer or null per source input"
+            )
+        self._source_binding = _TopologySourceBinding(
+            source=source,
+            source_ref=source_ref,
+            contract_fingerprint=_sha256_json(contract),
+            input_count=len(input_schema),
+            instance_axes=None if axes is None else tuple(axes),
+            provenance_fingerprint=(
+                self.topology._source_provenance_fingerprint(source)
+            ),
+        )
+        return self
+
+    def prepare_source_inputs(
+        self,
+        payload: Tensor,
+        source_inputs: tuple[Tensor, ...],
+    ) -> object:
+        """Validate one caller batch before compiled source execution."""
+
+        if self._source_binding is None:
+            raise ValueError("bind_source_contract(source) before preparing inputs")
+        if not isinstance(payload, Tensor):
+            raise TypeError("payload must be a Tensor")
+        if not isinstance(source_inputs, tuple) or not all(
+            isinstance(item, Tensor) for item in source_inputs
+        ):
+            raise TypeError("source_inputs must be a tuple of Tensors")
+        if len(source_inputs) != self._source_binding.input_count:
+            raise ValueError("source_inputs do not match the bound input schema")
+        payload_pointer = payload.untyped_storage().data_ptr()
+        for item in source_inputs:
+            if item is payload or (
+                item.device == payload.device
+                and item.untyped_storage().data_ptr() == payload_pointer
+            ):
+                raise ValueError("payload must not enter topology source_inputs")
+        return _PreparedTopologySourceInputs(
+            payload,
+            source_inputs,
+            self._source_binding,
+        )
+
+    @property
+    def source_contract_binding(self) -> dict[str, object] | None:
+        if self._source_binding is None:
+            return None
+        return {
+            "source_ref": self._source_binding.source_ref,
+            "source_contract_fingerprint": self._source_binding.contract_fingerprint,
+            "source_input_count": self._source_binding.input_count,
+            "source_instance_axes": self._source_binding.instance_axes,
+            "source_provenance_fingerprint": self._source_binding.provenance_fingerprint,
+        }
 
     def forward(
         self,
@@ -787,6 +1170,40 @@ class TopologyFold(nn.Module):
         mask: Tensor | None = None,
     ) -> FoldedTensor:
         return self.topology.fold(x, mask)
+
+    def from_source(
+        self,
+        payload: Tensor,
+        *,
+        source: nn.Module,
+        source_inputs: object,
+        mask: Tensor | None = None,
+        observed: Tensor | None = None,
+        require_source_axes: bool = False,
+    ) -> FoldedTensor:
+        """Produce and consume one topology proposal without exposing payload to source."""
+
+        if self._source_binding is not None and not torch.compiler.is_compiling():
+            actual_ref = _canonical_component_ref(source, role="topology source")
+            actual_contract = _json_contract(source, role="topology source")
+            if (
+                actual_ref != self._source_binding.source_ref
+                or _sha256_json(actual_contract)
+                != self._source_binding.contract_fingerprint
+            ):
+                raise ValueError(
+                    "topology source does not match the bound source contract"
+                )
+
+        return self.topology._fold_from_source(
+            payload,
+            source=source,
+            source_inputs=source_inputs,
+            mask=mask,
+            observed=observed,
+            require_source_axes=require_source_axes,
+            _source_binding=self._source_binding,
+        )
 
     def _observed(self, x: Tensor, mask: Tensor, observed: Tensor) -> FoldedTensor:
         return self.topology._fold_observed(x, mask, observed)

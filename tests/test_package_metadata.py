@@ -26,6 +26,7 @@ def test_release_identity_and_citation_are_consistent():
     payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    stability = (ROOT / "STABILITY.md").read_text(encoding="utf-8")
     version = project_version()
 
     assert payload["project"]["name"] == "arti-fit"
@@ -33,6 +34,8 @@ def test_release_identity_and_citation_are_consistent():
     assert f"version: {version}" in citation
     assert "name: Thiocy" in citation
     assert "uv add arti-fit" in readme
+    assert f'arti-fit=={version}' in readme
+    assert version in stability
 
 
 def test_readme_covers_the_public_2x_composition_paths():
@@ -48,6 +51,22 @@ def test_readme_covers_the_public_2x_composition_paths():
 
 def test_package_declares_pep561_type_marker():
     assert (ROOT / "src" / "arti" / "py.typed").exists()
+
+
+def test_308_components_are_alpha_only():
+    expected = {
+        "FormulaFabric",
+        "FormulaCommitBlend",
+        "RoutedFormulaFabricCompute",
+        "IterativeRoutedFormulaFabricCompute",
+        "ObjectiveExposureBank",
+        "ObjectiveFormulaFabricCompute",
+        "PairwiseRankTopologySurrogate",
+    }
+
+    assert all(hasattr(arti.alpha, name) for name in expected)
+    assert all(not hasattr(arti, name) for name in expected)
+    assert all(not hasattr(arti.nn, name) for name in expected)
 
 
 def test_package_declares_safetensors_as_core_dependency():

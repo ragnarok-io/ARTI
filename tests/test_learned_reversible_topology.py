@@ -95,6 +95,215 @@ def test_surrogate_masked_instances_have_zero_assignment_and_gradient() -> None:
     assert torch.equal(scores.grad[..., ~mask[0]], torch.zeros(1, 2))
 
 
+def test_pairwise_surrogate_has_canonical_identity_and_backward_only_contract() -> None:
+    surrogate = alpha.PairwiseRankTopologySurrogate(
+        temperature=0.25, position_temperature=0.10
+    )
+
+    assert arti.component_ref(surrogate) == "arti/topology-surrogate@2"
+    assert surrogate.topology_contract() == {
+        "ref": "arti/topology-surrogate@2",
+        "rank_temperature": 0.25,
+        "position_temperature": 0.10,
+        "soft_rank": "r_i=sum_j sigmoid((s_j-s_i)/rank_temperature)",
+        "soft_position": "W[p,i]=softmax_i(-(r_i-p)^2/position_temperature)",
+        "path": "backward-only",
+    }
+
+
+class _ExternalTopologySource(torch.nn.Module):
+    _component_reference = "example/external-topology-source@1"
+
+    def __init__(self, dim: int = 3) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.eye(dim))
+        self.calls = 0
+
+    def propose(
+        self,
+        keys: torch.Tensor,
+        queries: torch.Tensor,
+        *,
+        mask: torch.Tensor,
+    ) -> alpha.TopologyProposal:
+        self.calls += 1
+        scores = torch.einsum("bnd,bd->bn", keys @ self.weight, queries)
+        return alpha.TopologyProposal(alpha.TopologyAction(scores.masked_fill(~mask, -1e4)))
+
+    def topology_contract(self) -> dict[str, object]:
+        return {
+            "ref": self._component_reference,
+            "input_schema": ["keys[B,N,D]", "role_query[B,D]"],
+            "output": "arti/topology-proposal@1",
+        }
+
+
+def test_topology_proposal_has_a_canonical_identity() -> None:
+    proposal = alpha.TopologyProposal(alpha.TopologyAction(torch.ones(1, 3)))
+
+    assert arti.component_ref(proposal) == "arti/topology-proposal@1"
+
+
+def test_fold_from_source_invokes_source_once_and_never_passes_payload() -> None:
+    source = _ExternalTopologySource()
+    fold = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(),
+    )
+    payload = _markers(batch=1, length=5, dim=3)
+    keys = torch.tensor(
+        [[[5.0, 0.0, 0.0], [1.0, 0.0, 0.0], [4.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]]
+    )
+    query = torch.tensor([[1.0, 0.0, 0.0]])
+
+    state = fold.from_source(
+        payload,
+        source=source,
+        source_inputs=(keys, query),
+    )
+
+    assert source.calls == 1
+    assert torch.equal(state.record.active_index, torch.tensor([[0, 2]]))
+    assert torch.equal(alpha.UnFold(active_count=2)(state).value, payload)
+
+
+def test_fold_from_source_payload_taint_cannot_change_topology_or_provenance() -> None:
+    source = _ExternalTopologySource().eval()
+    fold = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(),
+    ).eval()
+    keys = torch.randn(2, 6, 3)
+    query = torch.randn(2, 3)
+    first = fold.from_source(
+        torch.randn(2, 6, 4),
+        source=source,
+        source_inputs=(keys, query),
+    )
+    second = fold.from_source(
+        torch.randn(2, 6, 4) * 1000,
+        source=source,
+        source_inputs=(keys, query),
+    )
+
+    assert torch.equal(first.record.permutation, second.record.permutation)
+    assert first.record.producer_provenance_fingerprint == (
+        second.record.producer_provenance_fingerprint
+    )
+    assert first.record.record_fingerprint == second.record.record_fingerprint
+
+
+def test_fold_from_source_binds_source_operator_and_surrogate_contracts() -> None:
+    source = _ExternalTopologySource().eval()
+    payload = torch.randn(1, 5, 2)
+    inputs = (torch.randn(1, 5, 3), torch.randn(1, 3))
+    first = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(position_temperature=0.10),
+    ).eval().from_source(payload, source=source, source_inputs=inputs)
+    second = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(position_temperature=0.20),
+    ).eval().from_source(payload, source=source, source_inputs=inputs)
+
+    assert first.record.producer_provenance_fingerprint != (
+        second.record.producer_provenance_fingerprint
+    )
+
+
+def test_fold_from_source_surrogate_trains_source_without_soft_payload_gradient() -> None:
+    torch.manual_seed(420)
+    source = _ExternalTopologySource()
+    fold = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(),
+    )
+    payload = _markers(batch=1, length=6, dim=3).requires_grad_()
+    keys = torch.randn(1, 6, 3)
+    query = torch.randn(1, 3)
+
+    state = fold.from_source(
+        payload,
+        source=source,
+        source_inputs=(keys, query),
+    )
+    state.active.square().sum().backward()
+
+    assert source.weight.grad is not None
+    assert torch.isfinite(source.weight.grad).all()
+    assert float(source.weight.grad.abs().sum()) > 0
+    selected = state.record.active_index
+    expected = torch.zeros_like(payload)
+    selected_values = torch.gather(
+        payload.detach(), -2, selected.unsqueeze(-1).expand(-1, -1, payload.shape[-1])
+    )
+    expected.scatter_(
+        -2, selected.unsqueeze(-1).expand_as(selected_values), 2 * selected_values
+    )
+    torch.testing.assert_close(payload.grad, expected, rtol=0, atol=0)
+
+
+def test_fold_from_source_surrogate_trains_non_owning_source_dependency() -> None:
+    class NonOwningSource(torch.nn.Module):
+        _component_reference = "example/non-owning-topology-source@1"
+
+        def __init__(self, weight: torch.nn.Parameter) -> None:
+            super().__init__()
+            object.__setattr__(self, "weight", weight)
+
+        def propose(self, keys, *, mask):
+            priority = torch.einsum("bnd,d->bn", keys, self.weight)
+            return alpha.TopologyProposal(alpha.TopologyAction(priority))
+
+        def topology_contract(self):
+            return {
+                "ref": self._component_reference,
+                "input_schema": ["keys[B,N,D]"],
+                "output": "arti/topology-proposal@1",
+            }
+
+    weight = torch.nn.Parameter(torch.tensor([1.0, -0.5, 0.25]))
+    source = NonOwningSource(weight)
+    fold = alpha.Fold(
+        active_count=2,
+        surrogate=alpha.PairwiseRankTopologySurrogate(),
+    )
+    payload = _markers(batch=1, length=6, dim=3)
+    keys = torch.randn(1, 6, 3)
+
+    state = fold.from_source(payload, source=source, source_inputs=(keys,))
+    state.active.square().sum().backward()
+
+    assert not tuple(source.parameters())
+    assert weight.grad is not None
+    assert torch.isfinite(weight.grad).all()
+    assert float(weight.grad.abs().sum()) > 0
+
+
+def test_fold_from_source_rejects_payload_alias_and_invalid_source_contract() -> None:
+    source = _ExternalTopologySource()
+    fold = alpha.Fold(active_count=2)
+    payload = torch.randn(1, 5, 3)
+
+    with pytest.raises(ValueError, match="payload must not enter"):
+        fold.from_source(
+            payload,
+            source=source,
+            source_inputs=(payload, torch.randn(1, 3)),
+        )
+
+    class MissingSchema(_ExternalTopologySource):
+        def topology_contract(self) -> dict[str, object]:
+            return {"ref": self._component_reference}
+
+    with pytest.raises(ValueError, match="input_schema"):
+        fold.from_source(
+            payload,
+            source=MissingSchema(),
+            source_inputs=(torch.randn(1, 5, 3), torch.randn(1, 3)),
+        )
+
+
 def test_nonfinite_folded_payload_cannot_pollute_hard_active_forward() -> None:
     policy = alpha.LearnedTopologyPolicy(dim=2)
     with torch.no_grad():

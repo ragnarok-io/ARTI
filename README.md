@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.7a1 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.8a1 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -26,10 +26,10 @@ Add ARTI to a project with [uv](https://docs.astral.sh/uv/):
 uv add arti-fit
 ```
 
-To evaluate the 3.0.7 alpha line explicitly:
+To evaluate the 3.0.8 alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.7a1"
+uv add --prerelease allow "arti-fit==3.0.8a1"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -52,6 +52,28 @@ The alpha browser runtime is published separately:
 ```bash
 pnpm add @arti-fit/web@alpha
 ```
+
+## What Is New In 3.0.8 Alpha
+
+`FormulaFabric` is an alpha, fixed-capacity tensor executor for bounded Formula
+programs. It keeps routing, execution, and commit strength explicit: programs
+run through the existing Formula implementation, Bank-driven route sources can
+select operands, and iterative routing can re-query after each complete
+program as the workspace changes.
+
+`ObjectiveExposureBank` can provide bounded commit strength to a Formula
+Fabric stage using an explicit current-or-past query. It does not choose
+routes, primitives, topology, execution depth, persistence, or host commit
+authority. Future targets and losses remain outside the forward graph.
+
+Reversible `Fold` can bind a caller-owned topology source through a checked
+provenance contract, and Formula Fabric can run inside `AdaptivePulse` without
+reimplementing Formula mathematics. These APIs remain optional and alpha. See
+[Formula Fabric](docs/formula-fabric.md) for the execution contract.
+
+This prerelease makes no task-quality, hardware-speed, autonomous-memory, or
+scientific-superiority claim. The `arti.st` format remains version 1 and the
+Stable Candidate remains 3.0.6.
 
 ## What Is New In 3.0.7 Alpha
 

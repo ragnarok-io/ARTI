@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.7a1 is a
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.8a1 is a
 prerelease for the versioned vNext composition contracts described below; it
 does not promote those alpha components to the supported surface and is not an
 LTS promise.
@@ -54,6 +54,14 @@ component identities, support-mask contracts, and disabled-stage identity
 semantics are versioned, but their stage composition and performance are not
 part of the Stable Candidate surface. Fourier observation currently supports
 eager training and compiled forward; compiled FFT backward is not promised.
+
+`arti.alpha.FormulaFabric`, bounded Bank-driven Formula routing, iterative
+route re-query, Objective-controlled commit strength, pairwise topology
+surrogates, and Fold source-contract binding are introduced in 3.0.8a1. Their
+component identities and bounded tensor contracts are versioned, but their
+training objectives, task quality, runtime performance, and persistence policy
+remain application concerns. Objective queries are explicit current/past-only
+inputs; future targets and losses remain outside the forward graph.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

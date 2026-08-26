@@ -339,6 +339,14 @@ def _build_default_registry() -> ComponentRegistry:
         SelectiveCompute,
         StableTopKIntervention,
     )
+    from .formula_fabric import (
+        BankFormulaRouteSource,
+        FormulaCommitBlend,
+        FormulaFabric,
+        FormulaFabricCompute,
+        IterativeRoutedFormulaFabricCompute,
+        RoutedFormulaFabricCompute,
+    )
     from .layers import ARTIDynamicStateLayer, ARTILatentRecallField, ARTILatentTensorLayer, ARTILayer, ARTIPhaseMixer, ARTIVirtualInterfaceMixer
     from .nn import Fold, FusionPulse, Half, LearnedPulse, Recall, RecallRefiner, UnFold
     from .observation import (
@@ -358,6 +366,8 @@ def _build_default_registry() -> ComponentRegistry:
     from .pulse import PulseCompressor
     from .recall_refine import RefineBudget, RefinePolicy, RefineStop
     from .target_bank import TargetBankUpdater, WriteRefinePolicy
+    from .objective_bank import ObjectiveExposureBank
+    from .objective_formula import ObjectiveFormulaFabricCompute
     from .selective_recall import SelectiveRecallKernel
     from .reversible_topology import (
         FOLD_RECORD_SCHEMA_VERSION,
@@ -374,9 +384,11 @@ def _build_default_registry() -> ComponentRegistry:
         BankFormulaTopologyPolicy,
         FixedTopologyQuery,
         LearnedTopologyPolicy,
+        PairwiseRankTopologySurrogate,
         SoftTopKTopologySurrogate,
         StablePriorityPartition,
         TopologyAction,
+        TopologyProposal,
         TopologyFormulaLock,
         TopologyOperandBank,
         TopologyPriorityFormula,
@@ -560,6 +572,16 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
+        "arti/topology-proposal@1",
+        TopologyProposal,
+        lifecycle=alpha,
+        variant="continuous-priority-proposal",
+        config_builder=lambda component: {
+            "action_ref": component_ref(component.action),
+        },
+        dependency_builder=lambda _component: ("arti/topology-action@1",),
+    )
+    add(
         "arti/stable-priority-partition@1",
         StablePriorityPartition,
         lifecycle=alpha,
@@ -571,6 +593,13 @@ def _build_default_registry() -> ComponentRegistry:
         lifecycle=alpha,
         variant="soft-top-k-vjp",
         config_builder=_fields("temperature"),
+    )
+    add(
+        "arti/topology-surrogate@2",
+        PairwiseRankTopologySurrogate,
+        lifecycle=alpha,
+        variant="pairwise-soft-rank-position-vjp",
+        config_builder=lambda component: component.topology_contract(),
     )
     add(
         "arti/learned-topology-policy@1",
@@ -719,12 +748,13 @@ def _build_default_registry() -> ComponentRegistry:
         lifecycle=alpha,
         capabilities=("pulse.stage.fold",),
         variant="reversible-forward",
-        config_schema_version=2,
+        config_schema_version=3,
         config_builder=lambda component: {
             "topology_ref": component.topology._component_reference,
             "active_count": component.topology.active_count,
             "axis": component.topology.axis,
             "record_ref": "arti/fold-record@1",
+            "source_contract_binding": component.source_contract_binding,
         },
         dependency_builder=lambda _component: (
             "arti/reversible-topology@1",
@@ -953,6 +983,114 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
+        "arti/formula-fabric@1",
+        FormulaFabric,
+        lifecycle=alpha,
+        variant="bounded-hard-ssa-formula-executor",
+        config_schema_version=2,
+        capabilities=("formula.fabric.executor",),
+        config_builder=lambda component: {
+            "program": component.program.to_dict(),
+            "program_fingerprint": component.program.fingerprint,
+            "limits": dict(component.limits.__dict__),
+        },
+    )
+    add(
+        "arti/formula-commit-blend@1",
+        FormulaCommitBlend,
+        lifecycle=alpha,
+        variant="bounded-continuous-formula-commit",
+        capabilities=("formula.fabric.executor",),
+        config_builder=lambda component: {
+            "fabric": component_spec(component.fabric).to_dict(),
+            "blend": "old+alpha*(candidate-old)",
+            "range": [0.0, 1.0],
+        },
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+    )
+    add(
+        "arti/formula-fabric-compute@1",
+        FormulaFabricCompute,
+        lifecycle=alpha,
+        variant="folded-workspace-formula-executor",
+        config_schema_version=2,
+        capabilities=("pulse.stage.selective-compute",),
+        config_builder=lambda component: {
+            "fabric": component_spec(component.fabric).to_dict(),
+            "active_count": component.active_count,
+            "commit_mode": component.commit_mode,
+            "factor_contract": component.factor_contract,
+            "route_contract": component.route_contract,
+            "arena_layout": component.arena_layout,
+            "visibility": component.visibility_contract,
+            "execution_config_fingerprint": component.execution_config_fingerprint,
+        },
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+    )
+    add(
+        "arti/bank-formula-route-source@1",
+        BankFormulaRouteSource,
+        lifecycle=alpha,
+        variant="fixed-query-bank-formula-route-plan",
+        capabilities=("formula.fabric.route-source",),
+        config_builder=lambda component: {
+            "program": component.program.to_dict(),
+            "program_fingerprint": component.program.fingerprint,
+            "active_count": component.active_count,
+            "estimator": component.estimator,
+            "policy_order": [
+                {
+                    "ref": component_ref(policy),
+                    "config_fingerprint": component_spec(policy).config_fingerprint,
+                }
+                for policy in component.policies
+            ],
+            "candidate_mask_shape": list(component._candidate_mask.shape),
+            "route_source_config_fingerprint": component.config_fingerprint,
+            "limits": dict(component.limits.__dict__),
+            "route_plan": "pre-execution-static-ssa-availability",
+            "write_authority": "host-intervened-support",
+        },
+        dependency_builder=lambda component: tuple(
+            component_ref(policy) for policy in component.policies
+        ),
+    )
+    add(
+        "arti/routed-formula-fabric-compute@1",
+        RoutedFormulaFabricCompute,
+        lifecycle=alpha,
+        variant="bank-routed-formula-fabric-adapter",
+        capabilities=("pulse.stage.selective-compute",),
+        config_schema_version=2,
+        config_builder=lambda component: {
+            "compute": component_spec(component.compute).to_dict(),
+            "route_source": component_spec(component.route_source).to_dict(),
+            "active_count": component.active_count,
+            "explicit_route": "per-call-override",
+            "route_contract": "bound-source-or-explicit-override",
+            "adapter_config_fingerprint": component.config_fingerprint,
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.compute),
+            component_ref(component.route_source),
+        ),
+    )
+    add(
+        "arti/iterative-routed-formula-fabric-compute@1",
+        IterativeRoutedFormulaFabricCompute,
+        lifecycle=alpha,
+        variant="state-conditioned-route-refinement",
+        capabilities=("pulse.stage.selective-compute",),
+        config_builder=lambda component: {
+            "routed": component_spec(component.routed).to_dict(),
+            "steps": component.steps,
+            "route_semantics": "requery-after-program",
+            "executor_reuse": True,
+            "config_fingerprint": component.config_fingerprint,
+        },
+        dependency_builder=lambda component: (component_ref(component.routed),),
+    )
+    add(
         "arti/selective-compute@1",
         SelectiveCompute,
         lifecycle=alpha,
@@ -1091,6 +1229,42 @@ def _build_default_registry() -> ComponentRegistry:
         factory=coupled_target_bank_updater_factory,
         config_builder=target_bank_config,
         dependency_builder=target_bank_dependencies,
+    )
+    add(
+        "arti/objective-exposure-bank@1",
+        ObjectiveExposureBank,
+        lifecycle=alpha,
+        variant="fixed-query-trainable-value-exposure",
+        config_builder=_fields(
+            "slots",
+            "query_dim",
+            "key_layout",
+            "key_seed",
+            "temperature",
+            "min_exposure",
+            "max_exposure",
+            "init_scale",
+        ),
+    )
+    add(
+        "arti/objective-formula-fabric-compute@1",
+        ObjectiveFormulaFabricCompute,
+        lifecycle=alpha,
+        variant="objective-controlled-formula-commit",
+        capabilities=("pulse.stage.selective-compute",),
+        config_builder=lambda component: {
+            "compute": component_spec(component.compute).to_dict(),
+            "objective": component_spec(component.objective).to_dict(),
+            "program_fingerprint": component.program_fingerprint,
+            "control_semantics": "formula-commit-weight",
+            "control_scope": "per-pulse-fixed",
+            "factor_contract": component.factor_contract,
+            "limits": dict(component.limits.__dict__),
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.compute),
+            component_ref(component.objective),
+        ),
     )
     add(
         "arti/write-refine-policy@1",

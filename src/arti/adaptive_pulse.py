@@ -14,7 +14,7 @@ from .aggregate import ReunionAggregate
 from .component_registry import ComponentRef, component_ref, component_spec
 from .formula_attention import ActiveWorkspace, FormulaAttention, SelectiveCompute
 from .observation import AdaptiveObservation
-from .reversible_topology import TopologyFold, TopologyUnFold
+from .reversible_topology import FoldRecord, TopologyFold, TopologyUnFold
 from .vnext_contracts import (
     EnvelopeRef,
     OffSemantics,
@@ -26,6 +26,8 @@ from .vnext_contracts import (
     StageMode,
     StageRole,
     SupportDomain,
+    SupportKind,
+    SupportMask,
     TensorEnvelope,
     TopologyBinding,
     _gather_active_pulse_supports,
@@ -107,6 +109,7 @@ class PulseOutput:
     manifest_fingerprint: str
     bank: BankUpdateOutput
     value_identity: bool
+    diagnostics: PulseDiagnostics
 
     @property
     def value(self) -> Tensor:
@@ -127,6 +130,14 @@ class PulseOutput:
     @property
     def next_bank(self) -> BankState | None:
         return self.bank.state
+
+
+@dataclass(frozen=True)
+class PulseDiagnostics:
+    """Runtime-owned records from the topology and compute stages."""
+
+    topology_record: FoldRecord | None = None
+    compute: object | None = None
 
 
 class AdaptivePulse(nn.Module):
@@ -151,7 +162,6 @@ class AdaptivePulse(nn.Module):
             (observation, AdaptiveObservation, "observation"),
             (fold, TopologyFold, "fold"),
             (intervention, FormulaAttention, "intervention"),
-            (selective_compute, SelectiveCompute, "selective_compute"),
             (unfold, TopologyUnFold, "unfold"),
             (aggregate, ReunionAggregate, "aggregate"),
         ):
@@ -159,6 +169,14 @@ class AdaptivePulse(nn.Module):
                 raise TypeError(f"{name} must be {expected.__name__} or None")
         if half is not None and not isinstance(half, nn.Module):
             raise TypeError("half must be an nn.Module or None")
+        if selective_compute is not None:
+            if not isinstance(selective_compute, nn.Module):
+                raise TypeError("selective_compute must be an nn.Module or None")
+            registration = component_spec(selective_compute)
+            if "pulse.stage.selective-compute" not in registration.capabilities:
+                raise ValueError(
+                    "selective_compute must declare pulse.stage.selective-compute capability"
+                )
         if bank_update is not None:
             if not isinstance(bank_update, nn.Module):
                 raise TypeError("bank_update must be an nn.Module or None")
@@ -185,6 +203,14 @@ class AdaptivePulse(nn.Module):
                 topology_config_fingerprint=topology.contract_fingerprint,
                 producer_provenance_fingerprint=topology.producer_provenance_fingerprint,
             )
+            compute_active_count = getattr(selective_compute, "active_count", None)
+            if (
+                compute_active_count is not None
+                and compute_active_count != topology.active_count
+            ):
+                raise ValueError(
+                    "selective compute active_count must match reversible topology"
+                )
 
         self.observation = observation
         self.half_stage = half
@@ -194,16 +220,70 @@ class AdaptivePulse(nn.Module):
         self.unfold = unfold
         self.aggregate = aggregate
         self.bank_update = bank_update
+        self._bank_update_ref = (
+            None if bank_update is None else component_ref(bank_update)
+        )
         self.manifest = self._build_manifest(binding)
-        self.register_forward_pre_hook(self._manifest_preflight)
+        self._validate_manifest_binding()
+        self._bound_stage_modules = (
+            self.observation,
+            self.half_stage,
+            self.fold,
+            self.intervention,
+            self.selective_compute,
+            self.unfold,
+            self.aggregate,
+            self.bank_update,
+        )
+        self.register_forward_pre_hook(self._manifest_identity_preflight)
 
     @torch.compiler.disable
-    def _manifest_preflight(
+    def _manifest_identity_preflight(
         self,
         _module: nn.Module,
         _args: tuple[object, ...],
     ) -> None:
-        """Validate the frozen stage plan before eager or compiled execution."""
+        """Reject stage replacement without registry access or tensor sync."""
+
+        current = (
+            self.observation,
+            self.half_stage,
+            self.fold,
+            self.intervention,
+            self.selective_compute,
+            self.unfold,
+            self.aggregate,
+            self.bank_update,
+        )
+        roles = (
+            "observation",
+            "half",
+            "fold",
+            "intervention",
+            "selective_compute",
+            "unfold",
+            "aggregate",
+            "bank_update",
+        )
+        for role, expected, actual in zip(
+            roles, self._bound_stage_modules, current, strict=True
+        ):
+            if actual is expected:
+                continue
+            if expected is None:
+                raise ValueError(
+                    f"Pulse@2 stage {role!r} is enabled after manifest binding"
+                )
+            if actual is None:
+                raise ValueError(
+                    f"Pulse@2 stage {role!r} is missing after manifest binding"
+                )
+            raise ValueError(
+                f"Pulse@2 stage {role!r} was replaced after manifest binding"
+            )
+
+    def validate_manifest(self) -> None:
+        """Validate the frozen stage graph after explicit structural changes."""
 
         self._validate_manifest_binding()
 
@@ -339,6 +419,10 @@ class AdaptivePulse(nn.Module):
         bank_state: BankState | None = None,
         write_exposure: float | Tensor = 1.0,
         write_policy: object | None = None,
+        formula_route: object | None = None,
+        objective_query: Tensor | None = None,
+        topology_source: nn.Module | None = None,
+        topology_source_inputs: tuple[Tensor, ...] | None = None,
     ) -> PulseOutput:
         if not isinstance(world, TensorEnvelope) or world.ref is not EnvelopeRef.WORLD:
             raise TypeError("Pulse@2 expects a WORLD TensorEnvelope")
@@ -346,6 +430,29 @@ class AdaptivePulse(nn.Module):
             raise TypeError("Pulse@2 requires PulseSupports")
         if supports.observed.domain != world.domain:
             raise ValueError("Pulse supports must belong to the WORLD envelope domain")
+        if formula_route is not None and self.selective_compute is None:
+            raise ValueError("formula_route requires an enabled selective compute stage")
+        objective_contract = (
+            "forbidden"
+            if self.selective_compute is None
+            else getattr(
+                self.selective_compute, "objective_query_contract", "forbidden"
+            )
+        )
+        if objective_query is not None and objective_contract != "required":
+            raise ValueError(
+                "objective_query requires an Objective-controlled compute stage"
+            )
+        if objective_query is None and objective_contract == "required":
+            raise ValueError(
+                "Objective-controlled compute stage requires objective_query"
+            )
+        if (topology_source is None) != (topology_source_inputs is None):
+            raise ValueError(
+                "topology_source and topology_source_inputs must be supplied together"
+            )
+        if topology_source is not None and self.fold is None:
+            raise ValueError("topology_source requires an enabled Fold stage")
         validity_matches = torch.eq(
             supports._validity, world._mask_for_execution()
         ).all()
@@ -359,6 +466,8 @@ class AdaptivePulse(nn.Module):
 
         payload = world
         current_supports = supports
+        topology_record: FoldRecord | None = None
+        compute_info: object | None = None
         if self.observation is not None:
             payload = self.observation(payload)
             current_supports = lift_observation_supports(current_supports, payload)
@@ -377,17 +486,36 @@ class AdaptivePulse(nn.Module):
 
         if self.fold is not None:
             source_supports = current_supports
-            overlay = self.fold._overlay(
-                payload.value,
-                payload._mask_for_execution(),
-                observed=current_supports.observed._mask,
-            )
+            sourced_fold = None
+            overlay = None
+            if topology_source is None:
+                overlay = self.fold._overlay(
+                    payload.value,
+                    payload._mask_for_execution(),
+                    observed=current_supports.observed._mask,
+                )
+                active_value = overlay.active
+                active_mask = overlay.active_mask
+                topology_record = overlay.record
+            else:
+                assert topology_source_inputs is not None
+                sourced_fold = self.fold.from_source(
+                    payload.value,
+                    source=topology_source,
+                    source_inputs=topology_source_inputs,
+                    mask=payload._mask_for_execution(),
+                    observed=current_supports.observed._mask,
+                    require_source_axes=True,
+                )
+                active_value = sourced_fold.active
+                active_mask = sourced_fold.active_mask
+                topology_record = sourced_fold.record
             active_supports = _gather_active_pulse_supports(
-                current_supports, overlay.record
+                current_supports, topology_record
             )
             active = ActiveWorkspace(
-                overlay.active,
-                overlay.active_mask,
+                active_value,
+                active_mask,
                 active_supports.exposed._mask,
                 active_supports.intervened._mask,
             )
@@ -395,11 +523,20 @@ class AdaptivePulse(nn.Module):
             if self.intervention is not None:
                 active = self.intervention(active, intervention_factors)
             if self.selective_compute is not None:
-                active = self.selective_compute(
+                compute_kwargs = {
+                    "visibility": visibility,
+                    "formula_route": formula_route,
+                    "return_info": True,
+                }
+                if objective_contract == "required":
+                    compute_kwargs["objective_query"] = objective_query
+                active, compute_info = self.selective_compute(
                     active,
                     compute_factors,
-                    visibility=visibility,
+                    **compute_kwargs,
                 )
+            elif formula_route is not None:
+                raise ValueError("formula_route requires an enabled selective compute stage")
 
             for actual, expected, name in (
                 (active.validity, active_supports._validity, "validity"),
@@ -414,10 +551,14 @@ class AdaptivePulse(nn.Module):
                     raise ValueError(f"selective stage changed {name} support")
 
             assert self.unfold is not None
-            restored = self.unfold._overlay(overlay.replace_active(active.value))
+            if sourced_fold is None:
+                assert overlay is not None
+                restored = self.unfold._overlay(overlay.replace_active(active.value))
+            else:
+                restored = self.unfold(sourced_fold.replace(active=active.value))
             active_supports = active_supports.replace_intervened(active.intervened)
             current_supports = _restore_active_pulse_supports(
-                source_supports, active_supports, overlay.record
+                source_supports, active_supports, topology_record
             )
             payload = TensorEnvelope(
                 EnvelopeRef.REUNITED,
@@ -439,7 +580,7 @@ class AdaptivePulse(nn.Module):
                 raise ValueError("enabled BankUpdate requires typed write authority")
             if contract.kind is not OperandKind.WRITE:
                 raise ValueError("BankUpdate requires a WRITE operand contract")
-            if contract.consumer_ref != component_ref(self.bank_update):
+            if contract.consumer_ref != self._bank_update_ref:
                 raise ValueError("write authority consumer does not match BankUpdate")
             if write.domain != contract.domain:
                 raise ValueError("write authority domain does not match its contract")
@@ -455,9 +596,23 @@ class AdaptivePulse(nn.Module):
                 raise ValueError("bank_state does not match write support shape")
             if bank_state.value.device != write._mask.device:
                 raise ValueError("bank_state and write support must share device and use floating values")
-            if bool((write._mask & ~bank_state.mask).any()):
+            invalid_write = (write._mask & ~bank_state.mask).any()
+            if torch.compiler.is_compiling() or invalid_write.device.type != "cpu":
+                torch._assert_async(
+                    ~invalid_write,
+                    "write authority cannot address invalid Bank slots",
+                )
+            elif bool(invalid_write):
                 raise ValueError("write authority cannot address invalid Bank slots")
-            if bool(write._mask.any()):
+            if torch.compiler.is_compiling():
+                torch._assert_async(
+                    write._mask.any(),
+                    "compiled BankUpdate requires at least one authorized write slot",
+                )
+                execute_update = True
+            else:
+                execute_update = bool(write._mask.any())
+            if execute_update:
                 private_input = bank_state.value.clone()
                 candidate, updater_info = self.bank_update(
                     payload.value,
@@ -507,7 +662,62 @@ class AdaptivePulse(nn.Module):
             manifest_fingerprint=self.manifest.fingerprint,
             bank=bank_output,
             value_identity=payload.value is world.value,
+            diagnostics=PulseDiagnostics(topology_record, compute_info),
         )
+
+    def run_tensor(
+        self,
+        value: Tensor,
+        *,
+        mask: Tensor | None = None,
+        observed: Tensor | None = None,
+        exposed: Tensor | None = None,
+        intervened: Tensor | None = None,
+        domain_id: str = "pulse-world",
+        partition_id: str = "world",
+        transition_id: str = "tensor-call",
+        **forward_kwargs: object,
+    ) -> PulseOutput:
+        """Run non-writing Pulse stages from ordinary tensors and masks."""
+
+        if self.bank_update is not None:
+            raise ValueError(
+                "run_tensor cannot infer typed Bank write authority; use forward"
+            )
+        write_arguments = {"bank_state", "write_exposure", "write_policy"}
+        supplied_write_arguments = write_arguments.intersection(forward_kwargs)
+        if supplied_write_arguments:
+            names = ", ".join(sorted(supplied_write_arguments))
+            raise ValueError(f"run_tensor does not accept Bank write arguments: {names}")
+        if not isinstance(value, Tensor) or not (
+            value.is_floating_point() or value.is_complex()
+        ):
+            raise TypeError("value must be a floating or complex Tensor")
+        if value.ndim < 2:
+            raise ValueError("value must have shape [..., N, D]")
+        if mask is None:
+            mask = torch.ones(value.shape[:-1], dtype=torch.bool, device=value.device)
+        if observed is None:
+            observed = mask
+        if exposed is None:
+            exposed = observed
+        if intervened is None:
+            intervened = torch.zeros_like(mask)
+        domain = SupportDomain.for_tensor(
+            mask,
+            domain_id=domain_id,
+            owner_ref=self._component_reference,
+            partition_id=partition_id,
+            transition_id=transition_id,
+        )
+        world = TensorEnvelope(EnvelopeRef.WORLD, value, mask, domain)
+        supports = PulseSupports(
+            SupportMask(SupportKind.OBSERVED, observed, domain),
+            SupportMask(SupportKind.EXPOSED, exposed, domain),
+            SupportMask(SupportKind.INTERVENED, intervened, domain),
+            validity=mask,
+        )
+        return self(world, supports, **forward_kwargs)
 
 
 __all__ = [
@@ -516,4 +726,5 @@ __all__ = [
     "BankUpdateOutput",
     "BankUpdateStatus",
     "PulseOutput",
+    "PulseDiagnostics",
 ]

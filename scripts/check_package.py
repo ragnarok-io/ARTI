@@ -126,6 +126,9 @@ def main() -> None:
             "arti/adaptive_pulse.py",
             "arti/aggregate.py",
             "arti/formula_attention.py",
+            "arti/formula_fabric.py",
+            "arti/objective_bank.py",
+            "arti/objective_formula.py",
             "arti/observation.py",
             "arti/observation_bank.py",
             "arti/selective_recall.py",
@@ -189,9 +192,11 @@ def main() -> None:
                         "root = pathlib.Path(os.environ['ARTI_INSTALL_ROOT']).resolve(); "
                         "assert pathlib.Path(arti.__file__).resolve().parent == root / 'arti'; "
                         "assert arti.__version__ == os.environ['ARTI_EXPECTED_VERSION']; "
-                        "from arti.alpha import Fold, UnFold; "
+                        "from arti.alpha import Fold, FormulaFabric, FormulaFabricProgram, ObjectiveExposureBank, UnFold; "
                         "assert arti.component_ref(Fold(active_count=2)) == 'arti/fold@2'; "
-                        "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'"
+                        "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'; "
+                        "assert callable(FormulaFabric) and callable(FormulaFabricProgram); "
+                        "assert arti.component_ref(ObjectiveExposureBank(slots=2, query_dim=4)) == 'arti/objective-exposure-bank@1'"
                     ),
                 ],
                 env=env,
@@ -279,8 +284,17 @@ def main() -> None:
                     "assert callable(arti.alpha.AdaptiveObservation); "
                     "assert callable(arti.alpha.FormulaAttention); "
                     "assert callable(arti.alpha.SelectiveCompute); "
+                    "assert callable(arti.alpha.FormulaFabric); "
+                    "assert callable(arti.alpha.FormulaCommitBlend); "
+                    "assert callable(arti.alpha.RoutedFormulaFabricCompute); "
+                    "assert callable(arti.alpha.IterativeRoutedFormulaFabricCompute); "
+                    "assert callable(arti.alpha.ObjectiveExposureBank); "
+                    "assert callable(arti.alpha.ObjectiveFormulaFabricCompute); "
+                    "assert callable(arti.alpha.PairwiseRankTopologySurrogate); "
+                    "assert not hasattr(arti, 'FormulaFabric'); "
+                    "assert not hasattr(arti.nn, 'FormulaFabric'); "
                     "refs = {row['ref'] for row in arti.component_catalog()}; "
-                    "assert {'arti/pulse@2', 'arti/adaptive-observation@1', 'arti/formula-attention@1'} <= refs; "
+                    "assert {'arti/pulse@2', 'arti/adaptive-observation@1', 'arti/formula-attention@1', 'arti/formula-fabric@1', 'arti/objective-exposure-bank@1'} <= refs; "
                     "assert arti.torch.RecallRefiner is arti.RecallRefiner; "
                     "assert callable(arti.RecallCapacityPlan); "
                     "assert callable(arti.RecallCapacityDecision); "

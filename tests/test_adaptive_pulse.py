@@ -501,6 +501,86 @@ def test_empty_write_support_bypasses_updater_and_returns_bank_identity() -> Non
     assert not called
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_bank_update_cuda_fullgraph_matches_eager(dtype: torch.dtype) -> None:
+    torch.manual_seed(731)
+    eager_updater = (
+        arti.alpha.TargetBankUpdater(
+            hidden_dim=3,
+            slots=4,
+            policy=arti.alpha.WriteRefinePolicy.fixed(2),
+        )
+        .cuda()
+        .to(dtype)
+    )
+    compiled_updater = (
+        arti.alpha.TargetBankUpdater(
+            hidden_dim=3,
+            slots=4,
+            policy=arti.alpha.WriteRefinePolicy.fixed(2),
+        )
+        .cuda()
+        .to(dtype)
+    )
+    compiled_updater.load_state_dict(eager_updater.state_dict())
+    eager = bank_pulse(eager_updater).cuda().to(dtype).train()
+    compiled_source = bank_pulse(compiled_updater).cuda().to(dtype).train()
+    compiled_source.load_state_dict(eager.state_dict())
+    compiled = torch.compile(compiled_source, backend="inductor", fullgraph=True)
+
+    eager_value = torch.randn(
+        2, 5, 3, device="cuda", dtype=dtype
+    ).requires_grad_()
+    compiled_value = eager_value.detach().clone().requires_grad_()
+    eager_world, eager_supports = world_fixture(eager_value)
+    compiled_world, compiled_supports = world_fixture(compiled_value)
+    write = torch.ones(2, 4, dtype=torch.bool, device="cuda")
+    eager_supports = with_write_authority(eager_supports, eager_updater, write)
+    compiled_supports = with_write_authority(
+        compiled_supports, compiled_updater, write
+    )
+    bank_value = torch.randn(2, 4, 3, device="cuda", dtype=dtype)
+    eager_state = BankState(
+        bank_value.clone(),
+        torch.ones_like(write),
+        "arti/recall-bank@1",
+        "target-bank",
+        "a" * 64,
+    )
+    compiled_state = BankState(
+        bank_value.clone(),
+        torch.ones_like(write),
+        "arti/recall-bank@1",
+        "target-bank",
+        "a" * 64,
+    )
+
+    eager_result = eager(eager_world, eager_supports, bank_state=eager_state)
+    compiled_result = compiled(
+        compiled_world,
+        compiled_supports,
+        bank_state=compiled_state,
+    )
+    assert eager_result.next_bank is not None
+    assert compiled_result.next_bank is not None
+    torch.testing.assert_close(
+        compiled_result.value, eager_result.value, rtol=2e-3, atol=2e-3
+    )
+    torch.testing.assert_close(
+        compiled_result.next_bank.value,
+        eager_result.next_bank.value,
+        rtol=2e-3,
+        atol=2e-3,
+    )
+
+    eager_result.next_bank.value.float().square().mean().backward()
+    compiled_result.next_bank.value.float().square().mean().backward()
+    torch.testing.assert_close(
+        compiled_value.grad, eager_value.grad, rtol=2e-3, atol=2e-3
+    )
+
+
 def test_write_authority_cannot_address_invalid_bank_slots() -> None:
     value = torch.randn(1, 5, 3)
     world, supports = world_fixture(value)

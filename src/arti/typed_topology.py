@@ -147,6 +147,32 @@ class TypedBankFormulaTopologyPolicy(BankFormulaTopologyPolicy):
             routes.append(route)
         return tuple(outputs), tuple(routes)
 
+    def execution_outputs(
+        self,
+        x: Tensor,
+        mask: Tensor,
+    ) -> tuple[tuple[TopologyFormulaOutput, ...], tuple[Tensor, ...]]:
+        """Compile-safe execution path for this construction-bound typed policy.
+
+        The constructor fixes the typed Bank and Formula identities. Runtime
+        tensor contracts are checked directly here so no registry lookup or
+        Python TypedOperands envelope enters the compiled graph.
+        """
+
+        if x.ndim < 2 or x.shape[-1] != self.dim:
+            raise ValueError(f"x must have shape [..., N, {self.dim}]")
+        if mask.dtype != torch.bool or mask.shape != x.shape[:-1]:
+            raise ValueError("mask must be boolean with shape x.shape[:-1]")
+        source = torch.where(mask.unsqueeze(-1), x.detach(), torch.zeros_like(x))
+        query = self.query(source)
+        outputs = []
+        routes = []
+        for bank in self.banks:
+            operands, route = bank.read(query)
+            outputs.append(self.formula.evaluate(operands))
+            routes.append(route)
+        return tuple(outputs), tuple(routes)
+
 
 __all__ = [
     "TypedBankFormulaTopologyPolicy",
