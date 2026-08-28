@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a1 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a2 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -29,7 +29,7 @@ uv add arti-fit
 To evaluate the current alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.9a1"
+uv add --prerelease allow "arti-fit==3.0.9a2"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -54,6 +54,10 @@ pnpm add @arti-fit/web@alpha
 ```
 
 ## What Is New In 3.0.9 Alpha
+
+Alpha 2 keeps the Python-owned Web parity generator aligned with the
+experimental stateful API namespace. Recall semantics are unchanged from
+Alpha 1.
 
 New `arti.nn.Recall` instances use versioned `Recall@4` K-wide execution by
 default. One query preserves up to eight candidate routes, refines them as
