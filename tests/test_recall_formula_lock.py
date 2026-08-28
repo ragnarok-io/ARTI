@@ -44,6 +44,24 @@ def test_contract_and_lock_round_trip_without_executable_state() -> None:
     assert "state_dict" not in json.dumps(lock.to_dict())
 
 
+def test_contract_and_lock_use_schema_v2_and_reject_v1() -> None:
+    contract = _contract()
+    lock = RecallFormulaLock.bind(contract, hidden_dim=16, slots=8)
+
+    assert contract.api_version == 2
+    assert lock.lock_version == 2
+
+    old_contract = contract.to_dict()
+    old_contract["api_version"] = 1
+    with pytest.raises(ValueError, match="api_version"):
+        RecallFormulaContract.from_dict(old_contract)
+
+    old_lock = lock.to_dict()
+    old_lock["lock_version"] = 1
+    with pytest.raises(ValueError, match="lock_version"):
+        RecallFormulaLock.from_dict(old_lock)
+
+
 def test_lock_binds_shape_and_factor_count() -> None:
     contract = _contract()
     lock = RecallFormulaLock.bind(contract, hidden_dim=16, slots=8)

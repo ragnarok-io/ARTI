@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.9a2 is a
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.9a3 is a
 prerelease for the versioned vNext composition contracts described below; it
 does not promote those alpha components to the supported surface and is not an
 LTS promise.
@@ -74,6 +74,10 @@ their historical mixed-route semantics.
 
 3.0.9a2 only corrects the Web fixture generator after the experimental API
 namespace migration; it does not alter the Recall@4 contract.
+
+3.0.9a3 restores the declared Formula contract and lock schema v2 after an
+alpha snapshot regression, updates Recall Bank examples to the current API,
+and removes retired migration and namespace examples from the release docs.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

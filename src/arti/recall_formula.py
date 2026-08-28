@@ -29,7 +29,8 @@ RecallFormulaLayout = Literal["generic", "contiguous_mfd"]
 RecallFormulaAccumulation = Literal["activation", "float32"]
 MAX_RECALL_FORMULA_FACTORS: Final = 256
 MAX_RECALL_FORMULA_PROBE_ELEMENTS: Final = 1_000_000
-RECALL_FORMULA_LOCK_VERSION: Final = 1
+RECALL_FORMULA_CONTRACT_API_VERSION: Final = 2
+RECALL_FORMULA_LOCK_VERSION: Final = 2
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
@@ -245,7 +246,7 @@ class RecallFormulaContract:
     identity: RecallFormulaId | None = None
     output_semantics: RecallOutputSemantics = "next_state"
     identity_preserving: bool = False
-    api_version: int = 1
+    api_version: int = RECALL_FORMULA_CONTRACT_API_VERSION
     composition: RecallFormulaComposition = "custom"
     capabilities: tuple[str, ...] = ("torch.eager",)
     execution: RecallFormulaExecutionSpec = RecallFormulaExecutionSpec()
@@ -271,8 +272,11 @@ class RecallFormulaContract:
             raise TypeError("RecallFormulaContract.identity_preserving must be bool")
         if isinstance(self.api_version, bool) or not isinstance(self.api_version, int):
             raise TypeError("RecallFormulaContract.api_version must be an integer")
-        if self.api_version <= 0:
-            raise ValueError("RecallFormulaContract.api_version must be positive")
+        if self.api_version != RECALL_FORMULA_CONTRACT_API_VERSION:
+            raise ValueError(
+                "unsupported RecallFormulaContract.api_version="
+                f"{self.api_version!r}; expected {RECALL_FORMULA_CONTRACT_API_VERSION}"
+            )
         if self.composition not in _COMPOSITIONS:
             choices = ", ".join(sorted(_COMPOSITIONS))
             raise ValueError(

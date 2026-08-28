@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a2 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a3 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -29,7 +29,7 @@ uv add arti-fit
 To evaluate the current alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.9a2"
+uv add --prerelease allow "arti-fit==3.0.9a3"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -281,20 +281,17 @@ attached = arti.ARTI.attach(
     recall={"layers": "model.layers.*", "rank": 16, "slots": 32},
 )
 
-contract = attached.arti.expert_contract(
-    "qwen-recall-v1",
-    model_id="Qwen/Qwen3-0.6B",
-)
-attached.arti.freeze_expert_banks()
+contract = attached.arti.bank_contract("qwen-recall-v1")
+attached.arti.freeze_banks()
 optimizer = torch.optim.AdamW(
     attached.arti.parameters("expert_banks"),
     lr=1e-3,
 )
 
 # Run the application-owned training loop, then export only the Banks.
-attached.arti.save_expert(
+attached.arti.save_bank(
     "style.recall.arti.st",
-    expert_id="style",
+    bank_id="style",
     contract=contract,
 )
 ```
@@ -302,9 +299,9 @@ attached.arti.save_expert(
 Compatible immutable experts can be rebuilt into one native Bank assembly:
 
 ```python
-experts = attached.arti.experts(contract)
-experts.replace(["style.recall.arti.st", "domain.recall.arti.st"])
-print(experts.expert_ids)
+banks = attached.arti.banks(contract)
+banks.replace(["style.recall.arti.st", "domain.recall.arti.st"])
+print(banks.bank_ids)
 ```
 
 For fit-exported adapters, the equivalent lower-level composition keeps each
@@ -604,13 +601,8 @@ print(saved.weights_sha256)
 print(loaded.missing_keys, loaded.unexpected_keys)
 ```
 
-ARTI 3.x reads compatible format-version 1 artifacts produced by the pre-public
-0.x and public 1.x lines. Legacy `.pt` migration uses PyTorch's restricted
-tensor-only loader:
-
-```python
-arti.migrate_pt("legacy-state.pt", "layer.arti.st")
-```
+ARTI 3.x uses strict versioned artifacts. Legacy `.pt` migration is outside
+the public API; export a fresh `.arti.st` artifact from a current module.
 
 Artifact hashes detect modification relative to their lock files; they are not
 publisher signatures. Obtain models and weights from trusted sources.
@@ -635,8 +627,10 @@ remain loadable.
 
 ## Public Modules
 
-- `arti.nn`: `Layer`, `Half`, `Fold`, `UnFold`, `Pulse`, alpha `Recall`,
-  alpha `FusionPulse`, `RecallRefiner`, and visual workspace modules.
+- `arti.nn`: stable tensor modules including `Layer`, `Half`, `Fold`,
+  `UnFold`, `Pulse`, `Recall`, `RecallRefiner`, and visual workspace modules.
+- `arti.experimental`: explicitly experimental modules including
+  `LayerRecall`, `StatefulRecall`, layered Recall utilities, and Web export.
 - `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
 - `arti.fit`: boundary scanning, planning, attachment, artifact stacks,
   Bank composition, runtime scaling, and ARTI-only hotpath compilation.

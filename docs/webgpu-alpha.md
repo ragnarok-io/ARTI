@@ -141,8 +141,8 @@ training. Python exports the same initialized `StatefulRecall` as two graphs:
 
 ```python
 import torch
-from arti.nn import StatefulRecall
-from arti.web import export_stateful_recall
+from arti.experimental import StatefulRecall
+from arti.experimental.web import export_stateful_recall
 
 recall = StatefulRecall(dim=64, slots=16).eval()
 export_stateful_recall(
