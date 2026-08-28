@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 from .attachment_config import ARTIAttachTrainingConfig
-from .layered_recall import layered_recall_trajectory_loss
+from ._layered_recall import layered_recall_trajectory_loss
 
 try:
     from transformers import TrainerCallback as _TrainerCallback
@@ -83,8 +83,8 @@ class ARTITrainingSession:
         self._expert_guard = None
         self._expert_frozen_snapshot: tuple[tuple[Tensor, Tensor], ...] = ()
         if trainable == "expert_banks":
-            attachment.freeze_expert_banks()
-            self._expert_guard = attachment.expert_contract("arti.internal.training-guard")
+            attachment.freeze_banks()
+            self._expert_guard = attachment.bank_contract("arti.internal.training-guard")
             self._expert_frozen_snapshot = _capture_expert_frozen_state(self.model, attachment._bundle())
         parameters = list(attachment.parameters(role=trainable))
         if optimizer is not None and _optimizer_parameter_ids(optimizer) != {id(parameter) for parameter in parameters}:
@@ -117,7 +117,7 @@ class ARTITrainingSession:
             else:
                 self._fit_torch(train_data, target_steps)
             if self._expert_guard is not None:
-                current_guard = self.attachment.expert_contract("arti.internal.training-guard")
+                current_guard = self.attachment.bank_contract("arti.internal.training-guard")
                 if current_guard != self._expert_guard:
                     raise RuntimeError("expert-bank training changed the frozen host or shared Recall reader")
         except Exception:

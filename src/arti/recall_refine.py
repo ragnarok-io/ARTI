@@ -301,6 +301,69 @@ class AdaptiveRefinePolicy:
 
 
 @dataclass(frozen=True)
+class AdaptiveRefineSchedule:
+    """Internal tensor schedule for independently configured refine samples.
+
+    ``AdaptiveRefinePolicy`` remains the portable, scalar configuration. This
+    runtime-only schedule supplies one value per flattened execution sample,
+    such as the ``B*K`` trajectories used by Batched Refine.
+    """
+
+    _component_reference: ClassVar[str] = "arti/adaptive-refine-schedule@1"
+
+    min_steps: Tensor
+    max_steps: Tensor
+    absolute_tolerance: Tensor
+    relative_tolerance: Tensor
+    patience: Tensor
+    route_tolerance: Tensor | None = None
+    cycle_tolerance: Tensor | None = None
+
+    def __post_init__(self) -> None:
+        tensors = (
+            (self.min_steps, "min_steps", torch.int64),
+            (self.max_steps, "max_steps", torch.int64),
+            (self.absolute_tolerance, "absolute_tolerance", None),
+            (self.relative_tolerance, "relative_tolerance", None),
+            (self.patience, "patience", torch.int64),
+        )
+        size: int | None = None
+        device: torch.device | None = None
+        for value, name, required_dtype in tensors:
+            if not isinstance(value, Tensor) or value.ndim != 1:
+                raise TypeError(f"{name} must be a rank-1 Tensor")
+            if required_dtype is not None and value.dtype != required_dtype:
+                raise TypeError(f"{name} must use {required_dtype}")
+            if required_dtype is None and not value.is_floating_point():
+                raise TypeError(f"{name} must be floating point")
+            size = value.numel() if size is None else size
+            device = value.device if device is None else device
+            if value.numel() != size or value.device != device:
+                raise ValueError("adaptive refine schedule tensors must share shape and device")
+        for value, name in (
+            (self.route_tolerance, "route_tolerance"),
+            (self.cycle_tolerance, "cycle_tolerance"),
+        ):
+            if value is None:
+                continue
+            if (
+                not isinstance(value, Tensor)
+                or value.ndim != 1
+                or not value.is_floating_point()
+                or value.numel() != size
+                or value.device != device
+            ):
+                raise TypeError(
+                    f"{name} must be a floating-point rank-1 Tensor matching the schedule"
+                )
+        if size is None or size == 0:
+            raise ValueError("adaptive refine schedule must contain at least one sample")
+        # Value bounds are checked by the factory-owned branch policy before
+        # this schedule reaches the hot path. Keeping this class structural
+        # avoids a hidden CUDA synchronization during schedule binding.
+
+
+@dataclass(frozen=True)
 class RecallRoutePlan:
     """Versioned frozen Recall routing decision.
 

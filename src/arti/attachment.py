@@ -21,7 +21,7 @@ from .attachment_config import (
     validate_attach_lock,
     write_attach_lock,
 )
-from .layered_recall import (
+from ._layered_recall import (
     LayerRecall,
     LayerRecallSpec,
     LayerRecallStack,
@@ -81,28 +81,44 @@ class _RecallBundle(nn.Module):
         self.layers = nn.ModuleList(tuple(recalls))
 
 
-class ARTIExpertSet:
+class ARTIBankSet:
     """Named Recall banks rebuilt from immutable assets after every change."""
 
-    def __init__(self, attachment: "ARTIAttachment", contract) -> None:
-        from .recall_experts import RecallExpertAssembly, validate_recall_expert_contract
+    def __init__(
+        self,
+        attachment: "ARTIAttachment",
+        contract,
+        *,
+        formula=None,
+        updater: nn.Module | None = None,
+    ) -> None:
+        from .recall_bank import RecallBankAssembly, validate_recall_bank_contract
 
         attachment._require_attached()
         template = attachment._bundle()
-        validate_recall_expert_contract(
+        validate_recall_bank_contract(
             contract,
             attachment._model,
             template,
             shared_config={"attachment": _config_payload(attachment.config)},
+            formula=formula,
+            updater=updater,
         )
         self.attachment = attachment
         self.contract = contract
-        self._assembly = RecallExpertAssembly(template, contract)
+        self.formula = formula
+        self.updater = updater
+        self._assembly = RecallBankAssembly(
+            template,
+            contract,
+            formula=formula,
+            updater=updater,
+        )
         self._layout = None
 
     @property
-    def expert_ids(self) -> tuple[str, ...]:
-        return self._assembly.expert_ids
+    def bank_ids(self) -> tuple[str, ...]:
+        return self._assembly.bank_ids
 
     @property
     def layout(self):
@@ -114,9 +130,9 @@ class ARTIExpertSet:
         self._commit(candidate, materialize=materialize)
         return asset
 
-    def remove(self, expert_id: str, *, materialize: bool = True):
+    def remove(self, bank_id: str, *, materialize: bool = True):
         candidate = self._assembly.fork()
-        asset = candidate.remove(expert_id)
+        asset = candidate.remove(bank_id)
         self._commit(candidate, materialize=materialize)
         return asset
 
@@ -145,11 +161,11 @@ class ARTIExpertSet:
 
     def _install(self, bundle, layout) -> None:
         if len(bundle.layers) != len(self.attachment.paths):
-            raise RuntimeError("Recall expert assembly layer count changed")
+            raise RuntimeError("Recall Bank assembly layer count changed")
         for path, recall in zip(self.attachment.paths, bundle.layers, strict=True):
             wrapper = self.attachment._layered.wrappers[path]
             wrapper.recall = recall
-            wrapper.enabled = bool(layout.expert_ids)
+            wrapper.enabled = bool(layout.bank_ids)
         self._layout = layout
 
 
@@ -199,73 +215,85 @@ class ARTIAttachment:
             return (parameter for name, parameter in bundle.named_parameters() if name in names)
         raise ValueError("parameter role must be 'all' or 'expert_banks'")
 
-    def freeze_expert_banks(self) -> tuple[tuple[str, nn.Parameter], ...]:
+    def freeze_banks(self) -> tuple[tuple[str, nn.Parameter], ...]:
         """Freeze the host and shared Recall reader, leaving only banks trainable."""
 
-        from .recall_experts import freeze_for_recall_expert
+        from .recall_bank import freeze_for_recall_bank
 
         self._require_attached()
-        return freeze_for_recall_expert(self._model, self._bundle())
+        return freeze_for_recall_bank(self._model, self._bundle())
 
-    def expert_contract(
+    def bank_contract(
         self,
-        preset_id: str,
+        bank_id: str,
         *,
-        model_id: str | None = None,
-        revision: str | None = None,
+        formula=None,
+        updater: nn.Module | None = None,
     ):
-        """Capture the immutable host and shared-reader contract for experts."""
+        """Capture the immutable host and shared-reader contract for a bank."""
 
-        from .recall_experts import create_recall_expert_contract
+        from .recall_bank import create_recall_bank_contract
 
         self._require_attached()
-        return create_recall_expert_contract(
+        return create_recall_bank_contract(
             self._model,
             self._bundle(),
-            preset_id=preset_id,
-            model_id=model_id,
-            revision=revision,
+            bank_id=bank_id,
             shared_config={"attachment": _config_payload(self.config)},
+            formula=formula,
+            updater=updater,
         )
 
-    def save_expert(
+    def save_bank(
         self,
         path: str | Path,
         *,
-        expert_id: str,
+        bank_id: str,
         contract,
+        formula=None,
+        updater: nn.Module | None = None,
         training_metadata: Mapping[str, Any] | None = None,
         private_module: nn.Module | None = None,
         private_metadata: Mapping[str, Any] | None = None,
     ) -> ARTISaveResult:
         """Export current banks and an optional private tensor extension."""
 
-        from .recall_experts import export_recall_expert_bank, validate_recall_expert_contract
+        from .recall_bank import save_recall_bank, validate_recall_bank_contract
 
         self._require_attached()
         bundle = self._bundle()
-        validate_recall_expert_contract(
+        validate_recall_bank_contract(
             contract,
             self._model,
             bundle,
             shared_config={"attachment": _config_payload(self.config)},
+            formula=formula,
+            updater=updater,
         )
-        return export_recall_expert_bank(
+        return save_recall_bank(
             bundle,
             path,
             host=self._model,
-            expert_id=expert_id,
+            bank_id=bank_id,
             contract=contract,
             shared_config={"attachment": _config_payload(self.config)},
+            formula=formula,
+            updater=updater,
             training_metadata=training_metadata,
             private_module=private_module,
             private_metadata=private_metadata,
         )
 
-    def experts(self, contract) -> ARTIExpertSet:
-        """Create a reversible expert set from this attachment's template."""
+    def banks(
+        self,
+        contract,
+        *,
+        formula=None,
+        updater: nn.Module | None = None,
+    ) -> ARTIBankSet:
+        """Create a reversible bank set from this attachment's template."""
 
-        return ARTIExpertSet(self, contract)
+        return ARTIBankSet(self, contract, formula=formula, updater=updater)
 
     def set_enabled(self, feature: str, enabled: bool = True, *, paths: Iterable[str] | None = None) -> None:
         """Independently toggle Recall, Half, or recognition."""

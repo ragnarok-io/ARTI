@@ -338,4 +338,4 @@ def test_selective_recall_component_binds_recall_and_refine_policy() -> None:
 
     assert spec.reference == "arti/selective-recall-kernel@1"
     assert spec.capabilities == ("selective.compute.kernel",)
-    assert set(spec.dependencies) == {"arti/recall@2", "arti/refine-policy@1"}
+    assert set(spec.dependencies) == {"arti/recall@4", "arti/refine-policy@1"}

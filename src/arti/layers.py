@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 import torch
@@ -21,6 +21,7 @@ from .config import (
     STATE_RECALL_COMPOSITION_FACTOR,
     STATE_RECALL_MODULATION_FACTORS,
 )
+from .context import FrameContext, TensorContext
 from .functional import (
     as_sequence,
     apply_coord_frame_inverse,
@@ -38,12 +39,38 @@ from .nn import Half
 if TYPE_CHECKING:
     from .recall_policy import RecallParameterTag
 from .outputs import ARTIOutput
-from .recall_formula import RecallFormulaContract, formula_dtype_supported, validate_formula
-from .recall_refine import AdaptiveRefinePolicy, RecallRoutePlan, RefinePolicy
+from .recall_formula import RecallFormulaContract, validate_formula
+from .recall_refine import (
+    AdaptiveRefinePolicy,
+    AdaptiveRefineSchedule,
+    RecallRoutePlan,
+    RecallStopReason,
+    RecallTrace,
+    RecallTraceV2,
+    RefinePolicy,
+)
 from .utils import assert_floating_tensor, detach_diagnostics
 
 
 _FIXED_QUERY_ALGORITHM = "rademacher-shake256-v1"
+
+
+def _require_context_only(
+    context: TensorContext | None,
+    **legacy_values: object,
+) -> None:
+    """Reject ambiguous calls that mix the strict and legacy contracts."""
+
+    if context is None:
+        return
+    if not isinstance(context, TensorContext):
+        raise TypeError("context must be a TensorContext")
+    supplied = [name for name, value in legacy_values.items() if value is not None]
+    if supplied:
+        names = ", ".join(supplied)
+        raise ValueError(
+            "context cannot be combined with legacy context arguments: " + names
+        )
 
 
 def _fixed_query_weight(hidden_dim: int, key_dim: int, seed: int) -> Tensor:
@@ -80,7 +107,6 @@ class _ARTIRecallRead:
         yield self.weights
         yield self.influence
         yield self.recognition
-
 
 class _CoalescedSparseEmbeddingBag(torch.autograd.Function):
     """Embedding-bag sum with group-coalesced sparse weight gradients."""
@@ -400,6 +426,7 @@ class ARTILatentRecallField(nn.Module):
         formula: nn.Module | None = None,
         factor_activation: str = "none",
         route_exploration: float = 0.0,
+        routing_normalizer: str = "global",
         project_external: bool = True,
     ) -> None:
         super().__init__()
@@ -415,6 +442,10 @@ class ARTILatentRecallField(nn.Module):
             raise ValueError("query_seed must be in [0, 2**63)")
         if not math.isfinite(route_exploration) or route_exploration < 0:
             raise ValueError("route_exploration must be finite and non-negative")
+        if routing_normalizer not in {"global", "per_bank"}:
+            raise ValueError("routing_normalizer must be 'global' or 'per_bank'")
+        if routing_normalizer == "per_bank" and routing != "grouped":
+            raise ValueError("per_bank routing normalization requires grouped routing")
         if value_composition not in {"single", "product", "state"}:
             raise ValueError("value_composition must be 'single', 'product', or 'state'")
         if formula is not None and value_composition != "single":
@@ -522,6 +553,7 @@ class ARTILatentRecallField(nn.Module):
         )
         self.factor_activation = Half() if factor_activation == "half" else nn.Identity()
         self.route_exploration = float(route_exploration)
+        self.routing_normalizer = routing_normalizer
         self._bank_gradient_enabled = True
         self._training_group_partitions: tuple[int, tuple[int, ...]] | None = None
         self.register_buffer(
@@ -536,6 +568,7 @@ class ARTILatentRecallField(nn.Module):
         )
         self._expert_names: tuple[str, ...] = ()
         self._expert_route_ranges: tuple[tuple[int, int], ...] = ()
+        self._expert_member_fingerprints: tuple[str, ...] = ()
         self._expert_weights: tuple[float, ...] = ()
         self._expert_influences: tuple[float, ...] = ()
         # Recall values are host-dimensional writes. The caller applies them
@@ -677,6 +710,12 @@ class ARTILatentRecallField(nn.Module):
         return self._expert_weights
 
     @property
+    def expert_member_fingerprints(self) -> tuple[str, ...]:
+        """Return optional content identities for assembled Bank members."""
+
+        return self._expert_member_fingerprints
+
+    @property
     def expert_influences(self) -> tuple[float, ...]:
         """Return signed multipliers applied to routed expert writes."""
 
@@ -686,6 +725,8 @@ class ARTILatentRecallField(nn.Module):
         self,
         names: Sequence[str],
         ranges: Sequence[tuple[int, int]],
+        *,
+        member_fingerprints: Sequence[str] | None = None,
     ) -> None:
         """Bind named experts to contiguous positions in one routing axis."""
 
@@ -707,8 +748,22 @@ class ARTILatentRecallField(nn.Module):
             cursor = stop
         if cursor != route_width:
             raise ValueError("expert route ranges must cover the routing axis")
+        resolved_fingerprints = (
+            ()
+            if member_fingerprints is None
+            else tuple(str(value) for value in member_fingerprints)
+        )
+        if resolved_fingerprints and len(resolved_fingerprints) != len(resolved_names):
+            raise ValueError("expert member fingerprints must match expert names")
+        if any(
+            len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in resolved_fingerprints
+        ):
+            raise ValueError("expert member fingerprints must be lowercase SHA-256 values")
         self._expert_names = resolved_names
         self._expert_route_ranges = resolved_ranges
+        self._expert_member_fingerprints = resolved_fingerprints
         self.set_expert_weights((1.0,) * len(resolved_names))
         self.set_expert_influences((1.0,) * len(resolved_names))
 
@@ -742,7 +797,13 @@ class ARTILatentRecallField(nn.Module):
             strict=True,
         ):
             route_prior[start:stop] = weight
-        required = self.group_topk if self.routing == "grouped" else 1
+        required = (
+            1
+            if self.routing_normalizer == "per_bank"
+            else self.group_topk
+            if self.routing == "grouped"
+            else 1
+        )
         if int(torch.count_nonzero(route_prior)) < required:
             raise ValueError(
                 f"expert weights must leave at least {required} routing positions enabled"
@@ -828,6 +889,49 @@ class ARTILatentRecallField(nn.Module):
             raise RuntimeError("Recall route prior is stale for the current bank assembly")
         return logits + prior.to(device=logits.device, dtype=logits.dtype)
 
+    def _normalize_group_route(
+        self,
+        logits: Tensor,
+        *,
+        active_indices: Tensor | None = None,
+        offset: int = 0,
+        count: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Return route mass and logits used for hard candidate selection."""
+
+        if self.routing_normalizer == "global":
+            selection_logits = self._apply_route_prior(
+                logits,
+                active_indices=active_indices,
+                offset=offset,
+                count=count,
+            )
+            return torch.softmax(selection_logits, dim=-1), selection_logits
+        if active_indices is not None:
+            raise RuntimeError(
+                "per_bank normalization does not support training partition filtering"
+            )
+        route_width = self._route_width()
+        resolved_count = route_width - offset if count is None else count
+        if offset != 0 or resolved_count != route_width:
+            raise RuntimeError(
+                "per_bank normalization requires the complete Recall route axis"
+            )
+        ranges = self._expert_route_ranges or ((0, route_width),)
+        weights = self._expert_weights or (1.0,)
+        route = torch.zeros_like(logits)
+        selection_logits = torch.full_like(logits, -torch.inf)
+        for weight, (start, stop) in zip(weights, ranges, strict=True):
+            if weight == 0:
+                continue
+            local_log_probability = torch.log_softmax(
+                logits[..., start:stop],
+                dim=-1,
+            )
+            route[..., start:stop] = local_log_probability.exp() * weight
+            selection_logits[..., start:stop] = local_log_probability + math.log(weight)
+        return route, selection_logits
+
     def _routed_influence(self, route: Tensor) -> Tensor:
         """Resolve one signed write multiplier from per-expert route mass."""
 
@@ -878,6 +982,23 @@ class ARTILatentRecallField(nn.Module):
 
         self._training_group_partitions = None
 
+    def route_plan(
+        self,
+        read: _ARTIRecallRead,
+        *,
+        detach: bool = True,
+    ) -> RecallRoutePlan:
+        """Capture a routing decision without caching recalled values."""
+
+        if not isinstance(read, _ARTIRecallRead):
+            raise TypeError("read must be an ARTI Recall read")
+        return self.route_plan_from_tensors(
+            read.weights,
+            read.indices,
+            read.route,
+            detach=detach,
+        )
+
     def route_plan_from_tensors(
         self,
         weights: Tensor,
@@ -886,7 +1007,7 @@ class ARTILatentRecallField(nn.Module):
         *,
         detach: bool = True,
     ) -> RecallRoutePlan:
-        """Normalize one Recall routing decision into a replayable plan."""
+        """Normalize backend read tensors into one public route-plan schema."""
 
         if self.training and self._training_group_partitions is not None:
             raise ValueError("route plans cannot be captured from partitioned training routes")
@@ -927,31 +1048,6 @@ class ARTILatentRecallField(nn.Module):
         )
         return plan.detach().clone() if detach else plan
 
-    def _route_layout_fingerprint(self) -> str:
-        """Identify route topology without binding mutable Bank values."""
-
-        contract = self.formula_contract
-        payload = json.dumps(
-            {
-                "schema": "arti/recall-route-layout@1",
-                "hidden_dim": self.hidden_dim,
-                "slots": self.slots,
-                "routing": self.routing,
-                "group_size": self.group_size,
-                "group_topk": self.group_topk,
-                "value_composition": self.value_composition,
-                "factor_names": self.factor_names,
-                "factor_route_names": self.factor_route_names,
-                "formula_contract": None if contract is None else contract.to_dict(),
-                "expert_names": self._expert_names,
-                "expert_route_ranges": self._expert_route_ranges,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
-
     def _read_route_plan(
         self,
         z: Tensor,
@@ -960,8 +1056,10 @@ class ARTILatentRecallField(nn.Module):
         route_assignment: Tensor | None,
         memory: Tensor | None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Gather current Bank values through a frozen routing decision."""
+        """Gather current Bank values through a previously captured route."""
 
+        if not isinstance(plan, RecallRoutePlan):
+            raise TypeError("route_plan must be a RecallRoutePlan")
         expected = (
             self.routing,
             self.value_composition,
@@ -995,8 +1093,8 @@ class ARTILatentRecallField(nn.Module):
         )
         if weights.shape[-1] != expected_k:
             raise ValueError("route_plan selected-width does not match this Recall component")
-        route_width = self._route_width()
-        if route.shape[-1] != route_width:
+        expected_route_width = self._route_width()
+        if route.shape[-1] != expected_route_width:
             raise ValueError("route_plan route width does not match this Recall component")
         factor_width = self.slots // self.composition_factor
         factor_offsets = torch.arange(
@@ -1036,19 +1134,32 @@ class ARTILatentRecallField(nn.Module):
         bank = memory
         if bank is None:
             bank = self.bank if self._bank_gradient_enabled else self.bank.detach()
-        if bank.device != z.device or bank.shape[-2:] != (self.slots, self.hidden_dim):
-            raise ValueError("route-plan memory must match Recall device, slots, and hidden_dim")
+        if bank.device != z.device:
+            raise ValueError("memory must be on the same device as z")
+        if bank.shape[-2:] != (self.slots, self.hidden_dim):
+            raise ValueError("route-plan memory shape must match Recall slots and hidden_dim")
         if bank.ndim not in {2, 3} or (bank.ndim == 3 and bank.shape[0] != z.shape[0]):
             raise ValueError("route-plan memory must have shape [S,D] or [B,S,D]")
 
-        if bank.ndim == 2:
-            selected = torch.nn.functional.embedding(indices, bank)
-        else:
-            selected = self._select_explicit_values(bank, indices, sparse=False)
-        factors = (selected.to(dtype=z.dtype) * weights.unsqueeze(-1)).sum(dim=-2)
+        def planned_sparse_read(planned_indices: Tensor, planned_weights: Tensor) -> Tensor:
+            if bank.ndim == 2:
+                selected = torch.nn.functional.embedding(planned_indices, bank)
+            else:
+                selected = self._select_explicit_values(
+                    bank,
+                    planned_indices,
+                    sparse=False,
+                )
+            return (
+                selected.to(dtype=z.dtype)
+                * planned_weights.to(dtype=z.dtype).unsqueeze(-1)
+            ).sum(dim=-2)
+
+        factors = planned_sparse_read(indices, weights)
         if self.value_composition == "single":
-            context = factors[..., 0, :]
-        elif self.value_composition == "product":
+            return factors[..., 0, :], weights, indices, route
+
+        if self.value_composition == "product":
             context = self._compose_product_write(z, factors[..., 0, :], factors[..., 1, :])
         elif self.value_composition == "custom":
             context = self._compose_custom_write(
@@ -1058,6 +1169,34 @@ class ARTILatentRecallField(nn.Module):
         else:
             context = self._compose_state_write(z, factors)
         return context, weights, indices, route
+
+    def _route_layout_fingerprint(self) -> str:
+        """Identify route topology without binding mutable Bank values."""
+
+        contract = self.formula_contract
+        payload = json.dumps(
+            {
+                "schema": "arti/recall-route-layout@1",
+                "hidden_dim": self.hidden_dim,
+                "slots": self.slots,
+                "routing": self.routing,
+                "routing_normalizer": self.routing_normalizer,
+                "group_size": self.group_size,
+                "group_topk": self.group_topk,
+                "value_composition": self.value_composition,
+                "factor_names": self.factor_names,
+                "factor_route_names": self.factor_route_names,
+                "formula_contract": None if contract is None else contract.to_dict(),
+                "expert_names": self._expert_names,
+                "expert_route_ranges": self._expert_route_ranges,
+                "expert_member_fingerprints": self._expert_member_fingerprints,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
 
     def forward(
         self,
@@ -1069,6 +1208,9 @@ class ARTILatentRecallField(nn.Module):
         memory: Tensor | None = None,
         route_plan: RecallRoutePlan | None = None,
         _selected_groups_normalized: bool = False,
+        _random_source: object | None = None,
+        _random_phase: str = "refine-route",
+        _random_step: int = 0,
     ) -> _ARTIRecallRead:
         if recall is not None and (
             recall.ndim != 3 or recall.shape[0] != z.shape[0] or recall.shape[2] != z.shape[2]
@@ -1095,6 +1237,9 @@ class ARTILatentRecallField(nn.Module):
                 memory=memory,
                 selected_groups_normalized=_selected_groups_normalized,
                 return_route=True,
+                random_source=_random_source,
+                random_phase=_random_phase,
+                random_step=_random_step,
             )
 
         if self.recognition_mode == "explicit":
@@ -1118,9 +1263,17 @@ class ARTILatentRecallField(nn.Module):
             )
         recognition = recognition * mask.to(z.dtype)
         routed_influence = self._routed_influence(route)
-        influence = (recognition * routed_influence).unsqueeze(-1).expand_as(context)
+        effective_influence = recognition * routed_influence
+        if self.value_composition == "state":
+            # State Recall returns a candidate complete state. Apply routing
+            # influence to its transition, so zero influence is a true
+            # identity and not an accidental zero-state write.
+            context = z + effective_influence.unsqueeze(-1) * (context - z)
+        else:
+            context = effective_influence.unsqueeze(-1) * context
+        influence = effective_influence.unsqueeze(-1).expand_as(context)
         return _ARTIRecallRead(
-            context=influence * context,
+            context=context,
             weights=weights,
             influence=influence,
             recognition=recognition,
@@ -1155,11 +1308,18 @@ class ARTILatentRecallField(nn.Module):
             memory=memory,
             selected_groups_normalized=_selected_groups_normalized,
             return_route=self._route_influence.numel() > 0,
+            random_source=None,
+            random_phase="refine-route",
+            random_step=0,
         )
 
         routed_influence = self._routed_influence(route)
         if self.recognition_mode == "none":
-            context = context * routed_influence.unsqueeze(-1)
+            effective_influence = routed_influence
+            if self.value_composition == "state":
+                context = z + effective_influence.unsqueeze(-1) * (context - z)
+            else:
+                context = effective_influence.unsqueeze(-1) * context
             return context if mask is None else context * mask.unsqueeze(-1).to(context.dtype)
         if self.recognition_mode == "explicit":
             similarity = torch.cosine_similarity(z, context, dim=-1, eps=1e-6)
@@ -1176,7 +1336,10 @@ class ARTILatentRecallField(nn.Module):
             ).squeeze(-1)
         if mask is not None:
             recognition = recognition * mask.to(recognition.dtype)
-        return (recognition * routed_influence).unsqueeze(-1) * context
+        effective_influence = recognition * routed_influence
+        if self.value_composition == "state":
+            return z + effective_influence.unsqueeze(-1) * (context - z)
+        return effective_influence.unsqueeze(-1) * context
 
     def _read_bank(
         self,
@@ -1188,9 +1351,10 @@ class ARTILatentRecallField(nn.Module):
         memory: Tensor | None,
         selected_groups_normalized: bool,
         return_route: bool,
+        random_source: object | None,
+        random_phase: str,
+        random_step: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        if self.value_composition != "single" and selected_groups is not None:
-            raise ValueError("selected_groups is not supported by composed Recall")
         if route_assignment is not None and self.value_composition != "custom":
             raise ValueError(
                 "route_assignment requires a Recall Formula with explicit factor routes"
@@ -1222,6 +1386,9 @@ class ARTILatentRecallField(nn.Module):
                     memory=memory,
                     selected_groups_normalized=selected_groups_normalized,
                     return_route=return_route,
+                    random_source=random_source,
+                    random_phase=random_phase,
+                    random_step=random_step,
                 )
             else:
                 factors, weights, indices, route = self._grouped_factor_read(
@@ -1230,6 +1397,11 @@ class ARTILatentRecallField(nn.Module):
                     memory=memory,
                     return_route=return_route,
                     compose_state=self.value_composition == "state",
+                    selected_groups=selected_groups,
+                    selected_groups_normalized=selected_groups_normalized,
+                    random_source=random_source,
+                    random_phase=random_phase,
+                    random_step=random_step,
                 )
                 if self.value_composition == "product":
                     context = self._compose_product_write(
@@ -1357,17 +1529,6 @@ class ARTILatentRecallField(nn.Module):
 
         if self.formula is None:
             raise RuntimeError("custom Recall composition requires a formula module")
-        if self.formula_contract is None:
-            raise RuntimeError("custom Recall composition requires a formula contract")
-        if not formula_dtype_supported(
-            z.dtype,
-            self.formula_contract.execution.supported_dtypes,
-        ):
-            raise TypeError(
-                "Recall formula execution contract does not support "
-                f"dtype {z.dtype}; supported dtypes are "
-                f"{self.formula_contract.execution.supported_dtypes!r}"
-            )
         flat_state = z.reshape(-1, z.shape[-1])
         flat_factors = factors.reshape(
             -1,
@@ -1380,15 +1541,7 @@ class ARTILatentRecallField(nn.Module):
         ):
             next_state = self.formula(flat_state, flat_factors).reshape_as(z)
         else:
-            randomness = (
-                "error"
-                if self.formula_contract.execution.deterministic
-                else "different"
-            )
-            next_state = torch.vmap(
-                self.formula,
-                randomness=randomness,
-            )(flat_state, flat_factors).reshape_as(z)
+            next_state = torch.vmap(self.formula)(flat_state, flat_factors).reshape_as(z)
         if not isinstance(next_state, Tensor):
             raise TypeError("Recall formula must return one next-state Tensor")
         if next_state.shape != z.shape:
@@ -1482,6 +1635,11 @@ class ARTILatentRecallField(nn.Module):
         memory: Tensor | None,
         return_route: bool,
         compose_state: bool = False,
+        selected_groups: Tensor | None = None,
+        selected_groups_normalized: bool = False,
+        random_source: object | None = None,
+        random_phase: str = "refine-route",
+        random_step: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Read independently routed factors, optionally composing state online."""
 
@@ -1495,7 +1653,11 @@ class ARTILatentRecallField(nn.Module):
         )
         groups = group_bank_parameter.shape[0]
         factor_groups = groups // factor_count
-        active_groups = self._active_training_groups(factor_groups, z.device)
+        active_groups = (
+            None
+            if selected_groups is not None
+            else self._active_training_groups(factor_groups, z.device)
+        )
         if active_groups is None:
             group_bank = (
                 group_bank_parameter
@@ -1516,26 +1678,72 @@ class ARTILatentRecallField(nn.Module):
                 group_bank = group_bank.to(dtype=query.dtype)
         group_logits = torch.einsum("bnd,fgd->bnfg", query, group_bank) * self.scale
         group_logits = self._share_factor_route_logits(group_logits)
-        group_logits = self._apply_route_prior(
+        route_mass, selection_base = self._normalize_group_route(
             group_logits,
             active_indices=active_groups,
         )
         route = (
-            torch.softmax(group_logits, dim=-1).flatten(-2)
+            route_mass.flatten(-2)
             if return_route
             else group_logits.new_empty((*group_logits.shape[:2], 0))
         )
 
-        if self.training and self._bank_gradient_enabled and self.route_exploration > 0:
-            normalized_logits = self._standardize_route_logits(group_logits)
-            uniform = torch.rand(
+        if selected_groups is not None:
+            expected = (*z.shape[:2], factor_count)
+            if (
+                selected_groups.ndim != 4
+                or selected_groups.shape[:3] != expected
+                or not 1 <= selected_groups.shape[-1] <= self.group_topk
+            ):
+                raise ValueError(
+                    "composed selected_groups must have shape [B,N,F,K] with "
+                    f"F={factor_count} and 1 <= K <= {self.group_topk}"
+                )
+            if selected_groups.dtype != torch.long or selected_groups.device != z.device:
+                raise ValueError(
+                    "composed selected_groups must be torch.long on the state device"
+                )
+            invalid = torch.any(
+                (selected_groups < 0) | (selected_groups >= factor_groups)
+            )
+            if invalid.device.type == "cpu":
+                if bool(invalid):
+                    raise ValueError("composed selected_groups is out of range")
+            else:
+                torch._assert_async(
+                    ~invalid,
+                    "composed selected_groups is out of range",
+                )
+            selection_logits = (
+                self._standardize_route_logits(selection_base)
+                if selected_groups_normalized
+                else selection_base
+            )
+            selected_logits = selection_logits.gather(-1, selected_groups)
+        elif self.training and self._bank_gradient_enabled and self.route_exploration > 0:
+            normalized_logits = self._standardize_route_logits(selection_base)
+            random_shape = (
                 normalized_logits.shape[0],
                 1,
                 self.factor_route_count,
                 normalized_logits.shape[-1],
-                device=normalized_logits.device,
-                dtype=torch.float32,
-            ).clamp(torch.finfo(torch.float32).eps, 1.0 - torch.finfo(torch.float32).eps)
+            )
+            if random_source is None:
+                uniform = torch.rand(
+                    random_shape,
+                    device=normalized_logits.device,
+                    dtype=torch.float32,
+                )
+            else:
+                uniform = random_source.uniform(
+                    random_phase,
+                    random_step,
+                    normalized_logits.new_empty(random_shape, dtype=torch.float32),
+                )
+            uniform = uniform.clamp(
+                torch.finfo(torch.float32).eps,
+                1.0 - torch.finfo(torch.float32).eps,
+            )
             uniform = uniform.index_select(
                 -2,
                 self._factor_route_index.to(device=uniform.device),
@@ -1550,19 +1758,19 @@ class ARTILatentRecallField(nn.Module):
             selected_logits = normalized_logits.gather(-1, selected_groups)
         elif self.group_topk == 1:
             selected_logits, selected_groups = torch.max(
-                group_logits,
+                selection_base,
                 dim=-1,
                 keepdim=True,
             )
         else:
             selected_logits, selected_groups = torch.topk(
-                group_logits,
+                selection_base,
                 self.group_topk,
                 dim=-1,
             )
 
         group_weights = self._selected_group_weights(
-            group_logits,
+            selection_base,
             selected_groups,
             selected_logits,
         )
@@ -1742,6 +1950,9 @@ class ARTILatentRecallField(nn.Module):
         return_route: bool = True,
         group_offset: int = 0,
         group_count: int | None = None,
+        random_source: object | None = None,
+        random_phase: str = "refine-route",
+        random_step: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         assert self.key_bank is not None
         assert self.group_bank is not None
@@ -1781,49 +1992,77 @@ class ARTILatentRecallField(nn.Module):
             if not autocast_enabled:
                 group_bank = group_bank.to(dtype=query.dtype)
         group_logits = torch.einsum("bnd,gd->bng", query, group_bank) * self.scale
-        group_logits = self._apply_route_prior(
+        route, selection_base = self._normalize_group_route(
             group_logits,
             active_indices=active_groups,
             offset=group_offset,
             count=resolved_group_count,
         )
         route = (
-            torch.softmax(group_logits, dim=-1)
+            route
             if return_route
             else group_logits.new_empty((*group_logits.shape[:-1], 0))
         )
         if selected_groups is not None:
-            expected_shape = (*z.shape[:2], self.group_topk)
-            if selected_groups.shape != expected_shape:
+            expected_prefix = z.shape[:2]
+            if (
+                selected_groups.ndim != 3
+                or selected_groups.shape[:2] != expected_prefix
+                or not 1 <= selected_groups.shape[-1] <= self.group_topk
+            ):
                 raise ValueError(
-                    "selected_groups must have shape "
-                    f"{expected_shape}, got {tuple(selected_groups.shape)}"
+                    "selected_groups must have shape [B,N,K] with "
+                    f"1 <= K <= {self.group_topk}, got {tuple(selected_groups.shape)}"
                 )
             if selected_groups.dtype != torch.long:
                 raise ValueError("selected_groups must use torch.long dtype")
             if selected_groups.device != z.device:
                 raise ValueError("selected_groups must be on the same device as z")
             is_batched = torch._C._functorch.is_batchedtensor(selected_groups)
-            if not is_batched and (
-                bool(torch.any(selected_groups < 0))
-                or bool(torch.any(selected_groups >= resolved_group_count))
-            ):
-                raise ValueError("selected_groups contains an out-of-range group index")
+            if not is_batched:
+                invalid = torch.any(
+                    (selected_groups < 0)
+                    | (selected_groups >= resolved_group_count)
+                )
+                if invalid.device.type == "cpu":
+                    if bool(invalid):
+                        raise ValueError(
+                            "selected_groups contains an out-of-range group index"
+                        )
+                else:
+                    torch._assert_async(
+                        ~invalid,
+                        "selected_groups contains an out-of-range group index",
+                    )
             selection_logits = (
-                self._standardize_route_logits(group_logits)
+                self._standardize_route_logits(selection_base)
                 if selected_groups_normalized
-                else group_logits
+                else selection_base
             )
             selected_logits = selection_logits.gather(-1, selected_groups)
         elif self.training and self._bank_gradient_enabled and self.route_exploration > 0:
-            normalized_logits = self._standardize_route_logits(group_logits)
-            uniform = torch.rand(
+            normalized_logits = self._standardize_route_logits(selection_base)
+            random_shape = (
                 normalized_logits.shape[0],
                 1,
                 normalized_logits.shape[-1],
-                device=normalized_logits.device,
-                dtype=torch.float32,
-            ).clamp(torch.finfo(torch.float32).eps, 1.0 - torch.finfo(torch.float32).eps)
+            )
+            if random_source is None:
+                uniform = torch.rand(
+                    random_shape,
+                    device=normalized_logits.device,
+                    dtype=torch.float32,
+                )
+            else:
+                uniform = random_source.uniform(
+                    random_phase,
+                    random_step,
+                    normalized_logits.new_empty(random_shape, dtype=torch.float32),
+                )
+            uniform = uniform.clamp(
+                torch.finfo(torch.float32).eps,
+                1.0 - torch.finfo(torch.float32).eps,
+            )
             gumbel = -torch.log(-torch.log(uniform))
             selection_logits = normalized_logits + self.route_exploration * gumbel
             selected_groups = torch.topk(
@@ -1834,12 +2073,12 @@ class ARTILatentRecallField(nn.Module):
             selected_logits = normalized_logits.gather(-1, selected_groups)
         else:
             selected_logits, selected_groups = torch.topk(
-                group_logits,
+                selection_base,
                 self.group_topk,
                 dim=-1,
             )
         group_weights = self._selected_group_weights(
-            group_logits,
+            selection_base,
             selected_groups,
             selected_logits,
         )
@@ -2097,12 +2336,15 @@ class ARTIDynamicStateLayer(nn.Module):
             if config.use_recall and config.recall_steps > 0
             else None
         )
-        self.recall_activation = (
-            nn.Identity()
-            if config.recall_value_composition == "state"
-            else Half()
-            if config.recall_activation == "half"
-            else nn.Identity()
+        self.recall_state = (
+            ARTIRecallWriteState(
+                replace(config, input_dim=hidden_dim),
+                recall_field=self.recall,
+                register_recall_field=False,
+                persistent_retention=False,
+            )
+            if self.recall is not None
+            else None
         )
         self.update_gate = nn.Linear(hidden_dim * 5 + config.coord_dim, hidden_dim)
         self.norm = nn.LayerNorm(hidden_dim) if config.use_layer_norm else nn.Identity()
@@ -2117,6 +2359,8 @@ class ARTIDynamicStateLayer(nn.Module):
         visibility: Tensor | None = None,
         recall: Tensor | None = None,
         recall_steps: int | None = None,
+        refine_policy: RefinePolicy | AdaptiveRefinePolicy | None = None,
+        route_plan: RecallRoutePlan | None = None,
         _selected_recall_groups: Tensor | None = None,
         _selected_groups_normalized: bool = False,
     ) -> tuple[Tensor, dict[str, Tensor], Tensor, Tensor]:
@@ -2154,105 +2398,45 @@ class ARTIDynamicStateLayer(nn.Module):
             read_weights = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype)
             write_weights = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype)
 
-        recall_context = torch.zeros_like(z)
-        recall_weights = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype)
-        recall_indices = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=torch.long)
-        recall_route = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype)
-        recall_influence = torch.zeros_like(z)
-        recall_recognition = torch.zeros(*z.shape[:2], device=z.device, dtype=z.dtype)
-        raw_recall_context = torch.zeros_like(z)
         recall_input = z
-        recalled_state = z
         recall_write = torch.zeros_like(z)
         configured_recall_steps = self.config.recall_steps if self.config.use_recall else 0
-        if recall_steps is None:
-            recall_steps = configured_recall_steps
-        else:
+        if recall_steps is not None:
             if isinstance(recall_steps, bool) or not isinstance(recall_steps, int):
                 raise TypeError("recall_steps must be an integer or None")
             if recall_steps < 0:
                 raise ValueError("recall_steps must be non-negative")
-            if recall_steps > configured_recall_steps:
-                raise ValueError(
-                    "runtime recall_steps cannot exceed the configured recall_steps "
-                    f"({configured_recall_steps})"
-                )
-        recall_active = mask.any(dim=1)
-        recall_steps_executed = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
-        recall_update_ratio = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
-        recall_step_active: list[Tensor] = []
-        recall_step_update_ratio: list[Tensor] = []
-        selected_recall_groups = _selected_recall_groups
-        for step in range(recall_steps):
-            assert self.recall is not None
-            read = self.recall(
+        if refine_policy is not None and recall_steps is not None:
+            raise ValueError("pass either refine_policy or recall_steps, not both")
+        if refine_policy is None:
+            steps = configured_recall_steps if recall_steps is None else recall_steps
+            refine_policy = RefinePolicy(
+                max_steps=steps,
+                min_steps=min(self.config.recall_min_steps, steps),
+                tolerance=self.config.recall_tolerance,
+                trace_level="summary",
+            )
+        if self.recall_state is None:
+            if refine_policy.max_steps > 0:
+                raise ValueError("Recall is disabled for this ARTILayer")
+            recall_diagnostics: dict[str, Tensor] = {}
+        else:
+            z, recall_write, recall_diagnostics = self.recall_state(
                 z,
                 mask,
                 recall,
-                selected_groups=selected_recall_groups,
-                _selected_groups_normalized=_selected_groups_normalized and step == 0,
+                refine_policy=refine_policy,
+                route_plan=route_plan,
+                selected_groups=_selected_recall_groups,
+                selected_groups_normalized=_selected_groups_normalized,
+                selected_groups_first_step_only=False,
             )
-            (
-                raw_recall_context,
-                recall_weights,
-                recall_influence,
-                recall_recognition,
-            ) = read
-            recall_indices = read.indices
-            recall_route = read.route
-            if selected_recall_groups is None and self.recall.routing == "grouped":
-                selected_recall_groups = (read.indices[..., 0] // self.recall.group_size).detach()
-            active = recall_active.view(-1, 1, 1).to(z.dtype)
-            raw_recall_context = raw_recall_context * active
-            recall_influence = recall_influence * active
-            recall_recognition = recall_recognition * recall_active.unsqueeze(-1).to(z.dtype)
-            recall_context = self.recall_activation(raw_recall_context)
-            applied_write = self.dropout(recall_context)
-            previous = z
-            active_tokens = (recall_active.unsqueeze(-1) & mask).unsqueeze(-1)
-            step_write = torch.where(active_tokens, applied_write, torch.zeros_like(applied_write))
-            if self.config.recall_value_composition == "state":
-                z = torch.where(active_tokens, step_write, z)
-                recall_write = recall_write + (z - previous)
-            else:
-                z = torch.where(active_tokens, z + step_write, z)
-                recall_write = recall_write + step_write
-            recalled_state = z
-            recall_effect = z - previous
-            valid = mask.unsqueeze(-1).to(torch.float32)
-            recall_update_ratio = (
-                (recall_effect.float() * valid).flatten(1).norm(dim=-1)
-                / (previous.float() * valid)
-                .flatten(1)
-                .norm(dim=-1)
-                .clamp_min(torch.finfo(torch.float32).eps)
-            ).to(z.dtype)
-            recall_steps_executed = recall_steps_executed + recall_active.to(z.dtype)
-            recall_step_active.append(recall_active.to(z.dtype))
-            recall_step_update_ratio.append(recall_update_ratio)
-            if (
-                self.config.recall_tolerance is not None
-                and step + 1 >= self.config.recall_min_steps
-            ):
-                recall_active = recall_active & (
-                    recall_update_ratio.detach() > self.config.recall_tolerance
-                )
-                if not bool(torch.any(recall_active)):
-                    break
-
-        if recall_steps > 0:
-            padding = recall_steps - len(recall_step_active)
-            recall_step_active.extend(
-                torch.zeros_like(recall_steps_executed) for _ in range(padding)
-            )
-            recall_step_update_ratio.extend(
-                torch.zeros_like(recall_update_ratio) for _ in range(padding)
-            )
-            step_active_diagnostic = torch.stack(recall_step_active, dim=1)
-            step_ratio_diagnostic = torch.stack(recall_step_update_ratio, dim=1)
-        else:
-            step_active_diagnostic = torch.empty(z.shape[0], 0, device=z.device, dtype=z.dtype)
-            step_ratio_diagnostic = torch.empty(z.shape[0], 0, device=z.device, dtype=z.dtype)
+        recall_context = recall_diagnostics.get("recall_context", torch.zeros_like(z))
+        raw_recall_context = recall_diagnostics.get("recall_raw_context", torch.zeros_like(z))
+        recall_route = recall_diagnostics.get(
+            "recall_route",
+            torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype),
+        )
 
         update_input = torch.cat(
             [z, coord, phase_context, interface_context, visible_context, recall_context], dim=-1
@@ -2262,25 +2446,46 @@ class ARTIDynamicStateLayer(nn.Module):
         updated = self.norm(z + self.dropout(gate * candidate))
         updated = updated * mask.unsqueeze(-1).to(updated.dtype)
 
+        empty_weights = torch.empty(z.shape[0], z.shape[1], 0, device=z.device, dtype=z.dtype)
+        empty_indices = torch.empty(
+            z.shape[0], z.shape[1], 0, device=z.device, dtype=torch.long
+        )
+        steps_attempted = recall_diagnostics.get(
+            "recall_steps_attempted",
+            torch.zeros(z.shape[0], device=z.device, dtype=torch.int64),
+        )
+        step_attempted = recall_diagnostics.get(
+            "recall_step_attempted",
+            torch.empty(z.shape[0], 0, device=z.device, dtype=torch.bool),
+        )
         diagnostics = {
             "operator_weights": operator_weights,
             "phase_receptor_gain": phase_receptor_gain,
             "interface_read_weights": read_weights,
             "interface_write_weights": write_weights,
             "visibility_weights": visible_weights,
-            "recall_bank_weights": recall_weights,
-            "recall_bank_indices": recall_indices,
+            **recall_diagnostics,
+            "recall_bank_weights": recall_diagnostics.get("recall_bank_weights", empty_weights),
+            "recall_bank_indices": recall_diagnostics.get("recall_bank_indices", empty_indices),
             "recall_route": recall_route,
-            "recall_influence": recall_influence,
-            "recall_recognition": recall_recognition,
-            "recall_steps_executed": recall_steps_executed,
-            "recall_step_active": step_active_diagnostic,
-            "recall_step_update_ratio": step_ratio_diagnostic,
-            "recall_update_ratio": recall_update_ratio,
-            "recall_effect_norm": (recalled_state - recall_input).norm(dim=-1),
+            "recall_influence": recall_diagnostics.get("recall_influence", torch.zeros_like(z)),
+            "recall_recognition": recall_diagnostics.get(
+                "recall_recognition", torch.zeros(z.shape[:2], device=z.device, dtype=z.dtype)
+            ),
+            "recall_steps_executed": steps_attempted.to(z.dtype),
+            "recall_step_active": step_attempted.to(z.dtype),
+            "recall_step_update_ratio": recall_diagnostics.get(
+                "recall_step_update_ratio", z.new_empty(z.shape[0], 0)
+            ),
+            "recall_update_ratio": recall_diagnostics.get(
+                "recall_update_ratio", z.new_zeros(z.shape[0])
+            ),
+            "recall_effect_norm": (z - recall_input).norm(dim=-1),
             "recall_activation_half": torch.full(
                 (z.shape[0],),
-                1.0 if self.config.recall_activation == "half" and recall_steps > 0 else 0.0,
+                1.0
+                if self.config.recall_activation == "half" and refine_policy.max_steps > 0
+                else 0.0,
                 device=z.device,
                 dtype=z.dtype,
             ),
@@ -2302,6 +2507,9 @@ class ARTIRecallWriteState(nn.Module):
         *,
         identity_init_bank: bool = False,
         formula: nn.Module | None = None,
+        recall_field: ARTILatentRecallField | None = None,
+        register_recall_field: bool = True,
+        persistent_retention: bool = True,
     ) -> None:
         super().__init__()
         if not config.use_recall or config.recall_steps <= 0:
@@ -2310,34 +2518,39 @@ class ARTIRecallWriteState(nn.Module):
         if hidden_dim != config.input_dim:
             raise ValueError("direct Recall values must use the host input dimension")
         self.config = config
-        self.recall = ARTILatentRecallField(
-            hidden_dim,
-            config.recall_slots,
-            recognition_mode=config.recall_recognition_mode,
-            recognition_threshold=config.recall_recognition_threshold,
-            recognition_temperature=config.recall_recognition_temperature,
-            routing=config.recall_routing,
-            key_dim=config.recall_key_dim,
-            query_mode=config.recall_query_mode,
-            query_seed=config.recall_query_seed,
-            group_size=config.recall_group_size,
-            group_topk=config.recall_group_topk,
-            value_composition=config.recall_value_composition,
-            formula=formula,
-            factor_activation=config.recall_activation,
-            route_exploration=config.recall_route_exploration,
-            project_external=False,
-        )
-        self._formula_replaces_state = formula is not None
+        if recall_field is not None and formula is not None:
+            raise ValueError("recall_field and formula are mutually exclusive")
+        if recall_field is None:
+            recall_field = ARTILatentRecallField(
+                hidden_dim,
+                config.recall_slots,
+                recognition_mode=config.recall_recognition_mode,
+                recognition_threshold=config.recall_recognition_threshold,
+                recognition_temperature=config.recall_recognition_temperature,
+                routing=config.recall_routing,
+                key_dim=config.recall_key_dim,
+                query_mode=config.recall_query_mode,
+                query_seed=config.recall_query_seed,
+                group_size=config.recall_group_size,
+                group_topk=config.recall_group_topk,
+                value_composition=config.recall_value_composition,
+                formula=formula,
+                factor_activation=config.recall_activation,
+                route_exploration=config.recall_route_exploration,
+                project_external=False,
+            )
+        if register_recall_field:
+            self.recall = recall_field
+        else:
+            object.__setattr__(self, "recall", recall_field)
+        self._formula_replaces_state = self.recall.formula is not None
         self._replaces_state = (
             config.recall_value_composition == "state" or self._formula_replaces_state
         )
         self.recall_activation = (
             nn.Identity()
             if config.recall_value_composition == "state"
-            # The product write hotpath is a deterministic compiled kernel;
-            # stochastic survival remains available through public Half.
-            else Half(stochastic=False)
+            else Half()
             if config.recall_activation == "half"
             else nn.Identity()
         )
@@ -2347,7 +2560,7 @@ class ARTIRecallWriteState(nn.Module):
         self.register_buffer(
             "_state_input_retention",
             torch.tensor(initial_retention, dtype=torch.float32),
-            persistent=True,
+            persistent=persistent_retention,
         )
         self._state_bank_needs_calibration = bool(
             identity_init_bank and config.recall_value_composition == "state"
@@ -2419,17 +2632,8 @@ class ARTIRecallWriteState(nn.Module):
         unexpected_keys,
         error_msgs,
     ) -> None:
-        bank_key = f"{prefix}recall.bank"
-        retention_key = f"{prefix}_state_input_retention"
-        legacy_key_bank_key = f"{prefix}recall.key_bank"
+        """Load the current state contract without legacy key migration."""
 
-        # Public 1.x Recall checkpoints predate the state-retention buffer and
-        # stored a learned routing key bank. Current Recall keeps the value
-        # Bank and query basis, but fixed routing no longer owns that key bank.
-        if retention_key not in state_dict:
-            state_dict[retention_key] = self._state_input_retention.detach().clone()
-        if self.recall.key_bank is None:
-            state_dict.pop(legacy_key_bank_key, None)
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -2439,8 +2643,10 @@ class ARTIRecallWriteState(nn.Module):
             unexpected_keys,
             error_msgs,
         )
-        if self.config.recall_value_composition == "state" and bank_key in state_dict:
-            self.mark_state_bank_calibrated()
+        if self.config.recall_value_composition == "state":
+            bank_key = f"{prefix}recall.bank"
+            if bank_key in state_dict and bank_key not in missing_keys:
+                self.mark_state_bank_calibrated()
 
     @torch.no_grad()
     def _calibrate_state_bank_once(
@@ -2485,6 +2691,61 @@ class ARTIRecallWriteState(nn.Module):
     def _recalled_state(self, previous: Tensor, write: Tensor) -> Tensor:
         return previous + write if self._formula_replaces_state else write
 
+    @staticmethod
+    def _apply_refine_state_operation(
+        candidate: Tensor,
+        mask: Tensor,
+        operation: nn.Module | None,
+    ) -> Tensor:
+        """Apply an optional existing tensor operation inside the refine loop."""
+
+        if operation is None:
+            return candidate
+        if not isinstance(operation, nn.Module):
+            raise TypeError("state_operation must be an nn.Module or None")
+        exposed = mask
+        intervened = mask
+        isolated = torch.where(mask.unsqueeze(-1), candidate, torch.zeros_like(candidate))
+        operated = operation(isolated, mask, exposed, intervened)
+        if not isinstance(operated, Tensor) or operated.shape != candidate.shape:
+            raise ValueError("state_operation must return a Tensor matching the state")
+        if operated.device != candidate.device or operated.dtype != candidate.dtype:
+            raise ValueError(
+                "state_operation output must preserve state device and dtype"
+            )
+        return torch.where(mask.unsqueeze(-1), operated, candidate)
+
+    def _apply_recall_write_randomness(
+        self,
+        raw_write: Tensor,
+        *,
+        random_source: object | None,
+        refine_step: int,
+    ) -> Tensor:
+        activation = self.recall_activation
+        if isinstance(activation, Half) and activation.stochastic and random_source is not None:
+            uniform = random_source.uniform(
+                "half-survival",
+                refine_step,
+                raw_write,
+            )
+            write = activation(raw_write, uniform=uniform)
+        else:
+            write = activation(raw_write)
+        if not self.training or self.dropout.p == 0:
+            return write
+        if random_source is None:
+            return self.dropout(write)
+        if self.dropout.p == 1:
+            return torch.zeros_like(write)
+        uniform = random_source.uniform(
+            "recall-dropout",
+            refine_step,
+            write,
+        )
+        keep = (uniform >= self.dropout.p).to(dtype=write.dtype)
+        return write * keep / (1.0 - self.dropout.p)
+
     def compile_write_hotpath(
         self,
         *,
@@ -2524,6 +2785,7 @@ class ARTIRecallWriteState(nn.Module):
         z: Tensor,
         mask: Tensor | None,
         recall: Tensor | None,
+        memory: Tensor | None = None,
     ) -> Tensor | None:
         tail = self._compiled_product_tail
         field = self.recall
@@ -2532,6 +2794,7 @@ class ARTIRecallWriteState(nn.Module):
             or z.device.type != "cuda"
             or mask is not None
             or recall is not None
+            or memory is not None
             or field._route_influence.numel() > 0
             or not torch.is_autocast_enabled(z.device.type)
         ):
@@ -2573,58 +2836,598 @@ class ARTIRecallWriteState(nn.Module):
             self._compiled_product_tail = None
             return None
 
+    def _forward_adaptive(
+        self,
+        z: Tensor,
+        mask: Tensor,
+        *,
+        recall: Tensor | None,
+        route_assignment: Tensor | None,
+        memory: Tensor | None,
+        policy: AdaptiveRefinePolicy,
+        route_plan: RecallRoutePlan | None,
+        selected_groups: Tensor | None,
+        selected_groups_normalized: bool,
+        selected_groups_first_step_only: bool,
+        preserved_input: Tensor,
+        state_operation: nn.Module | None,
+        refine_schedule: AdaptiveRefineSchedule | None,
+        random_source: object | None,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """Execute the version-2 token-resolved adaptive refine contract."""
+
+        initial = z
+        record_routes = policy.trace_level in {"routes", "full"}
+        record_full = policy.trace_level == "full"
+        if refine_schedule is not None:
+            if not isinstance(refine_schedule, AdaptiveRefineSchedule):
+                raise TypeError("refine_schedule must be AdaptiveRefineSchedule or None")
+            if (
+                refine_schedule.min_steps.shape != (z.shape[0],)
+                or refine_schedule.min_steps.device != z.device
+            ):
+                raise ValueError("refine_schedule must match the flattened sample batch")
+            torch._assert_async(
+                torch.all(refine_schedule.max_steps <= policy.max_steps),
+                "refine schedule exceeds the base policy maximum",
+            )
+            min_steps = refine_schedule.min_steps.unsqueeze(-1)
+            max_steps = refine_schedule.max_steps.unsqueeze(-1)
+            absolute_tolerance = refine_schedule.absolute_tolerance.unsqueeze(-1)
+            relative_tolerance = refine_schedule.relative_tolerance.unsqueeze(-1)
+            required_patience = refine_schedule.patience.unsqueeze(-1)
+            route_tolerance = (
+                None
+                if refine_schedule.route_tolerance is None
+                else refine_schedule.route_tolerance.unsqueeze(-1)
+            )
+            cycle_tolerance = (
+                None
+                if refine_schedule.cycle_tolerance is None
+                else refine_schedule.cycle_tolerance.unsqueeze(-1)
+            )
+        else:
+            min_steps = torch.full(
+                (z.shape[0], 1), policy.min_steps, device=z.device, dtype=torch.int64
+            )
+            max_steps = torch.full(
+                (z.shape[0], 1), policy.max_steps, device=z.device, dtype=torch.int64
+            )
+            absolute_tolerance = z.new_full(
+                (z.shape[0], 1), policy.stop.absolute_tolerance
+            )
+            relative_tolerance = z.new_full(
+                (z.shape[0], 1), policy.stop.relative_tolerance
+            )
+            required_patience = torch.full(
+                (z.shape[0], 1),
+                policy.stop.patience,
+                device=z.device,
+                dtype=torch.int64,
+            )
+            route_tolerance = (
+                None
+                if policy.stop.route_tolerance is None
+                else z.new_full((z.shape[0], 1), policy.stop.route_tolerance)
+            )
+            cycle_tolerance = (
+                None
+                if policy.stop.cycle_tolerance is None
+                else z.new_full((z.shape[0], 1), policy.stop.cycle_tolerance)
+            )
+        track_cycles = cycle_tolerance is not None
+        active = mask & (max_steps > 0)
+        cumulative_write = torch.zeros_like(z)
+        last_committed_raw_context = torch.zeros_like(z)
+        last_committed_context = torch.zeros_like(z)
+        last_committed_read: _ARTIRecallRead | None = None
+        patience = torch.zeros_like(mask, dtype=torch.int64)
+        token_steps_attempted = torch.zeros_like(mask, dtype=torch.int64)
+        token_steps_committed = torch.zeros_like(mask, dtype=torch.int64)
+        token_stop_reason = torch.full_like(
+            mask,
+            int(RecallStopReason.MAX_STEPS),
+            dtype=torch.int64,
+        )
+        token_stop_reason = torch.where(
+            mask,
+            token_stop_reason,
+            torch.full_like(token_stop_reason, int(RecallStopReason.MASKED)),
+        )
+        token_attempt_history: list[Tensor] = []
+        token_commit_history: list[Tensor] = []
+        token_update_history: list[Tensor] = []
+        token_route_change_history: list[Tensor] = []
+        token_read_change_history: list[Tensor] = []
+        route_history: list[Tensor] = []
+        index_history: list[Tensor] = []
+        context_history: list[Tensor] = []
+        weight_history: list[Tensor] = []
+        influence_history: list[Tensor] = []
+        recognition_history: list[Tensor] = []
+        checkpoints: dict[int, Tensor] = {}
+        state_history = [z.detach()] if track_cycles else []
+        previous_route: Tensor | None = None
+        previous_read: Tensor | None = None
+        token_update_ratio = torch.zeros_like(mask, dtype=z.dtype)
+        kernel_steps = 0
+
+        def merge_last_read(
+            previous: _ARTIRecallRead | None,
+            current: _ARTIRecallRead,
+            committed: Tensor,
+        ) -> _ARTIRecallRead:
+            def select(old: Tensor, new: Tensor) -> Tensor:
+                selector = committed.reshape(
+                    committed.shape[0],
+                    committed.shape[1],
+                    *([1] * (new.ndim - 2)),
+                )
+                return torch.where(selector, new, old)
+
+            if previous is None:
+                previous = _ARTIRecallRead(
+                    context=torch.zeros_like(current.context),
+                    weights=torch.zeros_like(current.weights),
+                    influence=torch.zeros_like(current.influence),
+                    recognition=torch.zeros_like(current.recognition),
+                    indices=torch.full_like(current.indices, -1),
+                    route=torch.zeros_like(current.route),
+                )
+            return _ARTIRecallRead(
+                context=select(previous.context, current.context),
+                weights=select(previous.weights, current.weights),
+                influence=select(previous.influence, current.influence),
+                recognition=select(previous.recognition, current.recognition),
+                indices=select(previous.indices, current.indices),
+                route=select(previous.route, current.route),
+            )
+
+        for step in range(policy.max_steps):
+            if policy.executor == "early_break" and not bool(active.any()):
+                break
+            kernel_steps += 1
+            attempted = active & (step < max_steps)
+            read = self.recall(
+                z,
+                attempted,
+                recall,
+                route_assignment=route_assignment,
+                memory=memory,
+                route_plan=route_plan,
+                selected_groups=(
+                    selected_groups
+                    if step == 0 or not selected_groups_first_step_only
+                    else None
+                ),
+                _selected_groups_normalized=(
+                    selected_groups_normalized
+                    and (step == 0 or not selected_groups_first_step_only)
+                ),
+                _random_source=random_source,
+                _random_phase="refine-route",
+                _random_step=step,
+            )
+            raw_write = read.context
+            write = self._apply_recall_write_randomness(
+                raw_write,
+                random_source=random_source,
+                refine_step=step,
+            )
+            previous = z
+            step_write = torch.where(attempted.unsqueeze(-1), write, torch.zeros_like(write))
+            if self._replaces_state:
+                candidate = self._compose_state_transition(
+                    initial,
+                    self._recalled_state(previous, step_write),
+                )
+            else:
+                candidate = previous + step_write
+            candidate = self._apply_refine_state_operation(
+                candidate,
+                attempted,
+                state_operation,
+            )
+
+            candidate_finite = torch.isfinite(candidate).all(dim=-1) | ~mask
+            if policy.check_finite and (
+                policy.nonfinite_action == "raise" or torch.is_grad_enabled()
+            ) and not torch._C._functorch.is_batchedtensor(z):
+                torch._assert_async(
+                    torch.all(candidate_finite | ~attempted),
+                    "Recall produced a non-finite candidate state",
+                )
+            safe_candidate = (
+                torch.where(torch.isfinite(candidate), candidate, previous)
+                if policy.check_finite
+                else candidate
+            )
+            committed = attempted & (
+                candidate_finite if policy.check_finite else torch.ones_like(attempted)
+            )
+            last_committed_read = merge_last_read(last_committed_read, read, committed)
+            last_committed_raw_context = torch.where(
+                committed.unsqueeze(-1), raw_write, last_committed_raw_context
+            )
+            last_committed_context = torch.where(
+                committed.unsqueeze(-1), write, last_committed_context
+            )
+            z = torch.where(committed.unsqueeze(-1), safe_candidate, previous)
+            effect = z - previous
+            cumulative_write = cumulative_write + effect
+            effect_norm = effect.float().norm(dim=-1)
+            previous_norm = previous.float().norm(dim=-1)
+            token_update_ratio = (
+                effect_norm / previous_norm.clamp_min(torch.finfo(torch.float32).eps)
+            ).to(z.dtype)
+
+            route_flat = read.route.float().flatten(2)
+            read_flat = read.context.float().flatten(2)
+            route_change = torch.zeros_like(token_update_ratio)
+            read_change = torch.zeros_like(token_update_ratio)
+            if previous_route is not None:
+                route_change = (
+                    (route_flat - previous_route).norm(dim=-1)
+                    / previous_route.norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
+                ).to(z.dtype)
+                read_change = (
+                    (read_flat - previous_read).norm(dim=-1)
+                    / previous_read.norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
+                ).to(z.dtype)
+
+            token_attempt_history.append(attempted)
+            token_commit_history.append(committed)
+            token_update_history.append(
+                torch.where(attempted, token_update_ratio, torch.zeros_like(token_update_ratio))
+            )
+            token_route_change_history.append(
+                torch.where(attempted, route_change, torch.zeros_like(route_change))
+            )
+            token_read_change_history.append(
+                torch.where(attempted, read_change, torch.zeros_like(read_change))
+            )
+            token_steps_attempted = token_steps_attempted + attempted.to(torch.int64)
+            token_steps_committed = token_steps_committed + committed.to(torch.int64)
+            previous_route = route_flat.detach()
+            previous_read = read_flat.detach()
+
+            if record_routes:
+                route_selector = attempted.reshape(
+                    attempted.shape[0],
+                    attempted.shape[1],
+                    *([1] * (read.route.ndim - 2)),
+                )
+                index_selector = attempted.reshape(
+                    attempted.shape[0],
+                    attempted.shape[1],
+                    *([1] * (read.indices.ndim - 2)),
+                )
+                route_history.append(
+                    torch.where(
+                        route_selector,
+                        read.route.detach(),
+                        torch.zeros_like(read.route),
+                    )
+                )
+                index_history.append(
+                    torch.where(
+                        index_selector,
+                        read.indices.detach(),
+                        torch.full_like(read.indices, -1),
+                    )
+                )
+            if record_full:
+                context_history.append(read.context.detach())
+                weight_history.append(read.weights.detach())
+                influence_history.append(read.influence.detach())
+                recognition_history.append(read.recognition.detach())
+            if track_cycles:
+                state_history.append(z.detach())
+                max_history = max(policy.stop.cycle_periods) + 1
+                if len(state_history) > max_history:
+                    state_history.pop(0)
+            if step + 1 in policy.checkpoints:
+                checkpoints[step + 1] = (
+                    z if policy.checkpoint_mode == "gradient" else z.detach()
+                )
+
+            eligible = step + 1 >= min_steps
+            threshold = absolute_tolerance + relative_tolerance * previous_norm.detach()
+            state_stable = effect_norm.detach() <= threshold
+            route_stable = torch.ones_like(state_stable)
+            if route_tolerance is not None:
+                route_stable = (
+                    route_change.detach() <= route_tolerance
+                    if previous_route is not None and step > 0
+                    else torch.zeros_like(state_stable)
+                )
+            stable = state_stable & route_stable & committed
+            if policy.stop.scope == "sample":
+                sample_valid = mask.sum(dim=1).clamp_min(1)
+                sample_stable = (
+                    (stable & mask).sum(dim=1) == sample_valid
+                ).unsqueeze(-1)
+                stable = sample_stable.expand_as(stable) & mask
+            stable = stable & eligible
+            patience = torch.where(stable, patience + 1, torch.zeros_like(patience))
+            converged = (patience >= required_patience) & eligible
+
+            cyclic = torch.zeros_like(active)
+            if cycle_tolerance is not None:
+                for period in policy.stop.cycle_periods:
+                    if len(state_history) > period:
+                        old = state_history[-period - 1].float()
+                        distance = (
+                            (z.detach().float() - old).norm(dim=-1)
+                            / old.norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
+                        )
+                        cyclic = cyclic | ((distance <= cycle_tolerance) & eligible)
+                if policy.stop.scope == "sample":
+                    sample_cycle = (cyclic | ~mask).all(dim=1, keepdim=True)
+                    cyclic = sample_cycle.expand_as(cyclic) & mask
+
+            nonfinite = attempted & ~candidate_finite if policy.check_finite else torch.zeros_like(active)
+            newly_converged = attempted & ~nonfinite & converged
+            newly_cycle = attempted & ~nonfinite & ~newly_converged & cyclic
+            token_stop_reason = torch.where(
+                nonfinite,
+                torch.full_like(token_stop_reason, int(RecallStopReason.NONFINITE)),
+                token_stop_reason,
+            )
+            token_stop_reason = torch.where(
+                newly_cycle,
+                torch.full_like(token_stop_reason, int(RecallStopReason.CYCLE)),
+                token_stop_reason,
+            )
+            token_stop_reason = torch.where(
+                newly_converged,
+                torch.full_like(token_stop_reason, int(RecallStopReason.CONVERGED)),
+                token_stop_reason,
+            )
+            active = active & ~nonfinite & ~newly_cycle & ~newly_converged
+            active = active & (step + 1 < max_steps)
+
+        if self._replaces_state:
+            cumulative_write = z - initial
+        executed = len(token_attempt_history)
+        if executed:
+            token_step_attempted = torch.stack(token_attempt_history, dim=1)
+            token_step_committed = torch.stack(token_commit_history, dim=1)
+            update_history = torch.stack(token_update_history, dim=1)
+            route_change_tensor = torch.stack(token_route_change_history, dim=1)
+            read_change_tensor = torch.stack(token_read_change_history, dim=1)
+        else:
+            shape = (z.shape[0], 0, z.shape[1])
+            token_step_attempted = torch.empty(shape, device=z.device, dtype=torch.bool)
+            token_step_committed = torch.empty_like(token_step_attempted)
+            update_history = z.new_empty(shape)
+            route_change_tensor = z.new_empty(shape)
+            read_change_tensor = z.new_empty(shape)
+        if record_routes and executed:
+            route_tensor = torch.stack(route_history, dim=1)
+            index_tensor = torch.stack(index_history, dim=1)
+        else:
+            route_tensor = z.new_empty(z.shape[0], executed, z.shape[1], 0)
+            index_tensor = torch.empty(
+                z.shape[0], executed, z.shape[1], 0, device=z.device, dtype=torch.int64
+            )
+        active_fraction = token_step_attempted.to(z.dtype).mean(dim=(0, 2))
+        logical_token_steps = token_steps_committed.sum(dtype=torch.int64)
+        trace = RecallTraceV2(
+            token_steps_attempted=token_steps_attempted,
+            token_steps_committed=token_steps_committed,
+            token_stop_reason=token_stop_reason,
+            token_step_attempted=token_step_attempted,
+            token_step_committed=token_step_committed,
+            state_change_ratio=update_history,
+            route_change=route_change_tensor,
+            effective_read_change=read_change_tensor,
+            active_fraction=active_fraction,
+            kernel_steps=torch.tensor(kernel_steps, device=z.device, dtype=torch.int64),
+            logical_token_steps=logical_token_steps,
+            route=route_tensor,
+            indices=index_tensor,
+            checkpoints=checkpoints,
+        )
+        diagnostics = trace.diagnostics()
+        diagnostics.update(
+            {
+                "recall_step_update_ratio": update_history.mean(dim=2),
+                "recall_step_route_change": route_change_tensor.mean(dim=2),
+                "recall_step_effective_read_change": read_change_tensor.mean(dim=2),
+                "recall_update_ratio": token_update_ratio,
+                "recall_raw_context": last_committed_raw_context,
+                "recall_context": last_committed_context,
+                "recall_effect_norm": (z - initial).norm(dim=-1),
+                "recall_write_norm": cumulative_write.norm(dim=-1),
+            }
+        )
+        if last_committed_read is None:
+            diagnostics.update(
+                {
+                    "recall_bank_weights": z.new_empty(z.shape[0], z.shape[1], 0),
+                    "recall_bank_indices": torch.empty(
+                        z.shape[0], z.shape[1], 0, device=z.device, dtype=torch.int64
+                    ),
+                    "recall_route": z.new_empty(z.shape[0], z.shape[1], 0),
+                    "recall_influence": torch.zeros_like(z),
+                    "recall_recognition": z.new_zeros(z.shape[:2]),
+                }
+            )
+        else:
+            diagnostics.update(
+                {
+                    "recall_bank_weights": last_committed_read.weights,
+                    "recall_bank_indices": last_committed_read.indices,
+                    "recall_route": last_committed_read.route,
+                    "recall_influence": last_committed_read.influence,
+                    "recall_recognition": last_committed_read.recognition,
+                }
+            )
+        if record_full:
+            diagnostics.update(
+                {
+                    "recall_context_history": torch.stack(context_history, dim=1),
+                    "recall_weight_history": torch.stack(weight_history, dim=1),
+                    "recall_influence_history": torch.stack(influence_history, dim=1),
+                    "recall_recognition_history": torch.stack(recognition_history, dim=1),
+                }
+            )
+        returned = torch.where(mask.unsqueeze(-1), z, preserved_input)
+        return returned, cumulative_write, diagnostics
+
     def forward(
         self,
         z: Tensor,
         mask: Tensor,
         recall: Tensor | None = None,
         route_assignment: Tensor | None = None,
-        refine_policy: RefinePolicy | AdaptiveRefinePolicy | None = None,
+        memory: Tensor | None = None,
+        refine_policy: RefinePolicy | None = None,
         route_plan: RecallRoutePlan | None = None,
+        selected_groups: Tensor | None = None,
+        selected_groups_normalized: bool = False,
+        selected_groups_first_step_only: bool = True,
+        state_operation: nn.Module | None = None,
+        refine_schedule: AdaptiveRefineSchedule | None = None,
+        _random_source: object | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         self._calibrate_state_bank_once(z, mask)
-        if refine_policy is not None and not isinstance(
-            refine_policy,
-            (RefinePolicy, AdaptiveRefinePolicy),
-        ):
+        if mask is None:
+            mask = torch.ones(z.shape[:2], device=z.device, dtype=torch.bool)
+        preserved_input = z
+        z = torch.where(mask.unsqueeze(-1), z, torch.zeros_like(z))
+        policy = refine_policy or RefinePolicy(
+            max_steps=self.config.recall_steps,
+            min_steps=self.config.recall_min_steps,
+            tolerance=self.config.recall_tolerance,
+        )
+        if not isinstance(policy, (RefinePolicy, AdaptiveRefinePolicy)):
             raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
-        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
-            raise TypeError("route_plan must be a RecallRoutePlan or None")
         if route_plan is not None and recall is not None:
             raise ValueError("route_plan does not support external recall tensors")
-
-        run_steps = self.config.recall_steps
-        min_steps = self.config.recall_min_steps
-        tolerance = self.config.recall_tolerance
-        if refine_policy is not None:
-            run_steps = refine_policy.max_steps
-            min_steps = refine_policy.min_steps
-            tolerance = (
-                refine_policy.tolerance
-                if isinstance(refine_policy, RefinePolicy)
-                else None
+        if route_plan is not None and selected_groups is not None:
+            raise ValueError("route_plan and selected_groups are mutually exclusive")
+        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
+            raise TypeError("route_plan must be a RecallRoutePlan or None")
+        if isinstance(policy, AdaptiveRefinePolicy):
+            return self._forward_adaptive(
+                z,
+                mask,
+                recall=recall,
+                route_assignment=route_assignment,
+                memory=memory,
+                policy=policy,
+                route_plan=route_plan,
+                selected_groups=selected_groups,
+                selected_groups_normalized=selected_groups_normalized,
+                selected_groups_first_step_only=selected_groups_first_step_only,
+                preserved_input=preserved_input,
+                state_operation=state_operation,
+                refine_schedule=refine_schedule,
+                random_source=_random_source,
+            )
+        if refine_schedule is not None:
+            raise ValueError(
+                "refine_schedule requires an AdaptiveRefinePolicy base"
             )
         initial = z
+        record_routes = policy.trace_level in {"routes", "full"}
+        record_full = policy.trace_level == "full"
+        track_cycles = policy.cycle_tolerance is not None
         cumulative_write = torch.zeros_like(z)
+        last_committed_raw_context = torch.zeros_like(z)
+        last_committed_context = torch.zeros_like(z)
         active = mask.any(dim=1)
-        steps_executed = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
+        steps_attempted = torch.zeros(z.shape[0], device=z.device, dtype=torch.int64)
+        steps_committed = torch.zeros(z.shape[0], device=z.device, dtype=torch.int64)
         update_ratio = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
-        step_active: list[Tensor] = []
+        step_attempted: list[Tensor] = []
+        step_committed: list[Tensor] = []
         step_update_ratio: list[Tensor] = []
-        last_read: _ARTIRecallRead | None = None
+        step_route_change: list[Tensor] = []
+        step_read_change: list[Tensor] = []
+        route_history: list[Tensor] = []
+        index_history: list[Tensor] = []
+        context_history: list[Tensor] = []
+        weight_history: list[Tensor] = []
+        influence_history: list[Tensor] = []
+        recognition_history: list[Tensor] = []
+        checkpoints: dict[int, Tensor] = {}
+        state_history = [z.detach()] if track_cycles else []
+        previous_route: Tensor | None = None
+        previous_read: Tensor | None = None
+        stop_reason = torch.full(
+            (z.shape[0],),
+            int(RecallStopReason.MAX_STEPS),
+            device=z.device,
+            dtype=torch.int64,
+        )
+        stop_reason = torch.where(
+            active,
+            stop_reason,
+            torch.full_like(stop_reason, int(RecallStopReason.MASKED)),
+        )
+        last_committed_read: _ARTIRecallRead | None = None
 
-        for step in range(run_steps):
+        def merge_last_read(
+            previous: _ARTIRecallRead | None,
+            current: _ARTIRecallRead,
+            attempted: Tensor,
+        ) -> _ARTIRecallRead:
+            def select(old: Tensor, new: Tensor) -> Tensor:
+                selector = attempted.reshape(
+                    attempted.shape[0],
+                    *([1] * (new.ndim - 1)),
+                )
+                return torch.where(selector, new, old)
+
+            if previous is None:
+                previous = _ARTIRecallRead(
+                    context=torch.zeros_like(current.context),
+                    weights=torch.zeros_like(current.weights),
+                    influence=torch.zeros_like(current.influence),
+                    recognition=torch.zeros_like(current.recognition),
+                    indices=torch.full_like(current.indices, -1),
+                    route=torch.zeros_like(current.route),
+                )
+            return _ARTIRecallRead(
+                context=select(previous.context, current.context),
+                weights=select(previous.weights, current.weights),
+                influence=select(previous.influence, current.influence),
+                recognition=select(previous.recognition, current.recognition),
+                indices=select(previous.indices, current.indices),
+                route=select(previous.route, current.route),
+            )
+
+        for step in range(policy.max_steps):
             # Re-route after every update so iterative Recall can select a new trace.
             read = self.recall(
                 z,
                 mask,
                 recall,
                 route_assignment=route_assignment,
+                memory=memory,
                 route_plan=route_plan,
+                selected_groups=(
+                    selected_groups
+                    if step == 0 or not selected_groups_first_step_only
+                    else None
+                ),
+                _selected_groups_normalized=(
+                    selected_groups_normalized
+                    and (step == 0 or not selected_groups_first_step_only)
+                ),
+                _random_source=_random_source,
+                _random_phase="refine-route",
+                _random_step=step,
             )
-            last_read = read
             raw_write = read.context
-            write = self.dropout(self.recall_activation(raw_write))
+            write = self._apply_recall_write_randomness(
+                raw_write,
+                random_source=_random_source,
+                refine_step=step,
+            )
             previous = z
             active_tokens = (active.unsqueeze(-1) & mask).unsqueeze(-1)
             step_write = torch.where(active_tokens, write, torch.zeros_like(write))
@@ -2633,61 +3436,281 @@ class ARTIRecallWriteState(nn.Module):
                     initial,
                     self._recalled_state(previous, step_write),
                 )
-                z = torch.where(active_tokens, candidate, z)
-                cumulative_write = cumulative_write + (z - previous)
             else:
-                z = torch.where(active_tokens, z + step_write, z)
-                cumulative_write = cumulative_write + step_write
+                candidate = previous + step_write
+            candidate = self._apply_refine_state_operation(
+                candidate,
+                mask,
+                state_operation,
+            )
+            valid_elements = mask.unsqueeze(-1).expand_as(candidate)
+            candidate_finite = torch.isfinite(candidate)
+            sample_finite = torch.where(
+                valid_elements,
+                candidate_finite,
+                torch.ones_like(candidate_finite),
+            ).flatten(1).all(dim=-1)
+            if policy.check_finite and (
+                policy.nonfinite_action == "raise" or torch.is_grad_enabled()
+            ) and not torch._C._functorch.is_batchedtensor(z):
+                torch._assert_async(
+                    torch.all(sample_finite | ~active),
+                    "Recall produced a non-finite candidate state",
+                )
+            safe_candidate = (
+                torch.where(candidate_finite, candidate, previous)
+                if policy.check_finite
+                else candidate
+            )
+            apply = active & (sample_finite if policy.check_finite else torch.ones_like(active))
+            last_committed_read = merge_last_read(last_committed_read, read, apply)
+            apply_tokens = (apply.unsqueeze(-1) & mask).unsqueeze(-1)
+            last_committed_raw_context = torch.where(
+                apply_tokens,
+                raw_write,
+                last_committed_raw_context,
+            )
+            last_committed_context = torch.where(
+                apply_tokens,
+                write,
+                last_committed_context,
+            )
+            z = torch.where(apply_tokens, safe_candidate, previous)
+            cumulative_write = cumulative_write + (z - previous)
             effect = z - previous
-            valid = mask.unsqueeze(-1).to(torch.float32)
+            valid_tokens = mask.unsqueeze(-1)
+            valid_effect = torch.where(
+                valid_tokens,
+                effect.float(),
+                torch.zeros_like(effect, dtype=torch.float32),
+            )
+            valid_previous = torch.where(
+                valid_tokens,
+                previous.float(),
+                torch.zeros_like(previous, dtype=torch.float32),
+            )
             update_ratio = (
-                (effect.float() * valid).flatten(1).norm(dim=-1)
-                / (previous.float() * valid)
-                .flatten(1)
-                .norm(dim=-1)
-                .clamp_min(torch.finfo(torch.float32).eps)
+                valid_effect.flatten(1).norm(dim=-1)
+                / valid_previous.flatten(1).norm(dim=-1).clamp_min(
+                    torch.finfo(torch.float32).eps
+                )
             ).to(z.dtype)
-            steps_executed = steps_executed + active.to(z.dtype)
-            step_active.append(active.to(z.dtype))
-            step_update_ratio.append(update_ratio)
-            if tolerance is not None and step + 1 >= min_steps:
-                active = active & (update_ratio.detach() > tolerance)
-                if not bool(torch.any(active)):
-                    break
+            step_attempted.append(active)
+            step_committed.append(apply)
+            step_update_ratio.append(torch.where(active, update_ratio, torch.zeros_like(update_ratio)))
+            steps_attempted = steps_attempted + active.to(torch.int64)
+            steps_committed = steps_committed + apply.to(torch.int64)
 
-        padding = run_steps - len(step_active)
-        step_active.extend(torch.zeros_like(steps_executed) for _ in range(padding))
-        step_update_ratio.extend(torch.zeros_like(update_ratio) for _ in range(padding))
+            route_mask = mask.reshape(mask.shape[0], mask.shape[1], *([1] * (read.route.ndim - 2)))
+            route_flat = torch.where(
+                route_mask,
+                read.route.float(),
+                torch.zeros_like(read.route, dtype=torch.float32),
+            ).flatten(1)
+            read_flat = torch.where(
+                mask.unsqueeze(-1),
+                read.context.float(),
+                torch.zeros_like(read.context, dtype=torch.float32),
+            ).flatten(1)
+            route_change = torch.zeros_like(update_ratio)
+            read_change = torch.zeros_like(update_ratio)
+            if previous_route is not None:
+                route_change = (
+                    (route_flat - previous_route).norm(dim=-1)
+                    / previous_route.norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
+                ).to(z.dtype)
+                read_change = (
+                    (read_flat - previous_read).norm(dim=-1)
+                    / previous_read.norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
+                ).to(z.dtype)
+            step_route_change.append(torch.where(active, route_change, torch.zeros_like(route_change)))
+            step_read_change.append(torch.where(active, read_change, torch.zeros_like(read_change)))
+            previous_route = route_flat.detach()
+            previous_read = read_flat.detach()
+            if record_routes:
+                route_history.append(read.route.detach())
+                index_history.append(read.indices.detach())
+            if record_full:
+                context_history.append(read.context.detach())
+                weight_history.append(read.weights.detach())
+                influence_history.append(read.influence.detach())
+                recognition_history.append(read.recognition.detach())
+            if track_cycles:
+                state_history.append(z.detach())
+                max_history = max(policy.cycle_periods) + 1
+                if len(state_history) > max_history:
+                    state_history.pop(0)
+            if step + 1 in policy.checkpoints:
+                checkpoints[step + 1] = (
+                    z if policy.checkpoint_mode == "gradient" else z.detach()
+                )
+
+            eligible = step + 1 >= policy.min_steps
+            converged = torch.zeros_like(active)
+            if policy.tolerance is not None and eligible:
+                converged = update_ratio.detach() <= policy.tolerance
+            cyclic = torch.zeros_like(active)
+            if policy.cycle_tolerance is not None and eligible:
+                for period in policy.cycle_periods:
+                    if len(state_history) > period:
+                        old = state_history[-period - 1].float()
+                        valid_tokens = mask.unsqueeze(-1)
+                        difference = torch.where(
+                            valid_tokens,
+                            z.detach().float() - old,
+                            torch.zeros_like(old),
+                        )
+                        old_valid = torch.where(
+                            valid_tokens,
+                            old,
+                            torch.zeros_like(old),
+                        )
+                        distance = (
+                            difference.flatten(1).norm(dim=-1)
+                            / old_valid.flatten(1).norm(dim=-1).clamp_min(
+                                torch.finfo(torch.float32).eps
+                            )
+                        )
+                        cyclic = cyclic | (distance <= policy.cycle_tolerance)
+            nonfinite = active & ~sample_finite if policy.check_finite else torch.zeros_like(active)
+            newly_converged = active & ~nonfinite & converged
+            newly_cycle = active & ~nonfinite & ~newly_converged & cyclic
+            stop_reason = torch.where(
+                nonfinite,
+                torch.full_like(stop_reason, int(RecallStopReason.NONFINITE)),
+                stop_reason,
+            )
+            stop_reason = torch.where(
+                newly_cycle,
+                torch.full_like(stop_reason, int(RecallStopReason.CYCLE)),
+                stop_reason,
+            )
+            stop_reason = torch.where(
+                newly_converged,
+                torch.full_like(stop_reason, int(RecallStopReason.CONVERGED)),
+                stop_reason,
+            )
+            active = active & ~nonfinite & ~newly_cycle & ~newly_converged
+
         if self._replaces_state:
             cumulative_write = z - initial
-        if last_read is None:
-            empty_weights = z.new_empty(z.shape[0], z.shape[1], 0)
+        if last_committed_read is None:
+            empty_route = z.new_empty(z.shape[0], 0, z.shape[1], 0)
             empty_indices = torch.empty(
-                z.shape[0], z.shape[1], 0, device=z.device, dtype=torch.long
+                z.shape[0], 0, z.shape[1], 0, device=z.device, dtype=torch.long
             )
-            empty_route = z.new_empty(z.shape[0], z.shape[1], 0)
-            last_read = _ARTIRecallRead(
-                context=torch.zeros_like(z),
-                weights=empty_weights,
-                influence=torch.zeros_like(z),
-                recognition=z.new_zeros(z.shape[:2]),
-                indices=empty_indices,
-                route=empty_route,
+            empty_active = torch.empty(z.shape[0], 0, device=z.device, dtype=torch.bool)
+            diagnostics = {
+                "recall_trace_schema": torch.tensor(
+                    1, device=z.device, dtype=torch.int64
+                ),
+                "recall_steps_attempted": steps_attempted,
+                "recall_steps_committed": steps_committed,
+                "recall_step_attempted": empty_active,
+                "recall_step_committed": empty_active,
+                "recall_step_update_ratio": z.new_empty(z.shape[0], 0),
+                "recall_step_route_change": z.new_empty(z.shape[0], 0),
+                "recall_step_effective_read_change": z.new_empty(z.shape[0], 0),
+                "recall_stop_reason": stop_reason,
+            }
+            if record_routes:
+                trace = RecallTrace(
+                    steps_attempted=steps_attempted,
+                    steps_committed=steps_committed,
+                    step_attempted=empty_active,
+                    step_committed=empty_active,
+                    state_change_ratio=z.new_empty(z.shape[0], 0),
+                    route_change=z.new_empty(z.shape[0], 0),
+                    effective_read_change=z.new_empty(z.shape[0], 0),
+                    stop_reason=stop_reason,
+                    route=empty_route,
+                    indices=empty_indices,
+                    checkpoints=checkpoints,
+                )
+                diagnostics.update(trace.diagnostics())
+            diagnostics.update(
+                {
+                    "recall_bank_weights": z.new_empty(z.shape[0], z.shape[1], 0),
+                    "recall_bank_indices": empty_indices.new_empty(z.shape[0], z.shape[1], 0),
+                    "recall_route": z.new_empty(z.shape[0], z.shape[1], 0),
+                    "recall_influence": torch.zeros_like(z),
+                    "recall_recognition": z.new_zeros(z.shape[:2]),
+                    "recall_update_ratio": update_ratio,
+                    "recall_raw_context": last_committed_raw_context,
+                    "recall_context": last_committed_context,
+                    "recall_effect_norm": (z - initial).norm(dim=-1),
+                    "recall_write_norm": cumulative_write.norm(dim=-1),
+                }
             )
+            if record_full:
+                diagnostics.update(
+                    {
+                        "recall_context_history": z.new_empty(
+                            z.shape[0], 0, z.shape[1], z.shape[2]
+                        ),
+                        "recall_weight_history": z.new_empty(
+                            z.shape[0], 0, z.shape[1], 0
+                        ),
+                        "recall_influence_history": z.new_empty(
+                            z.shape[0], 0, z.shape[1], z.shape[2]
+                        ),
+                        "recall_recognition_history": z.new_empty(
+                            z.shape[0], 0, z.shape[1]
+                        ),
+                    }
+                )
+            returned = torch.where(mask.unsqueeze(-1), z, preserved_input)
+            return returned, cumulative_write, diagnostics
+
         diagnostics = {
-            "recall_bank_weights": last_read.weights,
-            "recall_bank_indices": last_read.indices,
-            "recall_route": last_read.route,
-            "recall_influence": last_read.influence,
-            "recall_recognition": last_read.recognition,
-            "recall_steps_executed": steps_executed,
-            "recall_step_active": torch.stack(step_active, dim=1),
-            "recall_step_update_ratio": torch.stack(step_update_ratio, dim=1),
+            "recall_bank_weights": last_committed_read.weights,
+            "recall_bank_indices": last_committed_read.indices,
+            "recall_route": last_committed_read.route,
+            "recall_influence": last_committed_read.influence,
+            "recall_recognition": last_committed_read.recognition,
             "recall_update_ratio": update_ratio,
+            "recall_raw_context": last_committed_raw_context,
+            "recall_context": last_committed_context,
             "recall_effect_norm": (z - initial).norm(dim=-1),
             "recall_write_norm": cumulative_write.norm(dim=-1),
+            "recall_trace_schema": torch.tensor(1, device=z.device, dtype=torch.int64),
+            "recall_steps_attempted": steps_attempted,
+            "recall_steps_committed": steps_committed,
+            "recall_step_attempted": torch.stack(step_attempted, dim=1),
+            "recall_step_committed": torch.stack(step_committed, dim=1),
+            "recall_step_update_ratio": torch.stack(step_update_ratio, dim=1),
+            "recall_step_route_change": torch.stack(step_route_change, dim=1),
+            "recall_step_effective_read_change": torch.stack(step_read_change, dim=1),
+            "recall_stop_reason": stop_reason,
         }
-        return z, cumulative_write, diagnostics
+        for checkpoint_step, checkpoint in checkpoints.items():
+            diagnostics[f"recall_checkpoint_{checkpoint_step}"] = checkpoint
+        if record_routes:
+            trace = RecallTrace(
+                steps_attempted=steps_attempted,
+                steps_committed=steps_committed,
+                step_attempted=torch.stack(step_attempted, dim=1),
+                step_committed=torch.stack(step_committed, dim=1),
+                state_change_ratio=torch.stack(step_update_ratio, dim=1),
+                route_change=torch.stack(step_route_change, dim=1),
+                effective_read_change=torch.stack(step_read_change, dim=1),
+                stop_reason=stop_reason,
+                route=torch.stack(route_history, dim=1),
+                indices=torch.stack(index_history, dim=1),
+                checkpoints=checkpoints,
+            )
+            diagnostics.update(trace.diagnostics())
+        if record_full:
+            diagnostics.update(
+                {
+                    "recall_context_history": torch.stack(context_history, dim=1),
+                    "recall_weight_history": torch.stack(weight_history, dim=1),
+                    "recall_influence_history": torch.stack(influence_history, dim=1),
+                    "recall_recognition_history": torch.stack(recognition_history, dim=1),
+                }
+            )
+        returned = torch.where(mask.unsqueeze(-1), z, preserved_input)
+        return returned, cumulative_write, diagnostics
 
     def forward_write(
         self,
@@ -2695,107 +3718,25 @@ class ARTIRecallWriteState(nn.Module):
         mask: Tensor | None,
         recall: Tensor | None = None,
         route_assignment: Tensor | None = None,
+        memory: Tensor | None = None,
         *,
         static_steps: bool = False,
+        refine_policy: RefinePolicy | None = None,
+        route_plan: RecallRoutePlan | None = None,
     ) -> Tensor:
-        """Return the Recall-written host tensor without diagnostic reductions."""
+        """Return the Recall-written host tensor through the canonical engine."""
 
-        self._calibrate_state_bank_once(z, mask)
-        initial = z
-        if self.config.recall_tolerance is None:
-            for _step in range(self.config.recall_steps):
-                write = (
-                    None
-                    if route_assignment is not None
-                    else self._compiled_product_write(z, mask, recall)
-                )
-                if write is None:
-                    write = self.recall_activation(
-                        self.recall.read_context(
-                            z,
-                            mask,
-                            recall,
-                            route_assignment=route_assignment,
-                        )
-                    )
-                write = self.dropout(write)
-                if self._replaces_state:
-                    candidate = self._compose_state_transition(
-                        initial,
-                        self._recalled_state(z, write),
-                    )
-                    z = candidate if mask is None else torch.where(mask.unsqueeze(-1), candidate, z)
-                else:
-                    z = z + write
-            return z
-
-        active = (
-            torch.ones(z.shape[0], device=z.device, dtype=torch.bool)
-            if mask is None
-            else mask.any(dim=1)
+        del static_steps
+        result, _write, _diagnostics = self(
+            z,
+            mask,
+            recall,
+            route_assignment,
+            memory,
+            refine_policy=refine_policy,
+            route_plan=route_plan,
         )
-        tolerance = self.config.recall_tolerance
-        token_active = None if mask is None else mask.unsqueeze(-1)
-
-        for step in range(self.config.recall_steps):
-            # A static loop avoids device-to-host synchronization and remains
-            # compiler/capture friendly. Inactive samples contribute exact zeros.
-            write = (
-                None
-                if route_assignment is not None
-                else self._compiled_product_write(z, mask, recall)
-            )
-            if write is None:
-                write = self.recall_activation(
-                    self.recall.read_context(
-                        z,
-                        mask,
-                        recall,
-                        route_assignment=route_assignment,
-                    )
-                )
-            write = self.dropout(write)
-            previous = z
-            if step < self.config.recall_min_steps:
-                if self._replaces_state:
-                    candidate = self._compose_state_transition(
-                        initial,
-                        self._recalled_state(previous, write),
-                    )
-                    z = (
-                        candidate
-                        if token_active is None
-                        else torch.where(token_active, candidate, z)
-                    )
-                else:
-                    z = z + write
-            else:
-                active_tokens = active.view(-1, 1, 1)
-                if token_active is not None:
-                    active_tokens = active_tokens & token_active
-                candidate = (
-                    self._compose_state_transition(
-                        initial,
-                        self._recalled_state(previous, write),
-                    )
-                    if self._replaces_state
-                    else z + write
-                )
-                z = torch.where(active_tokens, candidate, z)
-            if step + 1 >= self.config.recall_min_steps and step + 1 < self.config.recall_steps:
-                valid = (
-                    torch.ones_like(z, dtype=torch.float32)
-                    if mask is None
-                    else mask.unsqueeze(-1).to(torch.float32)
-                )
-                update_ratio = ((z - previous).float() * valid).flatten(1).norm(dim=-1) / (
-                    previous.float() * valid
-                ).flatten(1).norm(dim=-1).clamp_min(torch.finfo(torch.float32).eps)
-                active = active & (update_ratio.detach() > tolerance)
-                if not static_steps and not bool(torch.any(active)):
-                    break
-
-        return z
+        return result
 
 
 class ARTIRecallWriteLayer(nn.Module):
@@ -2870,22 +3811,57 @@ class ARTIRecallWriteLayer(nn.Module):
         frame_operators: Tensor | None = None,
         observer_coord: Tensor | None = None,
         route_assignment: Tensor | None = None,
+        context: TensorContext | None = None,
     ) -> ARTIOutput:
         assert_floating_tensor("x", x)
         seq, was_vector = as_sequence(x)
         if seq.shape[-1] != self.config.input_dim:
             raise ValueError(f"x last dim must be {self.config.input_dim}, got {seq.shape[-1]}")
         batch, tokens, _ = seq.shape
-        token_mask = ensure_mask(mask, batch, tokens, seq.device)
-        if self.config.require_coord and coord is None:
-            raise ValueError("coord is required by this ARTI configuration")
-        token_coord = ensure_coord(
-            coord, batch, tokens, self.config.coord_dim, seq.device, seq.dtype
-        )
-        if self.config.require_visibility and visibility is None:
-            raise ValueError("visibility is required by this ARTI configuration")
-        if visibility is not None:
-            ensure_visibility(visibility, token_mask)
+        if context is None:
+            token_mask = ensure_mask(mask, batch, tokens, seq.device)
+            if self.config.require_coord and coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            token_coord = ensure_coord(
+                coord, batch, tokens, self.config.coord_dim, seq.device, seq.dtype
+            )
+            if self.config.require_visibility and visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            if visibility is not None:
+                ensure_visibility(visibility, token_mask)
+        else:
+            _require_context_only(
+                context,
+                coord=coord,
+                mask=mask,
+                visibility=visibility,
+                frame_operators=frame_operators,
+                observer_coord=observer_coord,
+            )
+            frame = context.frame if context.frame is not None else FrameContext()
+            if self.config.require_coord and frame.coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            if self.config.require_visibility and context.visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            token_mask, _ = context.validate(
+                batch=batch,
+                tokens=tokens,
+                hidden_dim=self.config.input_dim,
+                coord_dim=self.config.coord_dim,
+                configured_mode=self.config.coord_frame_mode,
+                device=seq.device,
+                dtype=seq.dtype,
+            )
+            token_coord = ensure_coord(
+                frame.coord,
+                batch,
+                tokens,
+                self.config.coord_dim,
+                seq.device,
+                seq.dtype,
+            )
+            frame_operators = frame.frame_operators
+            observer_coord = frame.observer_coord
         query_state = apply_coord_frame_inverse(
             seq,
             token_coord,
@@ -2938,6 +3914,7 @@ class ARTIRecallWriteLayer(nn.Module):
         frame_operators: Tensor | None = None,
         observer_coord: Tensor | None = None,
         route_assignment: Tensor | None = None,
+        context: TensorContext | None = None,
         *,
         static_steps: bool = False,
     ) -> Tensor:
@@ -2948,26 +3925,60 @@ class ARTIRecallWriteLayer(nn.Module):
         if seq.shape[-1] != self.config.input_dim:
             raise ValueError(f"x last dim must be {self.config.input_dim}, got {seq.shape[-1]}")
         batch, tokens, _ = seq.shape
-        token_mask = (
-            None
-            if mask is None and visibility is None
-            else ensure_mask(mask, batch, tokens, seq.device)
-        )
-        if self.config.require_coord and coord is None:
-            raise ValueError("coord is required by this ARTI configuration")
-        token_coord = ensure_coord(
-            coord,
-            batch,
-            tokens,
-            self.config.coord_dim,
-            seq.device,
-            seq.dtype,
-        )
-        if self.config.require_visibility and visibility is None:
-            raise ValueError("visibility is required by this ARTI configuration")
-        if visibility is not None:
-            assert token_mask is not None
-            ensure_visibility(visibility, token_mask)
+        if context is None:
+            token_mask = (
+                None
+                if mask is None and visibility is None
+                else ensure_mask(mask, batch, tokens, seq.device)
+            )
+            if self.config.require_coord and coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            token_coord = ensure_coord(
+                coord,
+                batch,
+                tokens,
+                self.config.coord_dim,
+                seq.device,
+                seq.dtype,
+            )
+            if self.config.require_visibility and visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            if visibility is not None:
+                assert token_mask is not None
+                ensure_visibility(visibility, token_mask)
+        else:
+            _require_context_only(
+                context,
+                coord=coord,
+                mask=mask,
+                visibility=visibility,
+                frame_operators=frame_operators,
+                observer_coord=observer_coord,
+            )
+            frame = context.frame if context.frame is not None else FrameContext()
+            if self.config.require_coord and frame.coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            if self.config.require_visibility and context.visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            token_mask, _ = context.validate(
+                batch=batch,
+                tokens=tokens,
+                hidden_dim=self.config.input_dim,
+                coord_dim=self.config.coord_dim,
+                configured_mode=self.config.coord_frame_mode,
+                device=seq.device,
+                dtype=seq.dtype,
+            )
+            token_coord = ensure_coord(
+                frame.coord,
+                batch,
+                tokens,
+                self.config.coord_dim,
+                seq.device,
+                seq.dtype,
+            )
+            frame_operators = frame.frame_operators
+            observer_coord = frame.observer_coord
         query_state = apply_coord_frame_inverse(
             seq,
             token_coord,
@@ -2998,6 +4009,8 @@ class ARTIRecallWriteLayer(nn.Module):
 
 class ARTILatentTensorLayer(nn.Module):
     """Project anonymous hidden tensors into a dynamic latent space."""
+
+    output_semantics = "layer_output"
 
     def __init__(self, config: ARTIConfig) -> None:
         super().__init__()
@@ -3031,19 +4044,59 @@ class ARTILatentTensorLayer(nn.Module):
         frame_operators: Tensor | None = None,
         observer_coord: Tensor | None = None,
         recall_steps: int | None = None,
+        refine_policy: RefinePolicy | None = None,
+        route_plan: RecallRoutePlan | None = None,
         _selected_recall_groups: Tensor | None = None,
         _selected_groups_normalized: bool = False,
+        context: TensorContext | None = None,
     ) -> ARTIOutput:
         assert_floating_tensor("x", x)
         seq, was_vector = as_sequence(x)
         batch, tokens, _ = seq.shape
-        token_mask = ensure_mask(mask, batch, tokens, seq.device)
-        if self.config.require_coord and coord is None:
-            raise ValueError("coord is required by this ARTI configuration")
-        token_coord = self._resolve_coord(coord, batch, tokens, seq.device, seq.dtype)
-        if self.config.require_visibility and visibility is None:
-            raise ValueError("visibility is required by this ARTI configuration")
-        visibility = self._resolve_visibility(visibility, token_mask)
+        if context is None:
+            token_mask = ensure_mask(mask, batch, tokens, seq.device)
+            if self.config.require_coord and coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            token_coord = self._resolve_coord(coord, batch, tokens, seq.device, seq.dtype)
+            if self.config.require_visibility and visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            visibility = self._resolve_visibility(visibility, token_mask)
+        else:
+            _require_context_only(
+                context,
+                coord=coord,
+                mask=mask,
+                visibility=visibility,
+                frame_operators=frame_operators,
+                observer_coord=observer_coord,
+            )
+            frame = context.frame if context.frame is not None else FrameContext()
+            if self.config.require_coord and frame.coord is None:
+                raise ValueError("coord is required by this ARTI configuration")
+            if self.config.require_visibility and context.visibility is None:
+                raise ValueError("visibility is required by this ARTI configuration")
+            token_coord = self._resolve_coord(
+                frame.coord,
+                batch,
+                tokens,
+                seq.device,
+                seq.dtype,
+            )
+            strict_frame = replace(frame, coord=token_coord)
+            strict_context = replace(context, frame=strict_frame)
+            token_mask, visibility = strict_context.validate(
+                batch=batch,
+                tokens=tokens,
+                hidden_dim=self.config.hidden_dim,
+                coord_dim=self.config.coord_dim,
+                configured_mode=self.config.coord_frame_mode,
+                device=seq.device,
+                dtype=seq.dtype,
+            )
+            if context.visibility is None:
+                visibility = self._resolve_visibility(None, token_mask)
+            frame_operators = strict_frame.frame_operators
+            observer_coord = strict_frame.observer_coord
 
         seq_canonical = apply_coord_frame_inverse(
             seq,
@@ -3075,11 +4128,13 @@ class ARTILatentTensorLayer(nn.Module):
             z,
             token_coord,
             token_mask,
-            visibility,
-            private_recall,
-            recall_steps,
-            _selected_recall_groups,
-            _selected_groups_normalized,
+            visibility=visibility,
+            recall=private_recall,
+            recall_steps=recall_steps,
+            refine_policy=refine_policy,
+            route_plan=route_plan,
+            _selected_recall_groups=_selected_recall_groups,
+            _selected_groups_normalized=_selected_groups_normalized,
         )
         y_seq = self.out_proj(z) * token_mask.unsqueeze(-1).to(z.dtype)
         recall_trace = None

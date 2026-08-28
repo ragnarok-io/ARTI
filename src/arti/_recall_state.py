@@ -1,4 +1,4 @@
-"""Experimental value-state transition used to study forward-only Recall TTT."""
+"""Value-state transitions used by the forward-only Recall Bank updater."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import copy
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +15,351 @@ from torch import Tensor, nn
 from torch.func import functional_call, stack_module_state, vmap
 
 from .layers import ARTILayer
+from .recall_refine import RecallRoutePlan, RecallRouteStack
+
+
+RECALL_STATE_SCHEMA_VERSION = 2
+RECALL_STATE_COMPONENT_REF = "arti/recall-state@1"
+_SUPPORTED_RECALL_STATE_SCHEMA_VERSIONS = frozenset({1, RECALL_STATE_SCHEMA_VERSION})
+
+
+def _encode_contract_fingerprint(value: str) -> Tensor:
+    if not isinstance(value, str) or len(value) != 64:
+        raise ValueError("Recall state contract fingerprint must be a SHA-256 value")
+    try:
+        raw = bytes.fromhex(value)
+    except ValueError as error:
+        raise ValueError("Recall state contract fingerprint must be a SHA-256 value") from error
+    return torch.tensor(list(raw), dtype=torch.uint8)
+
+
+def _decode_contract_fingerprint(value: Tensor) -> str:
+    if not isinstance(value, Tensor) or value.dtype != torch.uint8 or value.ndim != 1 or value.numel() != 32:
+        raise ValueError("Recall state contract fingerprint must be a 32-byte uint8 Tensor")
+    return bytes(value.detach().cpu().tolist()).hex()
+
+
+@dataclass(frozen=True)
+class RecallState:
+    """Explicit values-only state owned by the forward caller."""
+
+    value: Tensor
+    step: int = 0
+    contract_fingerprint: str | None = None
+    schema_version: int = RECALL_STATE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, Tensor) or not self.value.is_floating_point():
+            raise TypeError("RecallState.value must be a floating-point Tensor")
+        if self.value.ndim not in {2, 3}:
+            raise ValueError("RecallState.value must have shape [S, H] or [B, S, H]")
+        if self.value.shape[-2] <= 0 or self.value.shape[-1] <= 0:
+            raise ValueError("RecallState.value must have positive slot and feature dimensions")
+        if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step < 0:
+            raise ValueError("RecallState.step must be a non-negative integer")
+        if self.contract_fingerprint is not None:
+            _encode_contract_fingerprint(self.contract_fingerprint)
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version not in _SUPPORTED_RECALL_STATE_SCHEMA_VERSIONS
+        ):
+            raise ValueError(
+                "unsupported RecallState schema version "
+                f"{self.schema_version!r}; expected one of "
+                f"{sorted(_SUPPORTED_RECALL_STATE_SCHEMA_VERSIONS)}"
+            )
+        if self.schema_version == 1 and self.contract_fingerprint is not None:
+            raise ValueError("schema v1 RecallState cannot carry a contract fingerprint")
+
+    @classmethod
+    def zeros(
+        cls,
+        batch_size: int,
+        slots: int,
+        hidden_dim: int,
+        *,
+        reference: Tensor | None = None,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+        contract_fingerprint: str | None = None,
+    ) -> "RecallState":
+        """Create a batched zero state with explicit device and dtype."""
+
+        if batch_size <= 0 or slots <= 0 or hidden_dim <= 0:
+            raise ValueError("batch_size, slots, and hidden_dim must be positive")
+        if reference is not None:
+            if not isinstance(reference, Tensor) or not reference.is_floating_point():
+                raise TypeError("reference must be a floating-point Tensor")
+            if device is None:
+                device = reference.device
+            if dtype is None:
+                dtype = reference.dtype
+        return cls(
+            torch.zeros(
+                batch_size,
+                slots,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            ),
+            contract_fingerprint=contract_fingerprint,
+        )
+
+    @property
+    def shape(self) -> torch.Size:
+        return self.value.shape
+
+    @property
+    def slots(self) -> int:
+        return int(self.value.shape[-2])
+
+    @property
+    def hidden_dim(self) -> int:
+        return int(self.value.shape[-1])
+
+    def clone(self) -> "RecallState":
+        return RecallState(self.value.clone(), self.step, self.contract_fingerprint, self.schema_version)
+
+    def fork(self) -> "RecallState":
+        """Create an independent branch of the current forward state."""
+
+        return self.clone()
+
+    def detach(self) -> "RecallState":
+        return RecallState(self.value.detach(), self.step, self.contract_fingerprint, self.schema_version)
+
+    def reset(self) -> "RecallState":
+        """Return a fresh zero state with the same layout and contract."""
+
+        return RecallState(
+            torch.zeros_like(self.value),
+            0,
+            self.contract_fingerprint,
+            self.schema_version,
+        )
+
+    def snapshot(self) -> "RecallState":
+        """Create a detached, independent checkpoint of the current state."""
+
+        return RecallState(
+            self.value.detach().clone(),
+            self.step,
+            self.contract_fingerprint,
+            self.schema_version,
+        )
+
+    def to(self, *args: Any, **kwargs: Any) -> "RecallState":
+        return RecallState(
+            self.value.to(*args, **kwargs),
+            self.step,
+            self.contract_fingerprint,
+            self.schema_version,
+        )
+
+    def advance(self, value: Tensor, *, detach: bool = False) -> "RecallState":
+        """Return a new state without mutating the previous state."""
+
+        if not isinstance(value, Tensor) or not value.is_floating_point():
+            raise TypeError("next Recall state must be a floating-point Tensor")
+        if value.shape != self.value.shape:
+            raise ValueError(
+                "next Recall state must preserve the current shape; "
+                f"expected {tuple(self.value.shape)}, got {tuple(value.shape)}"
+            )
+        if value.device != self.value.device or value.dtype != self.value.dtype:
+            raise ValueError("next Recall state must preserve device and dtype")
+        return RecallState(
+            value.detach() if detach else value,
+            self.step + 1,
+            self.contract_fingerprint,
+            self.schema_version,
+        )
+
+    @classmethod
+    def stack(cls, states: Sequence["RecallState"]) -> "RecallState":
+        """Batch independent unbatched states with identical contracts."""
+
+        values = tuple(states)
+        if not values or any(not isinstance(state, RecallState) for state in values):
+            raise ValueError("states must contain at least one RecallState")
+        if any(state.value.ndim != 2 for state in values):
+            raise ValueError("RecallState.stack requires unbatched [S,H] states")
+        first = values[0]
+        for state in values[1:]:
+            if (
+                state.value.shape != first.value.shape
+                or state.value.device != first.value.device
+                or state.value.dtype != first.value.dtype
+                or state.step != first.step
+                or state.contract_fingerprint != first.contract_fingerprint
+                or state.schema_version != first.schema_version
+            ):
+                raise ValueError("stacked Recall states must share layout, step, and contract")
+        return cls(
+            torch.stack([state.value for state in values], dim=0),
+            first.step,
+            first.contract_fingerprint,
+            first.schema_version,
+        )
+
+    def unstack(self) -> tuple["RecallState", ...]:
+        """Split a batched state into independent unbatched states."""
+
+        if self.value.ndim != 3:
+            raise ValueError("RecallState.unstack requires a batched [B,S,H] state")
+        return tuple(
+            RecallState(value, self.step, self.contract_fingerprint, self.schema_version)
+            for value in self.value.unbind(dim=0)
+        )
+
+    def save(self, path: str | Path) -> Path:
+        """Persist this explicit state as a SafeTensors artifact."""
+
+        from safetensors.torch import save_file
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {name: value.contiguous().cpu() for name, value in self.state_dict().items()}
+        save_file(payload, str(target), metadata={"kind": "arti-recall-state"})
+        return target
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        map_location: torch.device | str | None = None,
+    ) -> "RecallState":
+        """Load a SafeTensors state and validate its schema."""
+
+        from safetensors.torch import load_file
+
+        payload = load_file(str(Path(path)), device="cpu")
+        return cls.from_state_dict(payload, map_location=map_location)
+
+    def state_dict(self) -> dict[str, Tensor]:
+        """Return a detached payload suitable for torch or safetensors."""
+
+        payload = {
+            "value": self.value.detach(),
+            "step": torch.tensor(self.step, dtype=torch.int64),
+            "schema_version": torch.tensor(self.schema_version, dtype=torch.int64),
+        }
+        if self.contract_fingerprint is not None:
+            payload["contract_fingerprint"] = _encode_contract_fingerprint(
+                self.contract_fingerprint
+            )
+        return payload
+
+    @classmethod
+    def from_state_dict(
+        cls,
+        payload: Mapping[str, Tensor],
+        *,
+        map_location: torch.device | str | None = None,
+    ) -> "RecallState":
+        allowed = {"value", "step", "schema_version", "contract_fingerprint"}
+        if not isinstance(payload, Mapping) or "value" not in payload or "step" not in payload:
+            raise ValueError("Recall state payload must contain 'value' and 'step'")
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(f"Recall state payload has unknown fields: {sorted(unknown)}")
+        value = payload["value"]
+        step_tensor = payload["step"]
+        if not isinstance(value, Tensor):
+            raise TypeError("Recall state value must be a Tensor")
+        if (
+            not isinstance(step_tensor, Tensor)
+            or step_tensor.numel() != 1
+            or step_tensor.ndim != 0
+            or step_tensor.dtype
+            not in {
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            }
+        ):
+            raise ValueError("Recall state step must be a scalar Tensor")
+        if map_location is not None:
+            value = value.to(map_location)
+        schema_tensor = payload.get("schema_version")
+        if schema_tensor is None:
+            schema_version = 1
+        elif (
+            not isinstance(schema_tensor, Tensor)
+            or schema_tensor.numel() != 1
+            or schema_tensor.ndim != 0
+            or schema_tensor.dtype
+            not in {
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            }
+        ):
+            raise ValueError("Recall state schema_version must be a scalar integer Tensor")
+        else:
+            schema_version = int(schema_tensor.detach().cpu().item())
+        contract_tensor = payload.get("contract_fingerprint")
+        contract_fingerprint = (
+            None if contract_tensor is None else _decode_contract_fingerprint(contract_tensor)
+        )
+        return cls(
+            value,
+            int(step_tensor.detach().cpu().item()),
+            contract_fingerprint,
+            schema_version,
+        )
+
+
+def migrate_recall_state(
+    payload: RecallState | Mapping[str, Tensor],
+    *,
+    contract_fingerprint: str,
+    slots: int | None = None,
+    hidden_dim: int | None = None,
+    map_location: torch.device | str | None = None,
+) -> RecallState:
+    """Explicitly bind a legacy or unbound state to one runtime contract.
+
+    Migration never guesses the reader or updater. The caller supplies the
+    target runtime fingerprint and may additionally pin the expected layout.
+    """
+
+    encoded = _encode_contract_fingerprint(contract_fingerprint)
+    normalized_fingerprint = bytes(encoded.tolist()).hex()
+    state = (
+        payload
+        if isinstance(payload, RecallState)
+        else RecallState.from_state_dict(payload, map_location=map_location)
+    )
+    if map_location is not None and isinstance(payload, RecallState):
+        state = state.to(map_location)
+    if slots is not None and state.slots != slots:
+        raise ValueError(
+            "Recall state slots do not match migration target: "
+            f"expected {slots}, got {state.slots}"
+        )
+    if hidden_dim is not None and state.hidden_dim != hidden_dim:
+        raise ValueError(
+            "Recall state hidden_dim does not match migration target: "
+            f"expected {hidden_dim}, got {state.hidden_dim}"
+        )
+    if (
+        state.contract_fingerprint is not None
+        and state.contract_fingerprint != normalized_fingerprint
+    ):
+        raise ValueError("Recall state contract fingerprint does not match migration target")
+    return RecallState(
+        state.value,
+        state.step,
+        normalized_fingerprint,
+        RECALL_STATE_SCHEMA_VERSION,
+    )
 
 
 @dataclass(frozen=True)
@@ -645,7 +991,7 @@ def compose_matrix_affine_recall_transitions(
 
     ``reduce_matrix_affine_recall_transitions`` reduces the token axis and
     keeps each batch item independent.  This helper is the second reduction
-    needed by a stateful TTT writer: each batch item represents one prompt
+    needed by a batched Bank writer: each batch item represents one prompt
     (or one support trace), while the result is one shared state after those
     prompts have been applied in order.
 
@@ -970,17 +1316,34 @@ class _RecallWorkspaceBlock(nn.Module):
         *,
         recall_steps: int | None = None,
         selected_recall_groups: Tensor | None = None,
-        return_route: bool = False,
-    ) -> Tensor | tuple[Tensor, Tensor]:
+        return_candidate_groups: bool = False,
+        route_plan: RecallRoutePlan | None = None,
+        return_route_plan: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, RecallRoutePlan]:
+        if selected_recall_groups is not None and route_plan is not None:
+            raise ValueError("pass candidate groups or a route plan, not both")
+        if return_candidate_groups and return_route_plan:
+            raise ValueError("request candidate groups or a route plan, not both")
         output = self.layer(
             x,
             mask=mask,
             recall_steps=recall_steps,
+            route_plan=route_plan,
             _selected_recall_groups=selected_recall_groups,
             _selected_groups_normalized=selected_recall_groups is not None,
         )
         updated = self.norm(x + output.y)
-        if not return_route:
+        if return_route_plan:
+            recall = self.layer.state.recall
+            if recall is None:
+                raise RuntimeError("route-plan capture requires an enabled Recall field")
+            plan = recall.route_plan_from_tensors(
+                output.diagnostics["recall_bank_weights"],
+                output.diagnostics["recall_bank_indices"],
+                output.diagnostics["recall_route"],
+            )
+            return updated, plan
+        if not return_candidate_groups:
             return updated
         indices = output.diagnostics["recall_bank_indices"]
         groups = indices if indices.ndim == x.ndim else indices[..., 0]
@@ -990,7 +1353,7 @@ class _RecallWorkspaceBlock(nn.Module):
 class RecallValueUpdater(nn.Module):
     """Map a processed tensor trace and the previous Bank values to new values.
 
-    This is deliberately an internal research primitive. It does not prescribe
+    This is the public alpha forward-update primitive. It does not prescribe
     addresses, erase gates, write gates, update budgets, or an online optimizer.
     The caller owns the returned state and decides when to detach or persist it.
 
@@ -1104,9 +1467,11 @@ class RecallValueUpdater(nn.Module):
         *,
         mask: Tensor | None = None,
         recall_steps: int | None = None,
-        route_plan: Tensor | None = None,
+        candidate_groups: Tensor | None = None,
+        route_stack: RecallRouteStack | None = None,
         return_info: bool = False,
-    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
+        return_route_stack: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor | RecallRouteStack]]:
         """Return the complete next Bank value tensor.
 
         ``trace`` has shape ``[T, H]`` or ``[B, T, H]`` and ``previous_value``
@@ -1115,14 +1480,18 @@ class RecallValueUpdater(nn.Module):
         sample with no valid trace positions leaves its value state unchanged.
         """
 
-        slot_workspace, value_b, has_trace, squeeze, selected_route_plan = (
+        if candidate_groups is not None and route_stack is not None:
+            raise ValueError("pass candidate_groups or route_stack, not both")
+        slot_workspace, value_b, has_trace, squeeze, selected_groups, selected_stack = (
             self._workspace_state(
             trace,
             previous_value,
             mask=mask,
             recall_steps=recall_steps,
-            route_plan=route_plan,
-            return_route_plan=return_info,
+            candidate_groups=candidate_groups,
+            return_candidate_groups=return_info,
+            route_stack=route_stack,
+            return_route_stack=return_route_stack,
             )
         )
         update = torch.einsum(
@@ -1139,16 +1508,19 @@ class RecallValueUpdater(nn.Module):
             next_value = next_value.squeeze(0)
             update = update.squeeze(0)
             slot_workspace = slot_workspace.squeeze(0)
-            if selected_route_plan.numel():
-                selected_route_plan = selected_route_plan.squeeze(0)
-        if not return_info:
+            if selected_groups.numel():
+                selected_groups = selected_groups.squeeze(0)
+        if not return_info and not return_route_stack:
             return next_value
-        return next_value, {
+        info: dict[str, Tensor | RecallRouteStack] = {
             "update": update,
             "update_norm": torch.linalg.vector_norm(update.float(), dim=(-2, -1)),
             "slot_workspace": slot_workspace,
-            "route_plan": selected_route_plan,
+            "candidate_groups": selected_groups,
         }
+        if selected_stack is not None:
+            info["route_stack"] = selected_stack
+        return next_value, info
 
     def _workspace_state(
         self,
@@ -1157,9 +1529,11 @@ class RecallValueUpdater(nn.Module):
         *,
         mask: Tensor | None,
         recall_steps: int | None,
-        route_plan: Tensor | None = None,
-        return_route_plan: bool = False,
-    ) -> tuple[Tensor, Tensor, Tensor, bool, Tensor]:
+        candidate_groups: Tensor | None = None,
+        return_candidate_groups: bool = False,
+        route_stack: RecallRouteStack | None = None,
+        return_route_stack: bool = False,
+    ) -> tuple[Tensor, Tensor, Tensor, bool, Tensor, RecallRouteStack | None]:
         """Return the state workspace before the independent output map."""
 
         trace_b, value_b, mask_b, squeeze = self._normalize_inputs(
@@ -1184,30 +1558,51 @@ class RecallValueUpdater(nn.Module):
             device=trace_b.device,
         )
         workspace_mask = torch.cat((state_mask, mask_b), dim=1)
-        route_plan_b = route_plan
-        if squeeze and route_plan is not None and route_plan.ndim == 3:
-            route_plan_b = route_plan.unsqueeze(0)
-        if route_plan_b is not None:
+        candidate_groups_b = candidate_groups
+        if squeeze and candidate_groups is not None and candidate_groups.ndim == 3:
+            candidate_groups_b = candidate_groups.unsqueeze(0)
+        if candidate_groups_b is not None:
             expected = (
                 trace_b.shape[0],
                 self.depth,
                 workspace.shape[1],
                 self.recall_group_topk,
             )
-            if tuple(route_plan_b.shape) != expected:
-                raise ValueError(f"route_plan must have shape {expected}")
-            if route_plan_b.dtype != torch.long or route_plan_b.device != trace_b.device:
-                raise ValueError("route_plan must be a long Tensor on the trace device")
+            if tuple(candidate_groups_b.shape) != expected:
+                raise ValueError(f"candidate_groups must have shape {expected}")
+            if (
+                candidate_groups_b.dtype != torch.long
+                or candidate_groups_b.device != trace_b.device
+            ):
+                raise ValueError("candidate_groups must be a long Tensor on the trace device")
+        if route_stack is not None:
+            if route_stack.axis != "block" or len(route_stack.items) != self.depth:
+                raise ValueError("route_stack must describe every Updater workspace block")
+            if any(not isinstance(item, RecallRoutePlan) for item in route_stack.items):
+                raise TypeError("Updater block route_stack must contain RecallRoutePlan items")
         selected_routes = []
+        selected_plans: list[RecallRoutePlan] = []
         for block_index, block in enumerate(self.workspace):
-            selected = None if route_plan_b is None else route_plan_b[:, block_index]
-            if return_route_plan:
+            selected = (
+                None if candidate_groups_b is None else candidate_groups_b[:, block_index]
+            )
+            planned = None if route_stack is None else route_stack.items[block_index]
+            if return_route_stack:
+                workspace, selected_plan = block(
+                    workspace,
+                    mask=workspace_mask,
+                    recall_steps=recall_steps,
+                    route_plan=planned,
+                    return_route_plan=True,
+                )
+                selected_plans.append(selected_plan)
+            elif return_candidate_groups:
                 workspace, selected = block(
                     workspace,
                     mask=workspace_mask,
                     recall_steps=recall_steps,
                     selected_recall_groups=selected,
-                    return_route=True,
+                    return_candidate_groups=True,
                 )
                 selected_routes.append(selected)
             else:
@@ -1216,16 +1611,22 @@ class RecallValueUpdater(nn.Module):
                     mask=workspace_mask,
                     recall_steps=recall_steps,
                     selected_recall_groups=selected,
+                    route_plan=planned,
                 )
 
         slot_workspace = workspace[:, : self.slots]
         has_trace = mask_b.any(dim=-1).reshape(-1, 1, 1)
-        selected_route_plan = (
+        selected_groups = (
             torch.stack(selected_routes, dim=1)
             if selected_routes
             else torch.empty(0, dtype=torch.long, device=trace_b.device)
         )
-        return slot_workspace, value_b, has_trace, squeeze, selected_route_plan
+        selected_stack = (
+            RecallRouteStack(axis="block", items=tuple(selected_plans))
+            if selected_plans
+            else None
+        )
+        return slot_workspace, value_b, has_trace, squeeze, selected_groups, selected_stack
 
     def freeze(self) -> "RecallValueUpdater":
         """Freeze the offline-trained transition for forward-only use."""
@@ -1382,6 +1783,32 @@ def adapt_recall_capacity_state(
     }
 
 
+def _recall_updater_behavior_signature(updater: RecallValueUpdater) -> tuple[object, ...]:
+    """Return every static choice that affects a packed Updater call."""
+
+    return (
+        updater.hidden_dim,
+        updater.slots,
+        updater.workspace_dim,
+        updater.depth,
+        updater.recall_slots,
+        updater.recall_group_topk,
+        updater.recall_route_exploration,
+        updater.recall_steps,
+        updater.recall_min_steps,
+        updater.recall_tolerance,
+        tuple(
+            (
+                block.layer.config.dropout,
+                block.layer.config.interface_slots,
+                block.layer.config.recall_activation,
+            )
+            for block in updater.workspace
+        ),
+        tuple((name, tuple(tensor.shape)) for name, tensor in updater.state_dict().items()),
+    )
+
+
 class StackedRecallValueUpdater(nn.Module):
     """Execute independent, structurally identical updaters over a site axis."""
 
@@ -1390,13 +1817,12 @@ class StackedRecallValueUpdater(nn.Module):
         if not modules:
             raise ValueError("at least one updater is required")
         reference = modules[0]
+        reference_signature = _recall_updater_behavior_signature(reference)
         if any(
-            module.hidden_dim != reference.hidden_dim
-            or module.slots != reference.slots
-            or module.workspace_dim != reference.workspace_dim
+            _recall_updater_behavior_signature(module) != reference_signature
             for module in modules[1:]
         ):
-            raise ValueError("stacked updaters must share structural dimensions")
+            raise ValueError("stacked updaters must share one behavior signature")
 
         parameters, buffers = stack_module_state(list(modules))
         template = copy.deepcopy(reference).to("meta")
@@ -1472,6 +1898,51 @@ class StackedRecallValueUpdater(nn.Module):
         )
         return result
 
+    def call_site(
+        self,
+        site: int,
+        trace: Tensor,
+        previous_value: Tensor,
+        *,
+        mask: Tensor,
+        recall_steps: int | None = None,
+        route_stack: RecallRouteStack | None = None,
+        return_route_stack: bool = False,
+    ) -> Tensor | tuple[Tensor, RecallRouteStack]:
+        """Run one packed site when Python route objects are required."""
+
+        if not 0 <= site < self.site_count:
+            raise IndexError("stacked updater site is out of range")
+        parameters = {
+            name: tensor[site] for name, tensor in self._parameters_by_name().items()
+        }
+        buffers = {
+            name: tensor[site] for name, tensor in self._buffers_by_name().items()
+        }
+        template = object.__getattribute__(self, "_functional_template")
+        result = functional_call(
+            template,
+            (parameters, buffers),
+            (trace, previous_value),
+            {
+                "mask": mask,
+                "recall_steps": recall_steps,
+                "route_stack": route_stack,
+                "return_route_stack": return_route_stack,
+            },
+        )
+        if not return_route_stack:
+            if not isinstance(result, Tensor):
+                raise RuntimeError("packed site update returned unexpected route metadata")
+            return result
+        if not isinstance(result, tuple):
+            raise RuntimeError("packed site update did not return route metadata")
+        value, info = result
+        route = info.get("route_stack")
+        if not isinstance(route, RecallRouteStack):
+            raise RuntimeError("packed site update did not return a RecallRouteStack")
+        return value, route
+
     def train(self, mode: bool = True) -> "StackedRecallValueUpdater":
         super().train(mode)
         template = object.__getattribute__(self, "_functional_template")
@@ -1485,8 +1956,8 @@ class StackedRecallValueUpdater(nn.Module):
         *,
         mask: Tensor,
         recall_steps: int | None = None,
-        route_plan: Tensor | None = None,
-        return_route_plan: bool = False,
+        candidate_groups: Tensor | None = None,
+        return_candidate_groups: bool = False,
     ) -> Tensor | tuple[Tensor, Tensor]:
         if trace.ndim != 4 or previous_value.ndim != 4 or mask.ndim != 3:
             raise ValueError(
@@ -1497,12 +1968,17 @@ class StackedRecallValueUpdater(nn.Module):
             raise ValueError("stacked updater batch, site, or token axes do not match")
         if trace.shape[1] != self.site_count:
             raise ValueError("stacked updater site axis does not match its parameters")
-        if route_plan is not None:
+        if candidate_groups is not None:
             expected_prefix = (trace.shape[0], trace.shape[1])
-            if route_plan.shape[:2] != expected_prefix:
-                raise ValueError("stacked route_plan batch and site axes do not match")
-            if route_plan.dtype != torch.long or route_plan.device != trace.device:
-                raise ValueError("stacked route_plan must be a long Tensor on the trace device")
+            if candidate_groups.shape[:2] != expected_prefix:
+                raise ValueError("stacked candidate_groups batch and site axes do not match")
+            if (
+                candidate_groups.dtype != torch.long
+                or candidate_groups.device != trace.device
+            ):
+                raise ValueError(
+                    "stacked candidate_groups must be a long Tensor on the trace device"
+                )
 
         template = object.__getattribute__(self, "_functional_template")
 
@@ -1526,7 +2002,7 @@ class StackedRecallValueUpdater(nn.Module):
         previous_by_site = previous_value.transpose(0, 1)
         mask_by_site = mask.transpose(0, 1)
 
-        if return_route_plan:
+        if return_candidate_groups:
             def apply_with_route(
                 parameters_one: dict[str, Tensor],
                 buffers_one: dict[str, Tensor],
@@ -1542,13 +2018,13 @@ class StackedRecallValueUpdater(nn.Module):
                     {
                         "mask": mask_one,
                         "recall_steps": recall_steps,
-                        "route_plan": route_one,
+                        "candidate_groups": route_one,
                         "return_info": True,
                     },
                 )
-                return result, info["route_plan"]
+                return result, info["candidate_groups"]
 
-            if route_plan is None:
+            if candidate_groups is None:
                 def apply_without_input_route(
                     parameters_one: dict[str, Tensor],
                     buffers_one: dict[str, Tensor],
@@ -1576,11 +2052,11 @@ class StackedRecallValueUpdater(nn.Module):
                     trace_by_site,
                     previous_by_site,
                     mask_by_site,
-                    route_plan.transpose(0, 1),
+                    candidate_groups.transpose(0, 1),
                 )
             return output.transpose(0, 1), selected.transpose(0, 1)
 
-        if route_plan is None:
+        if candidate_groups is None:
             output = vmap(apply_one, randomness="different")(
                 parameters,
                 buffers,
@@ -1604,7 +2080,7 @@ class StackedRecallValueUpdater(nn.Module):
                     {
                         "mask": mask_one,
                         "recall_steps": recall_steps,
-                        "route_plan": route_one,
+                        "candidate_groups": route_one,
                     },
                 )
 
@@ -1614,9 +2090,16 @@ class StackedRecallValueUpdater(nn.Module):
                 trace_by_site,
                 previous_by_site,
                 mask_by_site,
-                route_plan.transpose(0, 1),
+                candidate_groups.transpose(0, 1),
             )
         return output.transpose(0, 1)
 
 
-__all__ = ["RecallValueUpdater", "StackedRecallValueUpdater"]
+__all__ = [
+    "RECALL_STATE_COMPONENT_REF",
+    "RECALL_STATE_SCHEMA_VERSION",
+    "RecallState",
+    "RecallValueUpdater",
+    "StackedRecallValueUpdater",
+    "migrate_recall_state",
+]

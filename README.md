@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.8a1 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a1 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -26,10 +26,10 @@ Add ARTI to a project with [uv](https://docs.astral.sh/uv/):
 uv add arti-fit
 ```
 
-To evaluate the 3.0.8 alpha line explicitly:
+To evaluate the current alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.8a1"
+uv add --prerelease allow "arti-fit==3.0.9a1"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -52,6 +52,36 @@ The alpha browser runtime is published separately:
 ```bash
 pnpm add @arti-fit/web@alpha
 ```
+
+## What Is New In 3.0.9 Alpha
+
+New `arti.nn.Recall` instances use versioned `Recall@4` K-wide execution by
+default. One query preserves up to eight candidate routes, refines them as
+independent trajectories, and forwards exactly one winning trajectory. The
+forward choice is hard; a soft routing surrogate preserves useful gradients.
+Candidate states are not averaged unless
+`breadth_aggregation="route_weighted"` is explicitly requested.
+
+```python
+recall = arti.nn.Recall(dim=768, slots=64)  # K=8 when capacity permits
+y = recall(x)
+
+wide = arti.nn.Recall(dim=768, slots=64, group_topk=16, breadth=16)
+y, branches = wide(x, return_branches=True)
+y = wide(x, active_k=4)  # reduce this run's active candidate count
+```
+
+Eight is the portable default; 8-32 is the recommended starting range when
+Bank capacity and runtime budget permit. `breadth=1` keeps one trajectory, and
+`breadth_mode="mixed"` explicitly requests the historical mix-before-refine
+path. Resolving `Recall@2` or `Recall@3` also preserves those historical mixed
+semantics. The K-wide bridge is eager-only in this alpha. See
+[Batched Refine](docs/batched-refine.md).
+
+The alpha runtime also exposes bounded branch batches, Formula application,
+GPU-resident hot-page binding, explicit tensor transactions, and runtime
+checkpoint helpers. These remain optional infrastructure contracts; this
+release makes no hardware-speed or task-quality claim.
 
 ## What Is New In 3.0.8 Alpha
 

@@ -5,20 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 import math
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .functional import (
-    _half_contextual_survival,
-    _half_survival,
-    _validate_half_survival,
-    half,
-)
-from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
+from .emission import EmissionRouter, EmissionRouterConfig, EmissionRouterOutput
+from .functional import _half_contextual_survival, _half_survival, _validate_half_survival, half
 from .survival import (
     describe_survival,
     resolve_survival,
@@ -30,6 +25,15 @@ from .visual_field import VisualField, VisualFieldOutput, concat_visual_fields
 if TYPE_CHECKING:
     from .recall_manifest import RecallFormulaManifest
     from .usage import Layer
+
+
+@lru_cache(maxsize=1)
+def _triton_palette_is_available() -> bool:
+    try:
+        from ._triton import is_available
+    except (ImportError, OSError):
+        return False
+    return is_available()
 
 
 def _half_inverse_base(base: float) -> float:
@@ -46,15 +50,6 @@ def _half_inverse_softplus(value: float) -> float:
 
 def _half_repr_value(value: float | Tensor) -> float:
     return float(value.detach().cpu()) if isinstance(value, Tensor) else float(value)
-
-
-@lru_cache(maxsize=1)
-def _triton_palette_is_available() -> bool:
-    try:
-        from ._triton import is_available
-    except (ImportError, OSError):
-        return False
-    return is_available()
 
 
 @lru_cache(maxsize=None)
@@ -335,12 +330,20 @@ class Half(nn.Module):
             scale=self.scale,
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+        uniform: Tensor | None = None,
+    ) -> Tensor:
         if self._survival_ref is not None or self._survival_operator is not None or self._survival_callable is not None:
             return half(
                 x,
                 stochastic=self.stochastic,
                 straight_through=self._custom_survival_has_trainable_parameters(),
+                generator=generator,
+                uniform=uniform,
                 survival_fn=self._custom_survival,
             )
         return half(
@@ -350,6 +353,8 @@ class Half(nn.Module):
             scale=self.scale,
             stochastic=self.stochastic,
             straight_through=self.learnable,
+            generator=generator,
+            uniform=uniform,
             context_mode=self.context_mode,
             context_axes=self.context_axes,
             context_gain=self.context_gain,
@@ -2081,8 +2086,11 @@ class Recall(nn.Module):
     masking, recognition, activation, and iterative application.
     """
 
+    # This is deliberately a public contract marker. It lets wrappers reject
+    # an accidental residual composition without inspecting implementation
+    # details or guessing from a tensor's shape.
     output_semantics = "next_state"
-    _component_reference = "arti/recall@2"
+    recommended_breadth = 8
 
     def __init__(
         self,
@@ -2090,16 +2098,17 @@ class Recall(nn.Module):
         slots: int,
         *,
         formula: str | nn.Module = "arti/delta@1",
-        steps: int = 1,
-        min_steps: int = 1,
-        tolerance: float | None = None,
         activation: str = "half",
         recognition: str = "none",
-        routing: str = "dense",
+        routing: str = "grouped",
         key_dim: int = 32,
-        group_size: int = 16,
-        group_topk: int = 2,
+        group_size: int | None = None,
+        group_topk: int | None = None,
+        breadth: int | None = None,
+        breadth_mode: str | None = None,
+        breadth_aggregation: str = "winner",
         route_exploration: float = 0.0,
+        routing_normalizer: str = "global",
         dropout: float = 0.0,
         identity_init: bool = False,
     ) -> None:
@@ -2107,6 +2116,8 @@ class Recall(nn.Module):
         from .config import ARTIConfig
         from .layers import ARTIRecallWriteState
         from .recall_formula import BUILTIN_RECALL_FORMULAS
+        from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
+
         formula_module: nn.Module | None
         declared_contract: RecallFormulaContract | None = None
         if isinstance(formula, str):
@@ -2145,19 +2156,73 @@ class Recall(nn.Module):
         else:
             raise TypeError("formula must be a versioned formula ID or torch.nn.Module")
 
+        resolved_breadth_mode = (
+            "mixed" if breadth_mode is None and formula_origin == "custom" else
+            "independent" if breadth_mode is None else breadth_mode
+        )
+        if resolved_breadth_mode not in {"independent", "mixed"}:
+            raise ValueError("breadth_mode must be 'independent' or 'mixed'")
+        if breadth_aggregation not in {"winner", "route_weighted"}:
+            raise ValueError(
+                "breadth_aggregation must be 'winner' or 'route_weighted'"
+            )
+        resolved_group_size = 1 if group_size is None else int(group_size)
+        if resolved_group_size <= 0:
+            raise ValueError("group_size must be positive")
+        if routing == "grouped":
+            if slots % resolved_group_size:
+                raise ValueError("grouped slots must be divisible by group_size")
+            factor_count = (
+                declared_contract.factor_count
+                if declared_contract is not None
+                else {
+                    "single": 1,
+                    "product": 2,
+                    "state": 17,
+                }[value_composition]
+            )
+            groups = slots // resolved_group_size
+            if groups % factor_count:
+                raise ValueError("Recall Formula factors must divide the grouped route count")
+            max_source_width = groups // factor_count
+            resolved_group_topk = (
+                min(self.recommended_breadth, max_source_width)
+                if group_topk is None
+                else int(group_topk)
+            )
+            resolved_breadth = (
+                min(self.recommended_breadth, resolved_group_topk)
+                if breadth is None
+                else int(breadth)
+            )
+        else:
+            resolved_group_topk = 1 if group_topk is None else int(group_topk)
+            resolved_breadth = 1 if breadth is None else int(breadth)
+        if resolved_group_topk <= 0:
+            raise ValueError("group_topk must be positive")
+        if resolved_breadth <= 0:
+            raise ValueError("breadth must be positive")
+        if resolved_breadth_mode == "mixed":
+            resolved_breadth = 1
+        if resolved_breadth_mode == "independent" and resolved_breadth > 1:
+            if routing != "grouped":
+                raise ValueError("independent Recall breadth requires grouped routing")
+            if resolved_breadth > resolved_group_topk:
+                raise ValueError("breadth must not exceed group_topk")
+
         config = ARTIConfig(
             input_dim=dim,
             hidden_dim=dim,
             recall_slots=slots,
-            recall_steps=steps,
-            recall_min_steps=min_steps,
-            recall_tolerance=tolerance,
+            recall_steps=1,
+            recall_min_steps=1,
+            recall_tolerance=None,
             recall_activation=activation,
             recall_recognition_mode=recognition,
             recall_routing=routing,
             recall_key_dim=key_dim,
-            recall_group_size=group_size,
-            recall_group_topk=group_topk,
+            recall_group_size=resolved_group_size,
+            recall_group_topk=resolved_group_topk,
             recall_value_composition=value_composition,
             recall_route_exploration=route_exploration,
             dropout=dropout,
@@ -2173,6 +2238,9 @@ class Recall(nn.Module):
         self.formula_id = formula_id
         self.formula_origin = formula_origin
         self.formula_portable = formula_portable
+        self.breadth = resolved_breadth
+        self.breadth_mode = resolved_breadth_mode
+        self.breadth_aggregation = breadth_aggregation
         self._manifest_id = manifest_id
         self._manifest_version = manifest_version
         self.state = ARTIRecallWriteState(
@@ -2180,6 +2248,11 @@ class Recall(nn.Module):
             identity_init_bank=identity_init,
             formula=formula_module,
         )
+        if routing_normalizer not in {"global", "per_bank"}:
+            raise ValueError("routing_normalizer must be 'global' or 'per_bank'")
+        if routing_normalizer == "per_bank" and routing != "grouped":
+            raise ValueError("per_bank routing normalization requires grouped routing")
+        self.state.recall.routing_normalizer = routing_normalizer
         self._formula_contract = self.state.recall.formula_contract or declared_contract
         if self._formula_contract is None:
             self._formula_contract = RecallFormulaContract(
@@ -2192,19 +2265,87 @@ class Recall(nn.Module):
         )
 
     @property
+    def routing_normalizer(self) -> str:
+        return self.state.recall.routing_normalizer
+
+    @property
+    def _component_reference(self) -> str:
+        if self.breadth_mode == "independent":
+            return "arti/recall@4"
+        return "arti/recall@3" if self.routing_normalizer == "per_bank" else "arti/recall@2"
+
+    def _automatic_rng_plan(self, value: Tensor):
+        from .batched_refine import ExecutionRNGPlan
+
+        seed = int(torch.randint(0, 2**63 - 1, (), device="cpu").item())
+        return ExecutionRNGPlan(
+            seed=seed,
+            run_nonce=f"forward-{seed:016x}",
+            stream_key="recall.forward",
+            sample_keys=tuple(f"sample-{index}" for index in range(value.shape[0])),
+        )
+
+    def _merge_breadth_result(
+        self,
+        result,
+        source: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        candidates = result.candidates
+        scores = candidates.candidate_log_score
+        valid = candidates.candidate_mask
+        floor = torch.finfo(scores.dtype).min
+        token_count = valid.sum(dim=1).clamp_min(1)
+        branch_scores = scores.masked_fill(~valid, 0).sum(dim=1) / token_count
+        branch_valid = candidates.branch_mask & valid.any(dim=1)
+        soft_weights = torch.softmax(
+            branch_scores.masked_fill(~branch_valid, floor),
+            dim=-1,
+        )
+        soft_weights = torch.where(
+            branch_valid,
+            soft_weights,
+            torch.zeros_like(soft_weights),
+        )
+        soft_weights = soft_weights / soft_weights.sum(dim=-1, keepdim=True).clamp_min(
+            torch.finfo(soft_weights.dtype).tiny
+        )
+        if self.breadth_aggregation == "winner":
+            winner = branch_scores.masked_fill(~branch_valid, floor).argmax(dim=-1)
+            hard_weights = torch.nn.functional.one_hot(
+                winner,
+                num_classes=branch_scores.shape[-1],
+            ).to(dtype=scores.dtype)
+            hard_weights = torch.where(
+                branch_valid,
+                hard_weights,
+                torch.zeros_like(hard_weights),
+            )
+            weights = _HardLayoutSoftGradient.apply(hard_weights, soft_weights)
+        else:
+            weights = soft_weights
+            winner = branch_scores.masked_fill(~branch_valid, floor).argmax(dim=-1)
+        merged = (result.value * weights[:, :, None, None]).sum(dim=1)
+        merged = torch.where(
+            candidates.token_mask.unsqueeze(-1),
+            merged,
+            source,
+        )
+        return merged, weights, winner
+
+    @property
     def formula(self) -> nn.Module | None:
         """Return the local custom/registered Formula, if one is in use."""
 
         return self.state.recall.formula
 
     @property
-    def formula_contract(self) -> RecallFormulaContract:
+    def formula_contract(self):
         """Return the immutable mathematical contract used by this Recall."""
 
         return self._formula_contract
 
     @property
-    def formula_lock(self) -> RecallFormulaLock:
+    def formula_lock(self):
         """Return the shape/backend lock for artifact and deployment checks."""
 
         return self._formula_lock
@@ -2237,26 +2378,110 @@ class Recall(nn.Module):
             capabilities=self._formula_lock.capabilities,
         )
 
+    def route_plan(
+        self,
+        diagnostics: Mapping[str, Tensor],
+        *,
+        step: int = 0,
+    ):
+        """Capture one frozen route from full Recall diagnostics."""
+
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ValueError("step must be a non-negative integer")
+        required = {
+            "recall_weight_history",
+            "recall_index_history",
+            "recall_route_history",
+        }
+        missing = required - set(diagnostics)
+        if missing:
+            raise ValueError(
+                "full Recall diagnostics are required to capture a route plan; "
+                f"missing {sorted(missing)}"
+            )
+        try:
+            field = self.state.recall
+            return field.route_plan_from_tensors(
+                diagnostics["recall_weight_history"][:, step],
+                diagnostics["recall_index_history"][:, step],
+                diagnostics["recall_route_history"][:, step],
+            )
+        except IndexError as error:
+            raise ValueError("route-plan step is outside the recorded trace") from error
+
+    @overload
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        return_info: Literal[False] = False,
+        return_trace: Literal[False] = False,
+        **kwargs: Any,
+    ) -> Tensor: ...
+
+    @overload
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        return_info: Literal[True],
+        return_trace: Literal[False] = False,
+        **kwargs: Any,
+    ) -> tuple[Tensor, dict[str, Tensor]]: ...
+
+    @overload
+    def forward(
+        self,
+        x: Tensor,
+        *,
+        return_info: Literal[False] = False,
+        return_trace: Literal[True],
+        **kwargs: Any,
+    ) -> tuple[Tensor, Any]: ...
+
     def forward(
         self,
         x: Tensor,
         *,
         mask: Tensor | None = None,
         recall: Tensor | None = None,
+        memory: Tensor | None = None,
         route_assignment: Tensor | None = None,
         refine_policy=None,
         route_plan=None,
+        active_k: int | Tensor | None = None,
+        rng_plan=None,
         return_info: bool = False,
-    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
-        from .recall_refine import AdaptiveRefinePolicy, RecallRoutePlan, RefinePolicy
+        return_trace: bool = False,
+        return_branches: bool = False,
+    ):
+        from .recall_refine import (
+            AdaptiveRefinePolicy,
+            RecallRoutePlan,
+            RecallTrace,
+            RecallTraceV2,
+            RefinePolicy,
+        )
 
         if refine_policy is not None and not isinstance(
-            refine_policy,
-            (RefinePolicy, AdaptiveRefinePolicy),
+            refine_policy, (RefinePolicy, AdaptiveRefinePolicy)
         ):
-            raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
+            raise TypeError(
+                "refine_policy must be a RefinePolicy or AdaptiveRefinePolicy"
+            )
         if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
             raise TypeError("route_plan must be a RecallRoutePlan or None")
+        if sum((return_info, return_trace, return_branches)) > 1:
+            raise ValueError(
+                "return_info, return_trace, and return_branches are mutually exclusive"
+            )
+        if refine_policy is None:
+            trace_level = "routes" if return_trace else ("summary" if return_info else "none")
+            refine_policy = RefinePolicy(trace_level=trace_level)
+        elif return_trace and refine_policy.trace_level not in {"routes", "full"}:
+            refine_policy = refine_policy.replace(trace_level="routes")
+        elif return_info and refine_policy.trace_level == "none":
+            refine_policy = refine_policy.replace(trace_level="summary")
         if not isinstance(x, Tensor) or not x.is_floating_point():
             raise TypeError("x must be a floating-point Tensor")
         if x.ndim not in {2, 3}:
@@ -2276,160 +2501,192 @@ class Recall(nn.Module):
             sequence.shape[1],
             sequence.device,
         )
+        use_breadth = (
+            self.breadth_mode == "independent"
+            and self.breadth > 1
+            and recall is None
+            and memory is None
+            and route_assignment is None
+            and route_plan is None
+            and not (
+                isinstance(refine_policy, AdaptiveRefinePolicy)
+                and refine_policy.executor != "static_masked"
+            )
+            and not (
+                hasattr(torch, "compiler")
+                and torch.compiler.is_compiling()
+            )
+        )
+        if use_breadth:
+            from .batched_refine import ExecutionRNGPlan, run_batched_refine
+
+            if rng_plan is not None and not isinstance(rng_plan, ExecutionRNGPlan):
+                raise TypeError("rng_plan must be an ExecutionRNGPlan or None")
+            activation = self.state.recall_activation
+            needs_rng = bool(getattr(activation, "stochastic", False)) or (
+                self.state.training and self.state.dropout.p > 0
+            ) or (
+                self.state.recall.training
+                and self.state.recall._bank_gradient_enabled
+                and self.state.recall.route_exploration > 0
+            )
+            if rng_plan is None and needs_rng:
+                rng_plan = self._automatic_rng_plan(sequence)
+            result = run_batched_refine(
+                self,
+                sequence,
+                mask=token_mask,
+                max_k=self.breadth,
+                active_k=active_k,
+                refine_policy=refine_policy,
+                rng_plan=rng_plan,
+            )
+            merged, branch_weights, winner = self._merge_breadth_result(result, sequence)
+            output = merged.squeeze(1) if was_vector else merged
+            if return_branches:
+                return output, result
+            diagnostics = dict(result.global_diagnostics)
+            for name, value in result.branch_diagnostics.items():
+                if value.ndim >= 2 and value.shape[:2] == (
+                    sequence.shape[0],
+                    self.breadth,
+                ):
+                    index = winner.reshape(
+                        sequence.shape[0],
+                        1,
+                        *((1,) * (value.ndim - 2)),
+                    ).expand(sequence.shape[0], 1, *value.shape[2:])
+                    diagnostics[name] = value.gather(1, index).squeeze(1)
+                else:
+                    diagnostics[name] = value
+            diagnostics["recall_breadth"] = torch.tensor(
+                self.breadth,
+                dtype=torch.int64,
+                device=sequence.device,
+            )
+            diagnostics["recall_branch_weight"] = branch_weights
+            diagnostics["recall_winner"] = winner
+            token_attempted = diagnostics.get("recall_token_step_attempted")
+            if isinstance(token_attempted, Tensor):
+                diagnostics["recall_logical_token_steps"] = token_attempted.sum(
+                    dtype=torch.int64
+                )
+                diagnostics["recall_active_fraction"] = token_attempted.to(
+                    dtype=sequence.dtype
+                ).mean(dim=(0, 2))
+            if return_trace:
+                trace_type = (
+                    RecallTraceV2
+                    if isinstance(refine_policy, AdaptiveRefinePolicy)
+                    else RecallTrace
+                )
+                return output, trace_type.from_diagnostics(
+                    diagnostics,
+                    validate_schema=False,
+                    validate_values=False,
+                )
+            if return_info:
+                return output, diagnostics
+            return output
+        if active_k is not None or rng_plan is not None or return_branches:
+            raise ValueError(
+                "active_k, rng_plan, and return_branches require active independent breadth"
+            )
         next_state, _write, diagnostics = self.state(
             sequence,
             token_mask,
             recall,
             route_assignment,
+            memory=memory,
             refine_policy=refine_policy,
             route_plan=route_plan,
         )
         output = next_state.squeeze(1) if was_vector else next_state
-        if not return_info:
+        if not return_info and not return_trace:
             return output
+        trace_type = (
+            RecallTraceV2 if isinstance(refine_policy, AdaptiveRefinePolicy) else RecallTrace
+        )
+        trace = (
+            trace_type.from_diagnostics(
+                diagnostics,
+                validate_schema=False,
+                validate_values=False,
+            )
+            if return_trace
+            else None
+        )
+        if return_trace:
+            return output, trace
         return output, diagnostics
 
     def extra_repr(self) -> str:
         return (
             f"dim={self.dim}, slots={self.slots}, formula={self.formula_id!r}, "
-            f"factors={len(self.factor_names)}"
+            f"factors={len(self.factor_names)}, breadth={self.breadth}, "
+            f"breadth_mode={self.breadth_mode!r}"
         )
 
 
 class RecallRefiner(nn.Module):
-    """Alpha iterative latent recall refinement.
+    """Runtime-policy adapter for the canonical Recall refine engine.
 
-    ``RecallRefiner`` repeatedly asks a recall layer for candidate corrections,
-    optionally thins those corrections with ``Half``, and applies scaled
-    residual updates to the hidden state.
+    This module owns no refinement loop and no trainable state. It exists for
+    composition APIs that prefer a named refiner component while ensuring the
+    wrapped :class:`Recall` remains the single execution owner.
     """
 
-    def __init__(
-        self,
-        recall_layer: nn.Module,
-        *,
-        steps: int = 3,
-        step_scale: float | list[float] | tuple[float, ...] | Tensor = 1.0,
-        learnable_step_scale: bool = False,
-        use_half: bool = True,
-        activation: nn.Module | None = None,
-    ) -> None:
-        super().__init__()
-        if steps < 0:
-            raise ValueError("steps must be non-negative")
-        self.recall_layer = recall_layer
-        self.steps = int(steps)
-        self.learnable_step_scale = bool(learnable_step_scale)
-        self.activation = Half() if activation is None and use_half else activation
+    _component_reference = "arti/recall-refiner@2"
 
-        scale = torch.as_tensor(step_scale, dtype=torch.float32)
-        if scale.ndim == 0:
-            scale = scale.repeat(max(1, self.steps))
-        elif scale.ndim != 1:
-            raise ValueError("step_scale must be a scalar or one-dimensional sequence")
-        if scale.numel() == 0:
-            raise ValueError("step_scale must contain at least one value")
-        if learnable_step_scale:
-            self.step_scale = nn.Parameter(scale.clone())
-        else:
-            self.register_buffer("step_scale", scale.clone())
+    def __init__(self, recall_layer: Recall) -> None:
+        super().__init__()
+        if not isinstance(recall_layer, Recall):
+            raise TypeError("RecallRefiner requires an arti.nn.Recall instance")
+        self.recall_layer = recall_layer
 
     def forward(
         self,
         h: Tensor,
-        *args,
-        steps: int | None = None,
-        tolerance: float | None = None,
-        return_info: bool = False,
-        record_history: bool = False,
+        *,
+        policy=None,
         **kwargs,
-    ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
-        run_steps = self.steps if steps is None else int(steps)
-        if run_steps < 0:
-            raise ValueError("steps must be non-negative")
-        if tolerance is not None and tolerance < 0:
-            raise ValueError("tolerance must be non-negative")
+    ):
+        from .recall_refine import AdaptiveRefinePolicy, RefinePolicy
 
-        state = h
-        start_state = h
-        delta_norms: list[Tensor] = []
-        raw_delta_norms: list[Tensor] = []
-        update_norms: list[Tensor] = []
-        survival_means: list[Tensor] = []
-        applied_scales: list[Tensor] = []
-        history: list[Tensor] = [state.detach()] if record_history else []
-        stopped_early = False
-
-        for step_index in range(run_steps):
-            raw_delta = self._call_recall(state, *args, **kwargs)
-            delta = self.activation(raw_delta) if self.activation is not None else raw_delta
-            scale = self._scale_for_step(step_index, state)
-            update = scale * delta
-            state = state + update
-
-            raw_norm = raw_delta.norm().detach()
-            delta_norm = delta.norm().detach()
-            update_norm = update.norm().detach()
-            raw_delta_norms.append(raw_norm)
-            delta_norms.append(delta_norm)
-            update_norms.append(update_norm)
-            survival_means.append((delta.abs().mean() / raw_delta.abs().mean().clamp_min(1e-6)).detach())
-            applied_scales.append(scale.detach().mean())
-            if record_history:
-                history.append(state.detach())
-            if tolerance is not None and float(update_norm) <= tolerance:
-                stopped_early = True
-                break
-
-        if not return_info:
-            return state
-        info = {
-            "steps": torch.as_tensor(len(delta_norms), device=h.device),
-            "stopped_early": torch.as_tensor(stopped_early, device=h.device),
-            "delta_norm": self._stack_or_empty(delta_norms, h),
-            "raw_delta_norm": self._stack_or_empty(raw_delta_norms, h),
-            "update_norm": self._stack_or_empty(update_norms, h),
-            "survival_mean": self._stack_or_empty(survival_means, h),
-            "step_scale": self._stack_or_empty(applied_scales, h),
-            "state_change_norm": (state - start_state).norm().detach(),
-        }
-        if record_history:
-            info["state_history"] = torch.stack(history)
-        return state, info
-
-    def _call_recall(self, h: Tensor, *args, **kwargs) -> Tensor:
-        output = self.recall_layer(h, *args, **kwargs)
-        if isinstance(output, Tensor):
-            return output
-        if hasattr(output, "y") and isinstance(output.y, Tensor):
-            return output.y
-        if isinstance(output, tuple) and output and isinstance(output[0], Tensor):
-            return output[0]
-        raise TypeError("recall_layer must return a Tensor, a tuple whose first item is a Tensor, or an object with Tensor attribute 'y'")
-
-    def _scale_for_step(self, step_index: int, h: Tensor) -> Tensor:
-        scale = self.step_scale[min(step_index, self.step_scale.shape[0] - 1)]
-        return scale.to(device=h.device, dtype=h.dtype)
-
-    def _stack_or_empty(self, values: list[Tensor], like: Tensor) -> Tensor:
-        if not values:
-            return torch.empty(0, device=like.device, dtype=like.dtype)
-        return torch.stack([value.to(device=like.device, dtype=like.dtype) for value in values])
+        if not isinstance(policy, (RefinePolicy, AdaptiveRefinePolicy)):
+            raise TypeError("policy must be an explicit RefinePolicy or AdaptiveRefinePolicy")
+        if "refine_policy" in kwargs:
+            raise ValueError("pass policy= once; refine_policy is owned by RecallRefiner")
+        return self.recall_layer(h, refine_policy=policy, **kwargs)
 
     def extra_repr(self) -> str:
-        args = [f"steps={self.steps}"]
-        if self.learnable_step_scale:
-            args.append("learnable_step_scale=True")
-        if self.activation is None:
-            args.append("use_half=False")
-        return ", ".join(args)
+        return f"recall={self.recall_layer._component_reference}"
 
 
 Pulse = LearnedPulse
 
-from .stateful_recall import StatefulRecall  # noqa: E402
 from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput  # noqa: E402
-__all__ = ["Layer", "Half", "UnFold", "Fold", "Pulse", "LearnedPulse", "FusionPulse", "Recall", "RecallRefiner", "StatefulRecall", "VisualField", "VisualFieldOutput", "concat_visual_fields", "VisualScan", "VisualScanConfig", "VisualScanOutput", "PixelShiftObservation"]
+__all__ = [
+    "Layer",
+    "Half",
+    "UnFold",
+    "Fold",
+    "Pulse",
+    "LearnedPulse",
+    "FusionPulse",
+    "Recall",
+    "RecallRefiner",
+    "EmissionRouter",
+    "EmissionRouterConfig",
+    "EmissionRouterOutput",
+    "VisualField",
+    "VisualFieldOutput",
+    "concat_visual_fields",
+    "VisualScan",
+    "VisualScanConfig",
+    "VisualScanOutput",
+    "PixelShiftObservation",
+]
 
 
 def __getattr__(name: str):

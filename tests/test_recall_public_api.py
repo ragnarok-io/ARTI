@@ -15,10 +15,7 @@ class AdditiveFormula(nn.Module):
         return state + factors[..., 0, :]
 
 
-@pytest.mark.parametrize(
-    "formula,slots",
-    [("arti/delta@1", 4), ("arti/affine@1", 4), ("arti/state@1", 17)],
-)
+@pytest.mark.parametrize("formula,slots", [("arti/delta@1", 4), ("arti/affine@1", 4), ("arti/state@1", 17)])
 def test_recall_builtin_formulas_preserve_shape(formula: str, slots: int) -> None:
     layer = arti_nn.Recall(8, slots, formula=formula, activation="none")
     x = torch.randn(2, 3, 8)
@@ -144,7 +141,8 @@ def test_recall_return_info_reports_existing_diagnostics() -> None:
 
     assert output.shape == (2, 3, 4)
     assert "recall_effect_norm" in info
-    assert "recall_steps_executed" in info
+    assert "recall_steps_attempted" in info
+    assert "recall_steps_committed" in info
 
 
 def test_recall_exposes_passive_formula_manifest() -> None:
@@ -172,13 +170,12 @@ def test_explicit_registered_formula_can_be_resolved_without_discovery() -> None
 def test_recall_is_exported_from_root_and_nn() -> None:
     assert arti.Recall is arti_nn.Recall
     assert arti.torch.Recall is arti_nn.Recall
-    assert callable(arti.formula_dtype_supported)
     assert callable(arti.validate_formula)
     assert callable(arti.register_formula)
     assert callable(arti.list_formulas)
 
 
-def test_recall_strictly_loads_public_one_x_state() -> None:
+def test_recall_strictly_rejects_incomplete_state() -> None:
     source = arti_nn.Recall(4, 4, activation="none")
     with torch.no_grad():
         source.state.recall.bank.normal_()
@@ -190,16 +187,5 @@ def test_recall_strictly_loads_public_one_x_state() -> None:
     legacy_state["state.recall.key_bank"] = torch.randn(4, 32)
 
     restored = arti_nn.Recall(4, 4, activation="none")
-    expected_retention = restored.state._state_input_retention.detach().clone()
-    restored.load_state_dict(legacy_state, strict=True)
-
-    torch.testing.assert_close(
-        restored.state.recall.bank,
-        legacy_state["state.recall.bank"],
-    )
-    torch.testing.assert_close(
-        restored.state.recall.query.weight,
-        legacy_state["state.recall.query.weight"],
-    )
-    torch.testing.assert_close(restored.state._state_input_retention, expected_retention)
-    assert not restored.state.recall.query.weight.requires_grad
+    with pytest.raises(RuntimeError, match="Missing key|Unexpected key"):
+        restored.load_state_dict(legacy_state, strict=True)

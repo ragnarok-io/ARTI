@@ -43,3 +43,14 @@ undeclared enabled dependencies, and cycles.
 This boundary is especially important for `AdaptivePulse`: the stage manifest
 is the execution contract, while Python module composition supplies the
 implementations bound to that manifest.
+
+## Recall Identities
+
+`arti/recall@2` identifies globally normalized mixed-route Recall.
+`arti/recall@3` adds per-Bank normalization and explicit member asset identity.
+`arti/recall@4` identifies independent K-wide candidate refinement and records
+`breadth`, `breadth_mode`, and `breadth_aggregation`.
+
+The default `Recall@4` aggregation is `winner`: one complete candidate
+trajectory is forwarded. `route_weighted` is an explicit optional mode. Loading
+or resolving an older Recall identity never silently enables K-wide execution.

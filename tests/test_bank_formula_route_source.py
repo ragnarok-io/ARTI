@@ -822,6 +822,7 @@ def test_iterative_routed_formula_cuda_fullgraph(dtype: torch.dtype) -> None:
 def test_iterative_routed_formula_pulse_cuda_fullgraph_diagnostics(
     dtype: torch.dtype,
 ) -> None:
+    torch._dynamo.reset()
     routed, route_source, _compute = _stack()
     iterative = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=3)
     topology = alpha.ReversibleTopology(active_count=3)

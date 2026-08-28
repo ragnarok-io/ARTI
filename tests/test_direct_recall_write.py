@@ -9,6 +9,7 @@ from torch import nn
 from arti.blocks import ARTIResidualBlock
 from arti.config import ARTIConfig, STATE_RECALL_COMPOSITION_FACTOR
 from arti.layers import ARTILatentRecallField, ARTIRecallWriteLayer
+from arti.nn import Half
 from arti.recall_formula import FactorSpec, RecallFormulaContract
 from arti.recall_registry import RecallFormulaId
 
@@ -702,7 +703,7 @@ def test_direct_recall_training_uses_compiler_friendly_static_steps(
 
 
 def _compiled_product_layer() -> ARTIRecallWriteLayer:
-    return ARTIRecallWriteLayer(
+    layer = ARTIRecallWriteLayer(
         ARTIConfig(
             input_dim=8,
             hidden_dim=8,
@@ -720,6 +721,8 @@ def _compiled_product_layer() -> ARTIRecallWriteLayer:
             use_virtual_interface=False,
         )
     )
+    layer.state.recall_activation = Half(stochastic=False)
+    return layer
 
 
 def test_product_recall_layers_share_runtime_compiled_tail() -> None:

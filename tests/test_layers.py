@@ -3,7 +3,7 @@ import copy
 import pytest
 import torch
 
-from arti import ARTIConfig, ARTILayer, ARTIOutput
+from arti import ARTIConfig, ARTILayer, ARTIOutput, RefinePolicy
 from arti.config import STATE_RECALL_COMPOSITION_FACTOR
 from arti.functional import apply_coord_frame_inverse, masked_mean
 from arti.init import init_arti_module
@@ -733,7 +733,7 @@ def test_grouped_recall_can_detach_one_bank_shard_without_changing_forward():
     assert field.query.weight.grad is None
 
 
-def test_grouped_recall_reuses_owner_groups_across_refinement_steps():
+def test_grouped_recall_reroutes_across_refinement_steps_by_default():
     torch.manual_seed(47)
     layer = ARTILayer(
         input_dim=8,
@@ -760,7 +760,55 @@ def test_grouped_recall_reuses_owner_groups_across_refinement_steps():
         handle.remove()
 
     assert len(selected_groups) == 3
-    assert all(torch.equal(selected_groups[0], groups) for groups in selected_groups[1:])
+    assert any(not torch.equal(selected_groups[0], groups) for groups in selected_groups[1:])
+
+
+def test_layer_runtime_recall_depth_can_exceed_construction_default():
+    layer = ARTILayer(
+        input_dim=8,
+        hidden_dim=8,
+        recall_slots=16,
+        recall_steps=1,
+        recall_activation="none",
+        use_pairwise_context=False,
+    )
+    assert layer.state.recall is not None
+    reads = []
+    handle = layer.state.recall.register_forward_hook(lambda _module, _args, output: reads.append(output))
+    try:
+        output = layer(torch.randn(2, 4, 8), recall_steps=4)
+    finally:
+        handle.remove()
+
+    assert output.y.shape == (2, 4, 8)
+    assert len(reads) == 4
+
+
+def test_layer_refine_policy_uses_the_canonical_recall_engine() -> None:
+    layer = ARTILayer(
+        input_dim=8,
+        hidden_dim=8,
+        recall_slots=16,
+        recall_steps=1,
+        recall_activation="none",
+        use_pairwise_context=False,
+    )
+    assert layer.state.recall is not None
+    reads = []
+    handle = layer.state.recall.register_forward_hook(
+        lambda _module, _args, output: reads.append(output)
+    )
+    try:
+        output = layer(
+            torch.randn(2, 4, 8),
+            refine_policy=RefinePolicy.fixed(3, trace_level="routes"),
+        )
+    finally:
+        handle.remove()
+
+    assert len(reads) == 3
+    assert output.diagnostics["recall_route_history"].shape[1] == 3
+    assert output.diagnostics["recall_steps_attempted"].tolist() == [3, 3]
 
 
 def test_product_recall_composes_two_independent_bank_reads() -> None:

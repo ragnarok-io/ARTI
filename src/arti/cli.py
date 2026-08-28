@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,22 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--output", type=Path, default=None, help="Write the doctor report to .json or .md.")
     doctor_parser.add_argument("--require-cuda-smoke", action="store_true", help="Fail unless the CUDA smoke check passed.")
     doctor_parser.add_argument("--require-jax-smoke", action="store_true", help="Fail unless the JAX smoke check passed.")
+
+    gate_parser = subparsers.add_parser("gate", help="Run ARTI source-tree quality gates.")
+    gate_parser.add_argument(
+        "gates",
+        nargs="*",
+        default=["quick"],
+        choices=("quick", "docs", "package", "mainline", "mechanism", "cuda", "qwen", "pretrained", "sd", "all"),
+        help="Quality gate names to run.",
+    )
+    gate_parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed gate command.")
+    gate_parser.add_argument("--output", type=Path, default=Path("benchmarks/results/quality_gate_report.json"), help="Quality gate JSON report path.")
+    gate_parser.add_argument(
+        "--reuse-passing-producers",
+        action="store_true",
+        help="Reuse passing producer outputs from an existing gate report while rerunning current verifiers.",
+    )
 
     docs_parser = subparsers.add_parser("docs", help="Generate or check source-backed ARTI docs.")
     docs_subparsers = docs_parser.add_subparsers(dest="kind", required=True)
@@ -552,6 +569,33 @@ def maybe_write_task_graph_artifact(path: Path | None, *, command_kind: str, tas
     if path is None:
         return None
     return str(write_task_graph_artifact(path, command_kind=command_kind, task_graph=task_graph))
+
+
+def run_quality_gate_report(args: argparse.Namespace) -> dict[str, Any]:
+    command = [sys.executable, "scripts/quality_gate.py", *args.gates, "--output", str(args.output)]
+    if args.fail_fast:
+        command.insert(-2, "--fail-fast")
+    if getattr(args, "reuse_passing_producers", False):
+        command.insert(-2, "--reuse-passing-producers")
+    result = subprocess.run(command, capture_output=True, text=True)
+    if args.output.exists():
+        payload = json.loads(args.output.read_text(encoding="utf-8"))
+    else:
+        payload = {"passed": result.returncode == 0, "runs": []}
+    payload.update(
+        {
+            "ok": result.returncode == 0,
+            "kind": "quality-gate",
+            "command": " ".join(command),
+            "output": str(args.output),
+            "returncode": result.returncode,
+            "stdout_tail": result.stdout[-4000:],
+            "stderr_tail": result.stderr[-4000:],
+        }
+    )
+    if result.returncode != 0:
+        raise RuntimeError(json.dumps(payload, indent=2, sort_keys=True))
+    return payload
 
 
 def parse_expected_mechanism(values: tuple[str, ...] | list[str]) -> dict[str, Any]:
@@ -1409,6 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
             if not summary["ok"]:
                 print(json.dumps(summary, indent=2, sort_keys=True))
                 return 1
+        elif args.command == "gate":
+            summary = run_quality_gate_report(args)
         elif args.command == "docs" and args.kind == "generate":
             summary = generate_docs_report(args)
         elif args.command == "docs" and args.kind == "check":

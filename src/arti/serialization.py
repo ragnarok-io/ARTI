@@ -22,6 +22,14 @@ from .component_graph import (
     validate_component_graph,
     verify_component_graph,
 )
+from .component_registry import (
+    component_state_contract,
+    component_provenance,
+    get_component_registry,
+    validate_component_state_contract,
+    validate_component_provenance,
+    verify_component_provenance,
+)
 
 
 ARTI_ST_FORMAT = "arti.st"
@@ -84,6 +92,7 @@ def save(
 
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch.nn.Module")
+    _assert_artifact_components_portable(model)
     target = _weight_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if scope not in {"all", "trainable"}:
@@ -91,7 +100,7 @@ def save(
     state = _model_state(model, scope=scope) if state_dict is None else dict(state_dict)
     if not state:
         raise ValueError("state_dict selected no model tensors")
-    architecture = _architecture_payload(model, config)
+    architecture = _architecture_payload(model, config, state_dict=state, scope=scope)
     return _save_state(
         state,
         target,
@@ -102,8 +111,27 @@ def save(
         optimizer=optimizer,
         scheduler=scheduler,
         training_state=training_state,
-        legacy=None,
     )
+
+
+def _assert_artifact_components_portable(model: nn.Module) -> None:
+    """Reject runtime-only or host-bound records at the artifact boundary."""
+
+    registry = get_component_registry()
+    provenance = component_provenance(model)
+    blocked: list[str] = []
+    for item in provenance["components"]:
+        registration = registry.registration_for_reference(item["ref"])
+        if registration.artifact_policy != "portable":
+            blocked.append(
+                f"{item['path']}:{item['ref']}({registration.artifact_policy})"
+            )
+    if blocked:
+        joined = ", ".join(blocked)
+        raise ValueError(
+            "arti.st cannot persist non-portable components; save the owning "
+            f"constructible module instead: {joined}"
+        )
 
 
 def load(
@@ -115,6 +143,7 @@ def load(
     map_location: str | torch.device = "cpu",
     strict: bool | None = None,
     verify_architecture: bool = True,
+    allow_legacy: bool = False,
     load_resources: bool = True,
     load_checkpoint: bool = True,
 ) -> ARTILoadResult:
@@ -127,9 +156,28 @@ def load(
 
     target = _weight_path(path)
     paths = _sidecar_paths(target)
-    manifest, lock = _read_and_validate_package(target, paths)
+    manifest, lock = _read_and_validate_package(
+        target,
+        paths,
+        allow_legacy=allow_legacy,
+    )
     device = str(torch.device(map_location))
-    weights = _load_safetensors(target, expected_kind="weights", device=device)
+    weights = _load_safetensors(
+        target,
+        expected_kind="weights",
+        device=device,
+        expected_component_graph=manifest["architecture"]["component_provenance"]["fingerprint"],
+        expected_state_schema=manifest["architecture"]["state_contract"]["state_schema"]["fingerprint"],
+    )
+    try:
+        validate_component_state_contract(
+            manifest["architecture"]["state_contract"],
+            state_dict=weights,
+            model=model,
+            allow_legacy=allow_legacy,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"arti.st component provenance/state contract is invalid: {error}") from error
     expected_count = manifest.get("weights", {}).get("tensor_count")
     if expected_count != len(weights):
         raise ValueError("arti.st tensor count does not match manifest")
@@ -137,7 +185,11 @@ def load(
     unexpected: tuple[str, ...] = ()
     if model is not None:
         if verify_architecture:
-            _verify_model_architecture(model, manifest["architecture"])
+            _verify_model_architecture(
+                model,
+                manifest["architecture"],
+                allow_legacy=allow_legacy,
+            )
         model.to(torch.device(map_location))
         resolved_strict = manifest.get("weight_scope") == "all" if strict is None else strict
         incompatible = model.load_state_dict(weights, strict=resolved_strict)
@@ -188,53 +240,6 @@ def load(
     )
 
 
-def migrate_pt(
-    source: str | Path,
-    destination: str | Path = "arti.st",
-    *,
-    model: nn.Module | None = None,
-    config: Mapping[str, Any] | None = None,
-) -> ARTISaveResult:
-    """Safely migrate a tensor-only legacy ``.pt`` state into ``arti.st``.
-
-    Loading always uses ``weights_only=True``. Full Python model objects and
-    arbitrary pickle payloads are rejected rather than executed.
-    """
-
-    source_path = Path(source)
-    if source_path.suffix.lower() not in {".pt", ".pth", ".bin"}:
-        raise ValueError("legacy source must end in .pt, .pth, or .bin")
-    payload = torch.load(source_path, map_location="cpu", weights_only=True)
-    state, scope, selected_key = _extract_legacy_state(payload)
-    if model is not None:
-        resolved_strict = scope == "all"
-        model.load_state_dict(state, strict=resolved_strict)
-        architecture = _architecture_payload(model, config)
-    else:
-        architecture = {
-            "module": None,
-            "class_name": None,
-            "config": _json_normalize(dict(config or {})),
-        }
-    return _save_state(
-        state,
-        _weight_path(destination),
-        architecture=architecture,
-        scope=scope,
-        glyph_tensors=None,
-        vocab_metadata=None,
-        optimizer=None,
-        scheduler=None,
-        training_state=None,
-        legacy={
-            "source_format": "torch.weights_only",
-            "source_file": source_path.name,
-            "selected_state_key": selected_key,
-            "source_sha256": _file_sha256(source_path),
-        },
-    )
-
-
 def _save_state(
     state: Mapping[str, Tensor],
     target: Path,
@@ -246,7 +251,6 @@ def _save_state(
     optimizer: torch.optim.Optimizer | None,
     scheduler: Any | None,
     training_state: Any | None,
-    legacy: dict[str, Any] | None,
 ) -> ARTISaveResult:
     target.parent.mkdir(parents=True, exist_ok=True)
     paths = _sidecar_paths(target)
@@ -254,7 +258,14 @@ def _save_state(
     _atomic_safetensors(
         prepared_state,
         target,
-        metadata={"format": ARTI_ST_FORMAT, "format_version": str(ARTI_ST_FORMAT_VERSION), "kind": "weights", "scope": scope},
+        metadata={
+            "format": ARTI_ST_FORMAT,
+            "format_version": str(ARTI_ST_FORMAT_VERSION),
+            "kind": "weights",
+            "scope": scope,
+            "component_graph_sha256": architecture["component_provenance"]["fingerprint"],
+            "state_schema_sha256": architecture["state_contract"]["state_schema"]["fingerprint"],
+        },
     )
     weights_sha = _file_sha256(target)
     files: dict[str, dict[str, Any]] = {
@@ -327,7 +338,6 @@ def _save_state(
         "weights": {**files["weights"], "tensor_count": len(prepared_state)},
         "resources": {"glyphs": glyph_record, "vocab": vocab_record},
         "checkpoint": checkpoint_record,
-        "legacy_migration": legacy,
     }
     _atomic_json(paths["manifest"], manifest)
     manifest_sha = _file_sha256(paths["manifest"])
@@ -353,7 +363,12 @@ def _save_state(
     )
 
 
-def _read_and_validate_package(target: Path, paths: dict[str, Path]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _read_and_validate_package(
+    target: Path,
+    paths: dict[str, Path],
+    *,
+    allow_legacy: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not target.exists():
         raise FileNotFoundError(target)
     if not paths["manifest"].exists() or not paths["lock"].exists():
@@ -367,7 +382,7 @@ def _read_and_validate_package(target: Path, paths: dict[str, Path]) -> tuple[di
     if not _valid_sha(expected_manifest_hash) or _file_sha256(paths["manifest"]) != expected_manifest_hash:
         raise ValueError("ARTI manifest SHA-256 mismatch")
     manifest = _load_json(paths["manifest"])
-    _validate_manifest(manifest)
+    _validate_manifest(manifest, allow_legacy=allow_legacy)
     for record in _manifest_file_records(manifest):
         member = _member_path(target.parent, record["file"])
         if not member.exists() or _file_sha256(member) != record["sha256"]:
@@ -375,7 +390,7 @@ def _read_and_validate_package(target: Path, paths: dict[str, Path]) -> tuple[di
     return manifest, lock
 
 
-def _validate_manifest(manifest: dict[str, Any]) -> None:
+def _validate_manifest(manifest: dict[str, Any], *, allow_legacy: bool = False) -> None:
     if manifest.get("format") != ARTI_ST_FORMAT or manifest.get("format_version") != ARTI_ST_FORMAT_VERSION:
         raise ValueError("unsupported arti.st format or version")
     if manifest.get("package_name") != "arti" or manifest.get("backend") != "torch":
@@ -388,9 +403,21 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("arti.st weight_scope is invalid")
     if not isinstance(manifest.get("architecture"), dict):
         raise ValueError("arti.st architecture must be a dictionary")
-    component_graph_value = manifest["architecture"].get("component_graph")
-    if component_graph_value is not None:
-        validate_component_graph(component_graph_value)
+    try:
+        validate_component_provenance(
+            manifest["architecture"].get("component_provenance"),
+            allow_legacy=allow_legacy,
+            artifact_scope=True,
+        )
+        component_graph_value = manifest["architecture"].get("component_graph")
+        if component_graph_value is not None:
+            validate_component_graph(component_graph_value)
+        validate_component_state_contract(
+            manifest["architecture"].get("state_contract"),
+            allow_legacy=allow_legacy,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"arti.st component provenance is invalid: {error}") from error
     weights = manifest.get("weights")
     if not isinstance(weights, dict) or not isinstance(weights.get("tensor_count"), int):
         raise ValueError("arti.st weights record is invalid")
@@ -454,7 +481,13 @@ def _prepare_tensors(state: Mapping[str, Tensor], *, label: str) -> dict[str, Te
     return prepared
 
 
-def _architecture_payload(model: nn.Module, config: Mapping[str, Any] | None) -> dict[str, Any]:
+def _architecture_payload(
+    model: nn.Module,
+    config: Mapping[str, Any] | None,
+    *,
+    state_dict: Mapping[str, Tensor],
+    scope: str,
+) -> dict[str, Any]:
     resolved: Any = config
     if resolved is None:
         serialization_config = getattr(model, "serialization_config", None)
@@ -466,15 +499,27 @@ def _architecture_payload(model: nn.Module, config: Mapping[str, Any] | None) ->
                 resolved = asdict(candidate)
             elif callable(getattr(candidate, "to_dict", None)):
                 resolved = candidate.to_dict()
-    return {
+    payload = {
         "module": model.__class__.__module__,
         "class_name": model.__class__.__qualname__,
         "config": _json_normalize({} if resolved is None else resolved),
+        "component_provenance": component_provenance(model),
         "component_graph": build_component_graph(model),
+        "state_contract": component_state_contract(model, state_dict, scope=scope),
     }
+    candidate = getattr(model, "config", None)
+    contract = getattr(candidate, "context_contract", None)
+    if callable(contract):
+        payload["context_contract"] = _json_normalize(contract())
+    return payload
 
 
-def _verify_model_architecture(model: nn.Module, architecture: Mapping[str, Any]) -> None:
+def _verify_model_architecture(
+    model: nn.Module,
+    architecture: Mapping[str, Any],
+    *,
+    allow_legacy: bool = False,
+) -> None:
     expected_module = architecture.get("module")
     expected_class = architecture.get("class_name")
     if expected_module is None and expected_class is None:
@@ -486,21 +531,22 @@ def _verify_model_architecture(model: nn.Module, architecture: Mapping[str, Any]
             "arti.st architecture does not match target model: "
             f"expected {expected_module}.{expected_class}, got {actual_module}.{actual_class}"
         )
-    component_graph_value = architecture.get("component_graph")
-    if component_graph_value is not None:
-        verify_component_graph(model, component_graph_value)
-
-
-def _extract_legacy_state(payload: Any) -> tuple[dict[str, Tensor], str, str | None]:
-    if isinstance(payload, Mapping) and payload and all(isinstance(key, str) and isinstance(value, Tensor) for key, value in payload.items()):
-        return dict(payload), "all", None
-    if not isinstance(payload, Mapping):
-        raise ValueError("legacy .pt must contain a tensor state dictionary")
-    for key, scope in (("state_dict", "all"), ("model_state_dict", "all"), ("adapter_state_dict", "trainable")):
-        candidate = payload.get(key)
-        if isinstance(candidate, Mapping) and candidate and all(isinstance(name, str) and isinstance(value, Tensor) for name, value in candidate.items()):
-            return dict(candidate), scope, key
-    raise ValueError("legacy .pt does not contain a supported tensor-only state dictionary")
+    try:
+        verify_component_provenance(
+            model,
+            architecture["component_provenance"],
+            allow_legacy=allow_legacy,
+        )
+        component_graph_value = architecture.get("component_graph")
+        if component_graph_value is not None:
+            verify_component_graph(model, component_graph_value)
+        validate_component_state_contract(
+            architecture["state_contract"],
+            model=model,
+            allow_legacy=allow_legacy,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(str(error)) from error
 
 
 def _encode_tree(value: Any, tensors: dict[str, Tensor], *, path: str) -> Any:
@@ -564,13 +610,30 @@ def _json_normalize(value: Any) -> Any:
     raise ValueError(f"configuration value is not JSON compatible: {type(value).__name__}")
 
 
-def _load_safetensors(path: Path, *, expected_kind: str, device: str) -> dict[str, Tensor]:
+def _load_safetensors(
+    path: Path,
+    *,
+    expected_kind: str,
+    device: str,
+    expected_component_graph: str | None = None,
+    expected_state_schema: str | None = None,
+) -> dict[str, Tensor]:
     with safe_open(path, framework="pt", device=device) as handle:
         metadata = handle.metadata() or {}
     if metadata.get("format") != ARTI_ST_FORMAT or metadata.get("format_version") != str(ARTI_ST_FORMAT_VERSION):
         raise ValueError(f"{path.name} is not an ARTI SafeTensors file")
     if metadata.get("kind") != expected_kind:
         raise ValueError(f"{path.name} kind does not match expected {expected_kind!r}")
+    if (
+        expected_component_graph is not None
+        and metadata.get("component_graph_sha256") != expected_component_graph
+    ):
+        raise ValueError("ARTI SafeTensors component graph fingerprint does not match manifest")
+    if (
+        expected_state_schema is not None
+        and metadata.get("state_schema_sha256") != expected_state_schema
+    ):
+        raise ValueError("ARTI SafeTensors state schema fingerprint does not match manifest")
     return load_file(path, device=device)
 
 
@@ -588,6 +651,8 @@ def _check_version_compatibility(saved: str, current: str) -> None:
         return
     if saved_version[0] != current_version[0]:
         raise ValueError(f"arti.st package major version {saved} is incompatible with ARTI {current}")
+    if saved_version[1] > current_version[1]:
+        raise ValueError(f"arti.st package version {saved} is newer than ARTI {current}")
     if saved_version[0] == 0 and saved_version[1] > current_version[1]:
         raise ValueError(f"arti.st alpha version {saved} is newer than ARTI {current}")
 
@@ -675,6 +740,5 @@ __all__ = [
     "ARTILoadResult",
     "ARTISaveResult",
     "load",
-    "migrate_pt",
     "save",
 ]

@@ -813,13 +813,13 @@ def test_record_producer_fingerprint_binds_structure_not_mutable_bank_values() -
     assert state.record.producer_provenance_fingerprint == before
 
 
-def test_reversed_bank_layout_has_distinct_component_config() -> None:
+def test_reversed_bank_layout_has_distinct_component_provenance() -> None:
     source = _serializable_bank_fold()
     reversed_layout = _serializable_bank_fold(reverse=True)
 
     assert (
-        arti.component_spec(source.topology.policy).config_fingerprint
-        != arti.component_spec(reversed_layout.topology.policy).config_fingerprint
+        arti.component_provenance(source)["fingerprint"]
+        != arti.component_provenance(reversed_layout)["fingerprint"]
     )
 
 
@@ -845,10 +845,12 @@ def test_fixed_formula_weight_changes_producer_provenance() -> None:
     )
 
 
-def test_bfloat16_bank_component_config_is_hashable() -> None:
+def test_bfloat16_bank_provenance_is_hashable() -> None:
     fold = _serializable_bank_fold().to(dtype=torch.bfloat16)
 
-    assert arti.component_spec(fold.topology.policy).config_fingerprint
+    provenance = arti.component_provenance(fold)
+
+    assert provenance["fingerprint"]
 
 
 @torch.no_grad()
@@ -866,8 +868,8 @@ def test_unfold_operation_does_not_retain_the_topology_learner() -> None:
 def test_bank_formula_component_graph_declares_every_executable_role() -> None:
     fold = _serializable_bank_fold()
 
-    graph = arti.component_graph(fold)
-    refs = {node["ref"] for node in graph["nodes"]}
+    provenance = arti.component_provenance(fold)
+    refs = {node["ref"] for node in provenance["components"]}
 
     assert refs >= {
         "arti/fold@2",

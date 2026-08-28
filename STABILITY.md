@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.8a1 is a
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.9a1 is a
 prerelease for the versioned vNext composition contracts described below; it
 does not promote those alpha components to the supported surface and is not an
 LTS promise.
@@ -62,6 +62,15 @@ component identities and bounded tensor contracts are versioned, but their
 training objectives, task quality, runtime performance, and persistence policy
 remain application concerns. Objective queries are explicit current/past-only
 inputs; future targets and losses remain outside the forward graph.
+
+`arti.nn.Recall` version `arti/recall@4` and the Batched Refine runtime are
+introduced in 3.0.9a1. New Recall instances preserve K independent candidate
+trajectories and forward one hard winner by default. Weighted candidate
+aggregation is explicit opt-in behavior. Breadth, active candidate count, GPU
+residency, tensor transactions, and runtime checkpoints remain alpha controls;
+their performance and task-quality effects are not part of the Stable
+Candidate surface. Existing `arti/recall@2` and `arti/recall@3` artifacts keep
+their historical mixed-route semantics.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

@@ -23,13 +23,13 @@ def test_arti_st_core_layer_round_trip_preserves_output(tmp_path: Path) -> None:
     model = core_layer()
     x = torch.randn(2, 4, 6)
     coord = torch.randn(2, 4, 2)
-    torch.manual_seed(301)
+    torch.manual_seed(31)
     expected = model(x, coord=coord).y.detach()
 
     saved = arti.save(model, tmp_path / "arti.st")
     restored = core_layer()
     loaded = arti.load(saved.weights_path, model=restored)
-    torch.manual_seed(301)
+    torch.manual_seed(31)
     actual = restored(x, coord=coord).y.detach()
 
     assert torch.allclose(actual, expected)
@@ -68,7 +68,14 @@ def test_arti_st_literal_decoder_resources_are_strictly_separated(tmp_path: Path
     assert loaded.manifest["architecture"]["config"]["context_dim"] == 7
     assert loaded.manifest["architecture"]["config"]["condition_on_vocab"] is True
     with safe_open(saved.weights_path, framework="pt", device="cpu") as handle:
-        assert set(handle.metadata() or {}) == {"format", "format_version", "kind", "scope"}
+        assert set(handle.metadata() or {}) == {
+            "format",
+            "format_version",
+            "kind",
+            "scope",
+            "component_graph_sha256",
+            "state_schema_sha256",
+        }
         assert all("glyph" not in key and "vocab" not in key for key in handle.keys())
 
 
@@ -89,7 +96,7 @@ def test_arti_st_sha256_detects_weight_corruption(tmp_path: Path) -> None:
 def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Path) -> None:
     saved = arti.save(nn.Linear(4, 3), tmp_path / "arti.st")
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
-    manifest["package_version"] = "0.99.0"
+    manifest["package_version"] = "3.99.0"
     saved.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
     lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
@@ -100,7 +107,7 @@ def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Pa
     try:
         arti.load(saved.weights_path)
     except ValueError as exc:
-        assert "incompatible with ARTI" in str(exc)
+        assert "newer than ARTI" in str(exc)
     else:
         raise AssertionError("future alpha package should fail compatibility validation")
 
@@ -139,47 +146,6 @@ def test_arti_st_checkpoint_resume_matches_continuous_training(tmp_path: Path) -
     for expected, actual in zip(model.parameters(), restored.parameters(), strict=True):
         assert torch.allclose(actual, expected)
     assert restored_scheduler.state_dict() == scheduler.state_dict()
-
-
-def test_arti_st_legacy_pt_migration_uses_tensor_state(tmp_path: Path) -> None:
-    torch.manual_seed(11)
-    model = nn.Linear(3, 2)
-    legacy = tmp_path / "legacy.pt"
-    torch.save({"state_dict": model.state_dict(), "epoch": 4}, legacy)
-
-    migrated = arti.migrate_pt(legacy, tmp_path / "arti.st", model=nn.Linear(3, 2))
-    restored = nn.Linear(3, 2)
-    result = arti.load(migrated.weights_path, model=restored)
-
-    assert result.manifest["legacy_migration"]["selected_state_key"] == "state_dict"
-    assert result.manifest["legacy_migration"]["source_sha256"]
-    for expected, actual in zip(model.parameters(), restored.parameters(), strict=True):
-        assert torch.equal(actual, expected)
-
-
-def test_arti_st_rejects_non_tensor_legacy_payload(tmp_path: Path) -> None:
-    legacy = tmp_path / "legacy.pt"
-    torch.save({"message": "not a state dict", "epoch": 2}, legacy)
-
-    try:
-        arti.migrate_pt(legacy, tmp_path / "arti.st")
-    except ValueError as exc:
-        assert "tensor-only state dictionary" in str(exc)
-    else:
-        raise AssertionError("non-tensor legacy payload should not migrate")
-
-
-def test_arti_st_migrates_real_legacy_fit_adapter_artifact(tmp_path: Path) -> None:
-    model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 2))
-    legacy = arti.fit(model, sample_batch=torch.randn(3, 4), target_modules="0").export(tmp_path / "adapter.pt")
-
-    migrated = arti.migrate_pt(legacy, tmp_path / "arti.st")
-    loaded = arti.load(migrated.weights_path)
-
-    assert loaded.manifest["weight_scope"] == "trainable"
-    assert loaded.manifest["legacy_migration"]["selected_state_key"] == "adapter_state_dict"
-    assert loaded.state_dict
-    assert all("adapter" in key for key in loaded.state_dict)
 
 
 def test_fit_result_exports_trainable_arti_st_by_default(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 
-from .layered_recall import LayerRecall, LayerRecallSpec, LayerRecallStack, LayeredRecallConfig
+from ._layered_recall import LayerRecall, LayerRecallSpec, LayerRecallStack, LayeredRecallConfig
 
 
 TRACE_KINDS = ("clean", "corrupt_single", "corrupt_combined", "unseen")

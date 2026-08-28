@@ -245,8 +245,59 @@ class ARTIConfig:
             "required_inputs": required_inputs,
             "accepted_inputs": accepted_inputs,
             "capacities": capacities,
+            "context_contract": self.context_contract(),
             "fallback_context": self.fallback_context,
             "synthetic_context": self.fallback_context != "none",
+        }
+
+    def context_contract(self) -> dict[str, Any]:
+        """Return the runtime tensor contract for strict ``TensorContext`` calls."""
+
+        return {
+            "version": 1,
+            "valid_mask": {
+                "shape": ["B", "N"],
+                "dtype": "bool",
+                "required": False,
+            },
+            "visibility": {
+                "shape": ["B", "N", "N"],
+                "dtype": "bool",
+                "required": self.require_visibility,
+                "used_by": {
+                    "pairwise_context": self.use_pairwise_context,
+                    "virtual_interface": self.use_virtual_interface,
+                },
+            },
+            "frame": {
+                "mode": self.coord_frame_mode,
+                "coord": {
+                    "shape": ["B", "N", self.coord_dim],
+                    "dtype": "float",
+                    "required": self.require_coord,
+                },
+                "observer_coord": {
+                    "shapes": [
+                        ["B", self.coord_dim],
+                        ["B", 1, self.coord_dim],
+                        ["B", "N", self.coord_dim],
+                    ],
+                    "dtype": "float",
+                    "accepted": self.coord_frame_mode != "none",
+                },
+                "frame_operators": {
+                    "shape": [self.coord_dim, self.input_dim, self.input_dim],
+                    "dtype": "float",
+                    "required": self.coord_frame_mode == "operator_bank",
+                },
+            },
+            "legacy_arguments": [
+                "coord",
+                "mask",
+                "visibility",
+                "frame_operators",
+                "observer_coord",
+            ],
         }
 
     def diff(self, other: "ARTIConfig") -> dict[str, dict[str, Any]]:

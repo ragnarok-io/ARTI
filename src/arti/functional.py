@@ -26,7 +26,6 @@ def _half_survival(
             raise ValueError("scale must be positive")
     elif not math.isfinite(scale) or scale <= 0:
         raise ValueError("scale must be positive")
-
     if isinstance(threshold, Tensor):
         if torch.any(~torch.isfinite(threshold)):
             raise ValueError("threshold must be finite")
@@ -127,6 +126,7 @@ def half(
     stochastic: bool = True,
     straight_through: bool = False,
     generator: torch.Generator | None = None,
+    uniform: Tensor | None = None,
     survival_fn: Callable[[Tensor], Tensor] | None = None,
     context_mode: str = "none",
     context_axes: int | Sequence[int] = -1,
@@ -136,12 +136,13 @@ def half(
 
     ``half`` computes elementwise salience as ``abs(x)``, converts insufficient
     salience into ``D = relu((threshold - salience) / scale)``, then applies
-    ``q = base ** D``. With ``context_mode="contextual"``, bounded salience
-    evidence over ``context_axes`` influences the same-shape survival tensor.
-    Deterministic mode returns ``q * x``. In stochastic mode, ``q`` is used as
-    the survival probability and dropped features are set to zero without
-    inverted-dropout rescaling. The stochastic choice is explicit and is not
-    tied to a module's ``train``/``eval`` state.
+    ``q = base ** D``. With ``context_mode="contextual"``, a bounded salience
+    summary over ``context_axes`` provides additional evidence before the same
+    survival curve is evaluated. The output remains ``q * x`` and keeps the
+    input shape. Deterministic mode returns ``q * x``. In stochastic mode,
+    ``q`` is used as the survival probability and dropped features are set to
+    zero without inverted-dropout rescaling. The stochastic choice is explicit
+    and is not tied to a module's ``train``/``eval`` state.
 
     ``straight_through`` keeps the sampled forward value while using the
     differentiable survival probability in the backward pass. It is useful
@@ -176,12 +177,30 @@ def half(
     else:
         survival = _half_survival(x, threshold=threshold, base=base, scale=scale)
     if stochastic:
-        try:
-            mask = torch.bernoulli(survival, generator=generator)
-        except TypeError:
-            if generator is not None:
-                raise
-            mask = torch.bernoulli(survival)
+        if generator is not None and uniform is not None:
+            raise ValueError("generator and uniform are mutually exclusive")
+        if uniform is not None:
+            if (
+                not isinstance(uniform, Tensor)
+                or uniform.shape != x.shape
+                or uniform.device != x.device
+                or not uniform.is_floating_point()
+            ):
+                raise ValueError(
+                    "uniform must be a floating Tensor matching x shape and device"
+                )
+            if not bool(torch.isfinite(uniform).all()):
+                raise ValueError("uniform must contain only finite values")
+            if bool(torch.any(uniform < 0)) or bool(torch.any(uniform >= 1)):
+                raise ValueError("uniform values must be in [0, 1)")
+            mask = (uniform < survival).to(dtype=survival.dtype)
+        else:
+            try:
+                mask = torch.bernoulli(survival, generator=generator)
+            except TypeError:
+                if generator is not None:
+                    raise
+                mask = torch.bernoulli(survival)
         if straight_through:
             mask = mask + survival - survival.detach()
         return mask * x

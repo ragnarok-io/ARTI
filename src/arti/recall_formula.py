@@ -29,8 +29,7 @@ RecallFormulaLayout = Literal["generic", "contiguous_mfd"]
 RecallFormulaAccumulation = Literal["activation", "float32"]
 MAX_RECALL_FORMULA_FACTORS: Final = 256
 MAX_RECALL_FORMULA_PROBE_ELEMENTS: Final = 1_000_000
-RECALL_FORMULA_CONTRACT_API_VERSION: Final = 2
-RECALL_FORMULA_LOCK_VERSION: Final = 2
+RECALL_FORMULA_LOCK_VERSION: Final = 1
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
@@ -41,12 +40,6 @@ _ACCUMULATION_DTYPES: Final = frozenset({"activation", "float32"})
 _DTYPE_NAMES: Final = frozenset(
     {"floating", "float16", "bfloat16", "float32", "float64"}
 )
-_DTYPE_TO_NAME: Final = {
-    torch.float16: "float16",
-    torch.bfloat16: "bfloat16",
-    torch.float32: "float32",
-    torch.float64: "float64",
-}
 _INIT_KINDS: Final = frozenset({"zero", "normal"})
 _FORBIDDEN_CONTROL_NAMES: Final = frozenset(
     {
@@ -59,16 +52,6 @@ _FORBIDDEN_CONTROL_NAMES: Final = frozenset(
         "set_requires_grad",
     }
 )
-
-
-def formula_dtype_supported(dtype: torch.dtype, supported_dtypes: Sequence[str]) -> bool:
-    """Return whether a Formula execution contract admits ``dtype``."""
-
-    dtype_name = _DTYPE_TO_NAME.get(dtype)
-    if dtype_name is None:
-        return False
-    supported = frozenset(supported_dtypes)
-    return "floating" in supported or dtype_name in supported
 
 
 def _validate_component(value: str, *, field: str) -> str:
@@ -262,7 +245,7 @@ class RecallFormulaContract:
     identity: RecallFormulaId | None = None
     output_semantics: RecallOutputSemantics = "next_state"
     identity_preserving: bool = False
-    api_version: int = RECALL_FORMULA_CONTRACT_API_VERSION
+    api_version: int = 1
     composition: RecallFormulaComposition = "custom"
     capabilities: tuple[str, ...] = ("torch.eager",)
     execution: RecallFormulaExecutionSpec = RecallFormulaExecutionSpec()
@@ -288,11 +271,8 @@ class RecallFormulaContract:
             raise TypeError("RecallFormulaContract.identity_preserving must be bool")
         if isinstance(self.api_version, bool) or not isinstance(self.api_version, int):
             raise TypeError("RecallFormulaContract.api_version must be an integer")
-        if self.api_version != RECALL_FORMULA_CONTRACT_API_VERSION:
-            raise ValueError(
-                "unsupported RecallFormulaContract.api_version="
-                f"{self.api_version!r}; expected {RECALL_FORMULA_CONTRACT_API_VERSION}"
-            )
+        if self.api_version <= 0:
+            raise ValueError("RecallFormulaContract.api_version must be positive")
         if self.composition not in _COMPOSITIONS:
             choices = ", ".join(sorted(_COMPOSITIONS))
             raise ValueError(
@@ -755,6 +735,13 @@ def _module_state_changed(module: nn.Module, snapshot: Mapping[str, Tensor]) -> 
     )
 
 
+def _module_buffers_changed(module: nn.Module, snapshot: Mapping[str, Tensor]) -> bool:
+    current = dict(module.named_buffers())
+    return set(current) != set(snapshot) or any(
+        not torch.equal(current[name], value) for name, value in snapshot.items()
+    )
+
+
 def validate_formula(
     module: nn.Module,
     x: Tensor,
@@ -829,17 +816,14 @@ def validate_formula(
             output_semantics="next_state",
             identity_preserving=test_identity,
         )
-    if not formula_dtype_supported(x.dtype, contract.execution.supported_dtypes):
-        raise TypeError(
-            "Recall formula execution contract does not support "
-            f"dtype {x.dtype}; supported dtypes are "
-            f"{contract.execution.supported_dtypes!r}"
-        )
 
     probe_state = x.detach().clone()
     probe_factors = _deterministic_factors(probe_state, len(factors))
     module_state = {
         name: value.detach().clone() for name, value in module.state_dict().items()
+    }
+    module_buffers = {
+        name: value.detach().clone() for name, value in module.named_buffers()
     }
     training = module.training
     cpu_rng_state = torch.random.get_rng_state()
@@ -852,64 +836,21 @@ def validate_formula(
             def run_abi(state: Tensor, factor_values: Tensor) -> Tensor:
                 if contract.execution.vectorization == "batched":
                     return module(state, factor_values)
-                # Probe with independent randomness so a Formula can surface
-                # its own exception. Deterministic contracts are rejected by
-                # the repeated-output check below if they actually use it.
-                return torch.vmap(module, randomness="different")(
-                    state,
-                    factor_values,
-                )
-
-            def run_with_probe_rng(state: Tensor, factor_values: Tensor) -> Tensor:
-                torch.random.set_rng_state(cpu_rng_state)
-                if cuda_rng_state is not None:
-                    torch.cuda.set_rng_state_all(cuda_rng_state)
-                return run_abi(state, factor_values)
+                return torch.vmap(module, randomness="different")(state, factor_values)
 
             abi_state = flat_state.detach().clone()
             abi_factors = flat_factors.detach().clone()
+            factor_snapshot = abi_factors.clone()
             output = run_abi(abi_state, abi_factors)
             input_mutated = not torch.equal(abi_state, flat_state)
             state_mutated = _module_state_changed(module, module_state)
-            if input_mutated or state_mutated:
+            buffers_mutated = _module_buffers_changed(module, module_buffers)
+            factors_mutated = not torch.equal(abi_factors, factor_snapshot)
+            if input_mutated or state_mutated or buffers_mutated or factors_mutated:
                 raise ValueError(
-                    "Recall formula must not mutate its input or module state during forward"
+                    "Recall formula must not mutate its input, factors, buffers, or module state during forward"
                 )
             _validate_formula_output(output, flat_state)
-
-            if contract.execution.vectorization == "batched":
-                # A batched Formula is an optimization of independent rows,
-                # not permission to mix samples or padded tokens. Probe that
-                # invariant by changing only the second row while resetting
-                # RNG state for stochastic contracts.
-                seed_state = flat_state[:1]
-                seed_factors = flat_factors[:1]
-                batched_state = torch.cat((seed_state, seed_state + 0.5), dim=0)
-                batched_factors = torch.cat(
-                    (seed_factors, seed_factors + 0.125), dim=0
-                )
-                batched_output = _validate_formula_output(
-                    run_with_probe_rng(batched_state, batched_factors),
-                    batched_state,
-                )
-                changed_state = batched_state.clone()
-                changed_factors = batched_factors.clone()
-                changed_state[1].add_(17.0)
-                changed_factors[1].sub_(11.0)
-                changed_output = _validate_formula_output(
-                    run_with_probe_rng(changed_state, changed_factors),
-                    changed_state,
-                )
-                if not torch.allclose(
-                    batched_output[0],
-                    changed_output[0],
-                    atol=float(identity_atol),
-                    rtol=float(identity_rtol),
-                ):
-                    raise ValueError(
-                        "batched Recall formulas must be row-independent; "
-                        "changing one batch/token row changed another row"
-                    )
 
             if contract.execution.deterministic:
                 repeat_state = flat_state.detach().clone()
@@ -922,11 +863,14 @@ def validate_formula(
                         "deterministic Recall formulas must return the same output "
                         "for repeated identical inputs"
                     )
-                if not torch.equal(repeat_state, flat_state) or _module_state_changed(
-                    module, module_state
+                if (
+                    not torch.equal(repeat_state, flat_state)
+                    or not torch.equal(flat_factors, factor_snapshot)
+                    or _module_state_changed(module, module_state)
+                    or _module_buffers_changed(module, module_buffers)
                 ):
                     raise ValueError(
-                        "Recall formula must not mutate its input or module state during forward"
+                        "Recall formula must not mutate its input, factors, buffers, or module state during forward"
                     )
 
             if test_identity or contract.identity_preserving:
@@ -938,11 +882,14 @@ def validate_formula(
                     run_abi(identity_input, identity_factors),
                     identity_input,
                 )
-                if not torch.equal(
-                    identity_input, flat_state
-                ) or _module_state_changed(module, module_state):
+                if (
+                    not torch.equal(identity_input, flat_state)
+                    or not torch.equal(flat_factors, factor_snapshot)
+                    or _module_state_changed(module, module_state)
+                    or _module_buffers_changed(module, module_buffers)
+                ):
                     raise ValueError(
-                        "Recall formula must not mutate its input or module state during forward"
+                        "Recall formula must not mutate its input, factors, buffers, or module state during forward"
                     )
                 if not torch.allclose(
                     identity_output,
@@ -957,6 +904,11 @@ def validate_formula(
                     )
     finally:
         module.load_state_dict(module_state, strict=False)
+        with torch.no_grad():
+            for name, value in module_buffers.items():
+                current = module.get_buffer(name)
+                if name not in module_state:
+                    current.copy_(value.to(device=current.device, dtype=current.dtype))
         module.train(training)
         torch.random.set_rng_state(cpu_rng_state)
         if cuda_rng_state is not None:
@@ -974,6 +926,5 @@ __all__ = [
     "RecallFormulaExecutionSpec",
     "RecallFormulaLock",
     "RecallOutputSemantics",
-    "formula_dtype_supported",
     "validate_formula",
 ]

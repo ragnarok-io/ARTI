@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 import torch
-import copy
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
@@ -17,19 +15,13 @@ from .fit.insertion import get_parent_module, set_child_module
 from .fit.scanner import run_model, scan_model
 from .nn import Half
 from .recall_workspace import RecallWorkspace
-from .recall_artifacts import (
-    RecallArtifactSpec,
-    RecallExpertPool,
-    export_recall_artifact,
-    load_recall_artifact,
-    module_structure_fingerprint,
-)
-from .serialization import load as load_arti
 from .tensor_boundary import TensorLayout, find_primary_tensor, replace_tensor_at_path
 
 
 class LayerRecall(nn.Module):
     """Low-rank candidate-trace Recall used at one named hidden layer."""
+
+    output_semantics = "delta"
 
     def __init__(
         self,
@@ -141,6 +133,8 @@ class LayerRecall(nn.Module):
 class LayerRecallStack(nn.Module):
     """Multiple independent Recall lines attached to the same physical layer."""
 
+    output_semantics = "delta"
+
     def __init__(self, branches: Iterable[LayerRecall], *, combine: str = "sum") -> None:
         super().__init__()
         values = tuple(branches)
@@ -217,6 +211,10 @@ class LayerRecallStack(nn.Module):
 
 class LayerRecallWrapper(nn.Module):
     """Preserve a base layer's output contract while adding one Recall delta."""
+
+    # The wrapper returns the host layer's output tree, not a standalone delta.
+    # Marking it prevents accidental use as a RecallRefiner producer.
+    output_semantics = "layer_output"
 
     def __init__(
         self,
@@ -680,95 +678,6 @@ class LayeredRecallModel(nn.Module):
     def recall_parameters(self) -> Iterable[nn.Parameter]:
         for wrapper in self.wrappers.values():
             yield from wrapper.recall.parameters()
-
-    def export_layer(
-        self,
-        layer_path: str,
-        path: str | Path,
-        *,
-        capability: str = "layered-trajectory-repair",
-        training_metadata: Mapping[str, Any] | None = None,
-    ):
-        wrapper = self._wrapper_at(layer_path)
-        metadata = {"layer_path": layer_path, **dict(training_metadata or {})}
-        spec = RecallArtifactSpec(
-            capability=capability,
-            base_model_fingerprint=module_structure_fingerprint(self.model),
-            injection_fingerprint=module_structure_fingerprint(wrapper.recall),
-            visibility_policy="layer-local-mask",
-            training_metadata=metadata,
-        )
-        return export_recall_artifact(wrapper.recall, path, spec)
-
-    def load_layer(self, layer_path: str, path: str | Path, *, map_location: str | torch.device = "cpu"):
-        self._validate_artifact_layer(layer_path, path)
-        wrapper = self._wrapper_at(layer_path)
-        return load_recall_artifact(path, wrapper.recall, base_model=self.model, injection_module=wrapper.recall, map_location=map_location)
-
-    def concat_layer(
-        self,
-        layer_path: str,
-        artifacts: Mapping[str, str | Path],
-        *,
-        map_location: str | torch.device = "cpu",
-    ) -> LayerRecall:
-        wrapper = self._wrapper_at(layer_path)
-        if isinstance(wrapper.recall, LayerRecallStack):
-            raise ValueError("concat_layer requires a single Recall line; stacked layers must be exported or loaded as a whole")
-        pool = RecallExpertPool(wrapper.recall, base_model=self.model)
-        for name, path in artifacts.items():
-            self._validate_artifact_layer(layer_path, path)
-            pool.load_expert(name, path, map_location=map_location)
-        merged = pool.concatenate(parameter="bank")
-        if not isinstance(merged, LayerRecall):
-            raise TypeError("concatenated expert is not a LayerRecall")
-        merged.slots = int(merged.bank.shape[0])
-        wrapper.recall = merged
-        return merged
-
-    def append_layer_artifacts(
-        self,
-        layer_path: str,
-        artifacts: Mapping[str, str | Path],
-        *,
-        map_location: str | torch.device = "cpu",
-        combine: str = "sum",
-        include_current: bool = True,
-    ) -> LayerRecallStack:
-        """Append complete independent Recall lines without remixing old weights."""
-
-        wrapper = self._wrapper_at(layer_path)
-        current = list(wrapper.recall.branches) if isinstance(wrapper.recall, LayerRecallStack) else [wrapper.recall]
-        if not artifacts:
-            raise ValueError("artifacts must contain at least one independent Recall line")
-        template = current[0]
-        appended: list[LayerRecall] = []
-        for name, path in artifacts.items():
-            if not name:
-                raise ValueError("artifact names must not be empty")
-            self._validate_artifact_layer(layer_path, path)
-            branch = copy.deepcopy(template)
-            load_recall_artifact(
-                path,
-                branch,
-                base_model=self.model,
-                injection_module=branch,
-                map_location=map_location,
-            )
-            reference = next(template.parameters(), None)
-            if reference is not None:
-                branch.to(device=reference.device, dtype=reference.dtype)
-            appended.append(branch)
-        lines = [*current, *appended] if include_current else appended
-        stack = LayerRecallStack(lines, combine=combine)
-        wrapper.recall = stack
-        return stack
-
-    def _validate_artifact_layer(self, layer_path: str, path: str | Path) -> None:
-        loaded = load_arti(path)
-        metadata = loaded.manifest.get("architecture", {}).get("config", {}).get("recall_expert", {}).get("training_metadata", {})
-        if metadata.get("layer_path") != layer_path:
-            raise ValueError(f"Recall artifact belongs to layer {metadata.get('layer_path')!r}, not {layer_path!r}")
 
     def _module_at(self, path: str) -> nn.Module:
         module: nn.Module = self.model

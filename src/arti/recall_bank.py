@@ -1,0 +1,61 @@
+"""Canonical public Recall Bank API.
+
+The implementation is kept in ``recall_experts`` while the public surface is
+named for the asset users actually save, load, inspect, and compose.
+"""
+
+from .recall_experts import (
+    RECALL_BANK_ARTIFACT_KIND,
+    RECALL_BANK_ARTIFACT_VERSION,
+    RECALL_BANK_PROVENANCE_VERSION,
+    RecallCapacityDecision,
+    RecallCapacityPlan,
+    RecallBankAsset,
+    RecallBankAssembly,
+    RecallBankContract,
+    RecallBankError,
+    RecallBankLayout,
+    RecallBankMember,
+    RecallBankProvenance,
+    canonical_tensor_state_sha256,
+    create_recall_bank_contract,
+    freeze_for_recall_bank,
+    inspect_recall_bank,
+    load_recall_bank,
+    migrate_recall_bank,
+    module_behavior_fingerprint,
+    module_structure_fingerprint,
+    module_value_sha256,
+    recall_bank_artifact_path,
+    recall_bank_parameter_names,
+    save_recall_bank,
+    validate_recall_bank_contract,
+)
+
+__all__ = [
+    "RECALL_BANK_ARTIFACT_KIND",
+    "RECALL_BANK_ARTIFACT_VERSION",
+    "RECALL_BANK_PROVENANCE_VERSION",
+    "RecallCapacityDecision",
+    "RecallCapacityPlan",
+    "RecallBankAsset",
+    "RecallBankAssembly",
+    "RecallBankContract",
+    "RecallBankError",
+    "RecallBankLayout",
+    "RecallBankMember",
+    "RecallBankProvenance",
+    "canonical_tensor_state_sha256",
+    "create_recall_bank_contract",
+    "freeze_for_recall_bank",
+    "inspect_recall_bank",
+    "load_recall_bank",
+    "migrate_recall_bank",
+    "module_behavior_fingerprint",
+    "module_structure_fingerprint",
+    "module_value_sha256",
+    "recall_bank_artifact_path",
+    "recall_bank_parameter_names",
+    "save_recall_bank",
+    "validate_recall_bank_contract",
+]

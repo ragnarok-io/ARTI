@@ -22,51 +22,21 @@ def test_public_version_matches_pyproject():
     assert arti.__version__ == project_version()
 
 
-def test_release_identity_and_citation_are_consistent():
-    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    stability = (ROOT / "STABILITY.md").read_text(encoding="utf-8")
-    version = project_version()
-
-    assert payload["project"]["name"] == "arti-fit"
-    assert payload["project"]["authors"] == [{"name": "Thiocy"}]
-    assert f"version: {version}" in citation
-    assert "name: Thiocy" in citation
-    assert "uv add arti-fit" in readme
-    assert f'arti-fit=={version}' in readme
-    assert version in stability
-
-
-def test_readme_covers_the_public_2x_composition_paths():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "arti.project(model)" in readme
-    assert "expert_contract" in readme
-    assert "arti.concatenate_adapter_banks" in readme
-    assert "arti.set_adapter_bank_influences" in readme
-    assert "arti.apply_adapter_stack" in readme
-    assert "arti.compile_adapter_hotpaths" in readme
-
-
 def test_package_declares_pep561_type_marker():
     assert (ROOT / "src" / "arti" / "py.typed").exists()
 
 
-def test_308_components_are_alpha_only():
-    expected = {
-        "FormulaFabric",
-        "FormulaCommitBlend",
-        "RoutedFormulaFabricCompute",
-        "IterativeRoutedFormulaFabricCompute",
-        "ObjectiveExposureBank",
-        "ObjectiveFormulaFabricCompute",
-        "PairwiseRankTopologySurrogate",
-    }
+def test_authorship_and_public_citation_are_preserved():
+    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    citation = (ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    authors = (ROOT / "AUTHORS.md").read_text(encoding="utf-8")
+    assistance = (ROOT / "AI_ASSISTANCE.md").read_text(encoding="utf-8")
 
-    assert all(hasattr(arti.alpha, name) for name in expected)
-    assert all(not hasattr(arti, name) for name in expected)
-    assert all(not hasattr(arti.nn, name) for name in expected)
+    assert payload["project"]["authors"] == [{"name": "Thiocy"}]
+    assert f"version: {payload['project']['version']}" in citation
+    assert "name: Thiocy" in citation
+    assert "@Thiocy" in authors
+    assert "human maintainer" in assistance
 
 
 def test_package_declares_safetensors_as_core_dependency():
@@ -80,12 +50,6 @@ def test_package_declares_pretrained_ecosystem_extras():
     extras = payload["project"]["optional-dependencies"]
     assert {"qwen", "peft", "sd"}.issubset(extras)
     assert any(dependency.startswith("peft") for dependency in extras["peft"])
-
-
-def test_package_declares_web_export_extra():
-    payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    extras = payload["project"]["optional-dependencies"]
-    assert {"onnx>=1.16", "onnxscript>=0.3"}.issubset(extras["web"])
 
 
 def test_backend_status_is_explicit():

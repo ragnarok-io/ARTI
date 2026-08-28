@@ -6,13 +6,42 @@ explicit and to leave room for future ``arti.jax`` modules.
 """
 
 from ..blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
-from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIExpertSet, ARTILayerInfo, discover_layers
+from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIBankSet, ARTILayerInfo, discover_layers
 from ..attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
 from ..attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, recall_alignment_objective, resolve_attachment_objective
 from ..attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from ..config import ARTIConfig
+from ..component_registry import (
+    COMPONENT_PROVENANCE_VERSION,
+    COMPONENT_STATE_CONTRACT_VERSION,
+    ComponentCompatibilityError,
+    ComponentRef,
+    ComponentRegistration,
+    ComponentRegistry,
+    ComponentRegistryError,
+    ComponentSpec,
+    DuplicateComponentError,
+    InvalidComponentRefError,
+    UnknownComponentError,
+    component_graph_fingerprint,
+    component_catalog,
+    component_manifest,
+    component_provenance,
+    component_ref,
+    component_spec,
+    component_state_contract,
+    get_component_registry,
+    register_component,
+    resolve_component,
+    validate_component_provenance,
+    validate_component_state_contract,
+    verify_component_provenance,
+    state_dict_schema,
+)
+from ..context import FrameContext, FrameMode, TensorContext, validate_valid_mask, validate_visibility
 from ..conversation import ParticipantContextTensors, build_participant_context, last_non_assistant_participant
 from ..distinctness import LatentDistinctnessReport, assert_latent_distinct, latent_distinctness_report
+from ..emission import EmissionRouter, EmissionRouterConfig, EmissionRouterOutput, build_stream_visibility, stream_emit_mask
 from ..fit import ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, reset_recall_queries, resolve_fit_config_mechanism, resolve_objectives, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from ..fit import concatenate_adapter_banks, set_adapter_bank_influences, set_adapter_bank_weights
 from .cuda import cuda_device_report, cuda_runtime_available, cuda_smoke_report, require_cuda
@@ -55,18 +84,6 @@ from ..models import ARTIClassifier
 from ..nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, Recall, RecallRefiner, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
 from ..usage import FeatureConfig, features, layer_profiles, profile
 from ..inspection import InspectionReport, inspect
-from ..layered_recall import (
-    LayerRecall,
-    LayerRecallSpec,
-    LayerRecallStack,
-    LayerRecallWrapper,
-    LayeredRecallCalibration,
-    LayeredRecallConfig,
-    LayeredRecallLoss,
-    LayeredRecallModel,
-    calibrate_layered_recall,
-    layered_recall_trajectory_loss,
-)
 from ..recall_topology import (
     LayeredRecallBudget,
     LayeredRecallCandidate,
@@ -79,15 +96,46 @@ from ..recall_topology import (
     screen_layered_recall_candidate,
 )
 from ..visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
+from ..recall_refine import (
+    RECALL_TRACE_SCHEMA_VERSION,
+    RECALL_TRACE_V2_SCHEMA_VERSION,
+    AdaptiveRefinePolicy,
+    RecallTraceV2,
+    RefineBudget,
+    RefineStop,
+    RecallRoutePlan,
+    RecallRouteStack,
+    RecallStopReason,
+    RecallTrace,
+    RefinePolicy,
+)
 from ..outputs import ARTIOutput
 from ..pulse import PulseCompressor, PulseOutput, assert_pulse_distinct, fixed_width_pulse_ids, pulse_compress, pulse_distinctness_report
 from ..pretrained import ARTIPlan, ARTIPretrained, ComponentPlan, PretrainedExportResult, PretrainedFitResult, TrainingSpec, from_pretrained, model_structure_fingerprint, pretrained, validate_pretrained_lock
 from ..providers import ARTIProviderError, DiffusersProvider, PEFTProvider, PretrainedProvider, ProviderInspection, TorchProvider, TransformersProvider, get_provider as get_pretrained_provider, provider_report, register_provider
-from ..recall_artifacts import RECALL_ARTIFACT_KIND, RECALL_ARTIFACT_VERSION, RecallArtifactSpec, RecallCapacityDecision, RecallCapacityPlan, RecallExpertPool, RecallExpertRegistry, export_recall_artifact, load_recall_artifact, module_structure_fingerprint, recall_artifact_path
-from ..recall_experts import RECALL_BANK_ARTIFACT_KIND, RECALL_BANK_ARTIFACT_VERSION, RecallBankSpec, RecallExpertAsset, RecallExpertAssembly, RecallExpertContract, RecallExpertLayout, canonical_tensor_state_sha256, create_recall_expert_contract, export_recall_expert_bank, freeze_for_recall_expert, inspect_recall_expert_bank, load_recall_expert_bank, module_value_sha256, recall_bank_parameter_names, validate_recall_expert_contract
+from ..recall_bank import RecallCapacityDecision, RecallCapacityPlan
+from ..recall_bank import RECALL_BANK_ARTIFACT_KIND, RECALL_BANK_ARTIFACT_VERSION, RECALL_BANK_PROVENANCE_VERSION, RecallBankAsset, RecallBankAssembly, RecallBankContract, RecallBankError, RecallBankLayout, RecallBankMember, RecallBankProvenance, canonical_tensor_state_sha256, create_recall_bank_contract, freeze_for_recall_bank, inspect_recall_bank, load_recall_bank, migrate_recall_bank, module_structure_fingerprint, module_value_sha256, recall_bank_parameter_names, save_recall_bank, validate_recall_bank_contract
 from ..runtime_vocab import LiteralInput, LiteralOutputHead, LiteralVocabCache, LiteralVocabModel, OutputLexiconContext, RuntimeVocabEncoder, RuntimeVocabHead, RuntimeVocabInput, RuntimeVocabModel, RuntimeVocabPulseAdapter, attach_runtime_vocab_semantics, flatten_vocab_tensor, gather_runtime_vocab, permute_runtime_vocab, remap_token_ids
 from ..source_integrity import SOURCE_INTEGRITY_MODES, SourceIntegrityBasis, SourceIntegrityCarrier, SourceIntegrityReport, assert_source_integrity, decode_source_tokens, encode_source_tokens, make_source_integrity_basis, read_sources, source_basis_orthogonality_loss, source_integrity_loss, source_integrity_report, superpose_sources
-from ..serialization import ARTI_ST_FORMAT, ARTI_ST_FORMAT_VERSION, ARTILoadResult, ARTISaveResult, load, migrate_pt, save
+from ..serialization import ARTI_ST_FORMAT, ARTI_ST_FORMAT_VERSION, ARTILoadResult, ARTISaveResult, load, save
+from ..survival import (
+    DuplicateSurvivalError,
+    ExponentialSurvival,
+    InvalidSurvivalRefError,
+    SurvivalDescription,
+    SurvivalOperator,
+    SurvivalRef,
+    SurvivalRegistration,
+    SurvivalRegistry,
+    SurvivalRegistryError,
+    UnknownSurvivalError,
+    describe_survival,
+    list_survivals,
+    register_survival,
+    resolve_survival,
+    survival_is_registered,
+    validate_survival_config,
+)
 from ..text_bitmap import BitmapTextConfig, BitmapTextRenderer, BitmapVocabReport, assert_bitmap_vocab_distinct, bitmap_vocab_report, render_text_bitmap, render_text_vocab
 from ..text_tensor import TEXT_CONTROL_CHANNELS, TEXT_IDENTITY_MODES, TextControlKind, TextTensorConfig, TextTensorLayout, TextTensorRenderer, render_text_layout, render_text_tensor
 from ..training import experiential_recall_alignment_loss, experiential_recall_selectivity_loss, recall_route_exterior_penalty, virtual_recall_alignment_loss
@@ -98,7 +146,7 @@ __all__ = [
     "ARTIAttachTrainingConfig",
     "ARTIAttachment",
     "ARTIAttachmentSummary",
-    "ARTIExpertSet",
+    "ARTIBankSet",
     "ARTILayerInfo",
     "discover_layers",
     "load_attach_config",
@@ -117,6 +165,68 @@ __all__ = [
     "model_loss_objective",
     "resolve_attachment_objective",
     "ARTIConfig",
+    "COMPONENT_PROVENANCE_VERSION",
+    "COMPONENT_STATE_CONTRACT_VERSION",
+    "ComponentCompatibilityError",
+    "ComponentRef",
+    "ComponentRegistration",
+    "ComponentRegistry",
+    "ComponentRegistryError",
+    "ComponentSpec",
+    "DuplicateComponentError",
+    "InvalidComponentRefError",
+    "UnknownComponentError",
+    "RECALL_TRACE_SCHEMA_VERSION",
+    "RecallRoutePlan",
+    "RecallRouteStack",
+    "RecallStopReason",
+    "RecallTrace",
+    "RecallTraceV2",
+    "RefinePolicy",
+    "AdaptiveRefinePolicy",
+    "RefineBudget",
+    "RefineStop",
+    "RECALL_TRACE_V2_SCHEMA_VERSION",
+    "component_graph_fingerprint",
+    "component_catalog",
+    "component_manifest",
+    "component_provenance",
+    "component_ref",
+    "component_spec",
+    "component_state_contract",
+    "get_component_registry",
+    "register_component",
+    "resolve_component",
+    "validate_component_provenance",
+    "validate_component_state_contract",
+    "verify_component_provenance",
+    "state_dict_schema",
+    "DuplicateSurvivalError",
+    "ExponentialSurvival",
+    "InvalidSurvivalRefError",
+    "SurvivalDescription",
+    "SurvivalOperator",
+    "SurvivalRef",
+    "SurvivalRegistration",
+    "SurvivalRegistry",
+    "SurvivalRegistryError",
+    "UnknownSurvivalError",
+    "describe_survival",
+    "list_survivals",
+    "register_survival",
+    "resolve_survival",
+    "survival_is_registered",
+    "validate_survival_config",
+    "EmissionRouter",
+    "EmissionRouterConfig",
+    "EmissionRouterOutput",
+    "build_stream_visibility",
+    "stream_emit_mask",
+    "FrameContext",
+    "FrameMode",
+    "TensorContext",
+    "validate_valid_mask",
+    "validate_visibility",
     "ARTIOutput",
     "ARTILayer",
     "ARTILatentTensorLayer",
@@ -137,16 +247,6 @@ __all__ = [
     "layer_profiles",
     "InspectionReport",
     "inspect",
-    "LayerRecall",
-    "LayerRecallWrapper",
-    "LayeredRecallLoss",
-    "LayerRecallSpec",
-    "LayerRecallStack",
-    "LayeredRecallConfig",
-    "LayeredRecallCalibration",
-    "LayeredRecallModel",
-    "calibrate_layered_recall",
-    "layered_recall_trajectory_loss",
     "LayeredRecallBudget",
     "LayeredRecallCandidate",
     "LayeredRecallCost",
@@ -192,33 +292,29 @@ __all__ = [
     "register_provider",
     "get_pretrained_provider",
     "provider_report",
-    "RECALL_ARTIFACT_KIND",
-    "RECALL_ARTIFACT_VERSION",
-    "RecallArtifactSpec",
     "RecallCapacityPlan",
     "RecallCapacityDecision",
-    "RecallExpertRegistry",
-    "RecallExpertPool",
     "module_structure_fingerprint",
-    "recall_artifact_path",
-    "export_recall_artifact",
-    "load_recall_artifact",
     "RECALL_BANK_ARTIFACT_KIND",
     "RECALL_BANK_ARTIFACT_VERSION",
-    "RecallBankSpec",
-    "RecallExpertAsset",
-    "RecallExpertAssembly",
-    "RecallExpertContract",
-    "RecallExpertLayout",
+    "RECALL_BANK_PROVENANCE_VERSION",
+    "RecallBankAsset",
+    "RecallBankAssembly",
+    "RecallBankContract",
+    "RecallBankError",
+    "RecallBankLayout",
+    "RecallBankMember",
+    "RecallBankProvenance",
     "canonical_tensor_state_sha256",
-    "create_recall_expert_contract",
-    "export_recall_expert_bank",
-    "freeze_for_recall_expert",
-    "inspect_recall_expert_bank",
-    "load_recall_expert_bank",
+    "create_recall_bank_contract",
+    "save_recall_bank",
+    "freeze_for_recall_bank",
+    "inspect_recall_bank",
+    "load_recall_bank",
+    "migrate_recall_bank",
     "module_value_sha256",
     "recall_bank_parameter_names",
-    "validate_recall_expert_contract",
+    "validate_recall_bank_contract",
     "ARTIProject",
     "ARTIFitResult",
     "AdapterArtifactManifest",
@@ -357,7 +453,6 @@ __all__ = [
     "ARTILoadResult",
     "save",
     "load",
-    "migrate_pt",
     "SourceIntegrityCarrier",
     "SourceIntegrityReport",
     "SOURCE_INTEGRITY_MODES",

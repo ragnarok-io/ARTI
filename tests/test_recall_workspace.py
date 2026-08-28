@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from arti.layered_recall import LayerRecall
+from arti.experimental import LayerRecall
 from arti.nn import Fold, Half, UnFold
 from arti.recall_workspace import RecallWorkspace
 
@@ -90,7 +90,7 @@ def test_recall_workspace_stages_are_independently_optional(
     assert info["expanded"].shape == (2, expected_slots, 4)
 
 
-def test_recall_workspace_masked_candidates_cannot_change_valid_reads() -> None:
+def test_recall_workspace_masked_candidates_cannot_change_valid_reads(paired_rng) -> None:
     torch.manual_seed(9)
     workspace = _workspace().eval()
     queries = torch.randn(1, 3, 4)
@@ -99,8 +99,10 @@ def test_recall_workspace_masked_candidates_cannot_change_valid_reads() -> None:
     changed = candidates.clone()
     changed[:, 3:] = 1e4
 
-    first = workspace(queries, candidates, candidate_mask=mask)
-    second = workspace(queries, changed, candidate_mask=mask)
+    first, second = paired_rng(
+        lambda: workspace(queries, candidates, candidate_mask=mask),
+        lambda: workspace(queries, changed, candidate_mask=mask),
+    )
     torch.testing.assert_close(first, second)
 
 
@@ -134,17 +136,17 @@ def test_layer_recall_rejects_workspace_rank_mismatch() -> None:
         LayerRecall(dim=8, rank=4, workspace=_workspace(dim=3))
 
 
-def test_recall_workspace_state_dict_round_trip() -> None:
+def test_recall_workspace_state_dict_round_trip(paired_rng) -> None:
     torch.manual_seed(21)
     source = _workspace().eval()
     target = _workspace().eval()
     target.load_state_dict(source.state_dict())
     queries = torch.randn(2, 4, 4)
     candidates = torch.randn(2, 7, 4)
-    torch.manual_seed(72)
-    expected = source(queries, candidates)
-    torch.manual_seed(72)
-    actual = target(queries, candidates)
+    expected, actual = paired_rng(
+        lambda: source(queries, candidates),
+        lambda: target(queries, candidates),
+    )
     torch.testing.assert_close(expected, actual)
 
 

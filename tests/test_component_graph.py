@@ -32,14 +32,16 @@ def test_component_graph_describes_nested_components_and_bindings() -> None:
 
     assert graph["format"] == "arti.component.graph"
     assert graph["root"] == "node-0000"
-    assert any(node["ref"] == "arti/recall@2" for node in graph["nodes"])
+    assert any(node["ref"] == "arti/recall@4" for node in graph["nodes"])
     assert any(node["ref"] == "arti/half@1" for node in graph["nodes"])
-    assert graph["bindings"] == [{"kind": "data", "from": "recall.output", "to": "half.input"}]
+    assert graph["bindings"] == [
+        {"kind": "data", "from": "recall.output", "to": "half.input"}
+    ]
     assert graph["closure_fingerprint"] == arti.component_closure_fingerprint(graph)
     assert validate_component_graph(graph) == graph
 
 
-def test_component_graph_reuses_shared_module_and_records_shared_parameter() -> None:
+def test_component_graph_reuses_node_for_shared_submodule_and_records_shared_parameter() -> None:
     graph = component_graph(Composite(shared=True))
 
     left_mount = next(item for item in graph["mounts"] if item["path"] == "$.left")
@@ -54,6 +56,7 @@ def test_component_graph_round_trip_is_stored_and_checked(tmp_path) -> None:
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
     graph = manifest["architecture"]["component_graph"]
 
+    assert graph["closure_fingerprint"]
     restored = Composite(shared=True).eval()
     loaded = arti.load(saved.weights_path, model=restored)
     assert loaded.manifest["architecture"]["component_graph"] == graph
@@ -68,7 +71,9 @@ def test_component_graph_rejects_shared_parameter_mismatch(tmp_path) -> None:
 
 def test_component_graph_rejects_cycles() -> None:
     graph = component_graph(Composite())
-    graph["edges"].append({"kind": "contains", "from": graph["root"], "to": graph["root"], "mount": "$"})
+    graph["edges"].append(
+        {"kind": "contains", "from": graph["root"], "to": graph["root"], "mount": "$"}
+    )
     graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
 
     with pytest.raises(ComponentGraphError, match="cycle"):

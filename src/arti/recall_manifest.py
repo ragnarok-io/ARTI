@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-RECALL_FORMULA_API_VERSION = 2
+RECALL_FORMULA_API_VERSION = 1
 RECALL_LAYOUT_VERSION = 1
 
 _ORIGINS = frozenset({"builtin", "registered", "custom"})
@@ -134,7 +134,7 @@ class RecallFormulaManifest:
             raise TypeError("portable must be a boolean")
         if origin != "builtin" and self.portable:
             raise ValueError(
-                "only builtin Recall formulas can declare portable=true in formula API v2"
+                "only builtin Recall formulas can declare portable=true in formula API v1"
             )
         if not isinstance(self.layout, RecallLayoutManifest):
             raise TypeError("layout must be a RecallLayoutManifest")

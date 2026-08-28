@@ -1552,6 +1552,10 @@ def concatenate_adapter_banks(
         influences,
     )
     payloads = tuple(validate_artifact(path, map_location=map_location) for path in paths)
+    member_fingerprints = tuple(
+        str(payload["manifest"]["adapter_state_sha256"])
+        for payload in payloads
+    )
     states = tuple(dict(payload["adapter_state_dict"]) for payload in payloads)
     keys = set(states[0])
     if any(set(state) != keys for state in states[1:]):
@@ -1562,6 +1566,17 @@ def concatenate_adapter_banks(
         for name, module in model.named_modules()
         if isinstance(module, ARTILatentRecallField)
     }
+    incompatible_fields = tuple(
+        name or "<root>"
+        for name, module in fields.items()
+        if module.routing_normalizer != "per_bank"
+    )
+    if incompatible_fields:
+        raise ValueError(
+            "concatenated Recall assets require routing_normalizer='per_bank' "
+            "(arti/recall@3); incompatible fields: "
+            + ", ".join(incompatible_fields[:3])
+        )
     bank_bindings: dict[str, tuple[ARTILatentRecallField, str]] = {}
     for module_name, module in fields.items():
         for leaf in ("bank", "key_bank", "group_bank"):
@@ -1639,7 +1654,11 @@ def concatenate_adapter_banks(
         raise RuntimeError("Recall concat did not resolve every field's routing axis")
     for field_name, ranges in route_ranges_by_field.items():
         field = fields[field_name]
-        field.configure_expert_routes(resolved_names, ranges)
+        field.configure_expert_routes(
+            resolved_names,
+            ranges,
+            member_fingerprints=member_fingerprints,
+        )
         field.set_expert_weights(resolved_weights)
         field.set_expert_influences(resolved_influences)
 
@@ -1758,7 +1777,7 @@ def _relative_factor_ranges(
     relative: list[tuple[int, int]] = []
     for expert_ranges in physical_ranges:
         if len(expert_ranges) != factor_count:
-            raise ValueError("Recall expert route ranges do not match factor count")
+            raise ValueError("Recall Bank route ranges do not match factor count")
         normalized = tuple(
             (
                 start - factor_index * rows_per_factor,
@@ -1767,7 +1786,7 @@ def _relative_factor_ranges(
             for factor_index, (start, stop) in enumerate(expert_ranges)
         )
         if len(set(normalized)) != 1:
-            raise ValueError("Recall expert route ranges differ across factors")
+            raise ValueError("Recall Bank route ranges differ across factors")
         relative.append(normalized[0])
     return tuple(relative)
 

@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 import arti
+from arti import experimental
 
 
 def tiny_model() -> nn.Sequential:
@@ -57,12 +58,12 @@ def test_glob_discovery_feature_switches_and_reversible_detach() -> None:
 
     restored = model.arti.detach()
     assert not hasattr(restored, "arti")
-    assert all(not isinstance(layer, arti.LayerRecallWrapper) for layer in restored.layers)
+    assert all(not isinstance(layer, experimental.LayerRecallWrapper) for layer in restored.layers)
     for name, tensor in before.items():
         assert torch.equal(restored.state_dict()[name], tensor)
 
 
-def test_train_save_reload_and_forward_consistency(tmp_path) -> None:
+def test_train_save_reload_and_forward_consistency(tmp_path, paired_rng) -> None:
     torch.manual_seed(7)
     base = tiny_model()
     initial = copy.deepcopy(base.state_dict())
@@ -74,8 +75,6 @@ def test_train_save_reload_and_forward_consistency(tmp_path) -> None:
     loss.backward()
     optimizer.step()
     model.eval()
-    torch.manual_seed(7)
-    expected = model(x).detach()
     artifact = tmp_path / "tiny.recall.arti.st"
     model.arti.save(artifact)
 
@@ -84,8 +83,11 @@ def test_train_save_reload_and_forward_consistency(tmp_path) -> None:
     arti.ARTI.load(restored, artifact)
     restored.eval()
 
-    torch.manual_seed(7)
-    assert torch.equal(expected, restored(x))
+    expected, actual = paired_rng(
+        lambda: model(x).detach(),
+        lambda: restored(x).detach(),
+    )
+    assert torch.equal(expected, actual)
     assert restored.arti.summary().trainable_parameters == model.arti.summary().trainable_parameters
     with pytest.raises(ValueError, match="topology"):
         wrong = arti.ARTI.attach(tiny_model(), {"layers": ("0",), "rank": 2, "slots": 3})
@@ -143,8 +145,8 @@ def test_bad_patterns_and_artifact_suffix_fail_clearly(tmp_path) -> None:
 def test_failed_attach_and_load_are_transactional(tmp_path) -> None:
     host = tiny_model()
     trainability = {name: value.requires_grad for name, value in host.named_parameters()}
-    config = arti.LayeredRecallConfig(
-        layers=(arti.LayerRecallSpec("0", dim=8, rank=2, slots=2), arti.LayerRecallSpec("missing", dim=8))
+    config = experimental.LayeredRecallConfig(
+        layers=(experimental.LayerRecallSpec("0", dim=8, rank=2, slots=2), experimental.LayerRecallSpec("missing", dim=8))
     )
     with pytest.raises(AttributeError):
         arti.ARTI.attach(host, config)

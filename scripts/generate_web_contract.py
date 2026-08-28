@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from arti.web import write_artifact_typescript, write_typescript_contract
+from arti.experimental.web import write_artifact_typescript, write_typescript_contract
 
 
 def main() -> None:

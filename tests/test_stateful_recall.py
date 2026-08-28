@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from arti.nn import StatefulRecall
+from arti.experimental import StatefulRecall
 
 
 def _identity_recall(dim=4, slots=4):

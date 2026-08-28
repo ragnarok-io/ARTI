@@ -18,7 +18,7 @@ from torch import Tensor
 from ..blocks import ARTIResidualBlock
 from ..config import ARTIConfig, STATE_RECALL_COMPOSITION_FACTOR
 from ..layers import ARTILatentRecallField
-from ..recall_formula import RecallFormulaContract
+from ..recall_formula import BUILTIN_RECALL_FORMULAS, RecallFormulaContract
 from ..recall_registry import resolve_formula
 from ..tensor_boundary import (
     TensorLayout,
@@ -698,6 +698,7 @@ def make_adapter(
     bridge_mode: str = "radial",
     residual_budget: float = 1.0,
 ) -> ARTIResidualBlock:
+    scale = _scale_with_formula_composition(scale)
     coord_dim = profile.coord_dim if profile.observer_phase else 0
     hidden_dim = max(1, int(round(candidate.dim * scale.hidden_multiplier)))
     recall_formula = _instantiate_recall_formula(scale)
@@ -742,6 +743,11 @@ def make_adapter(
 def _instantiate_recall_formula(scale: AdapterScale) -> nn.Module | None:
     if scale.recall_formula is None:
         return None
+    if scale.recall_formula in BUILTIN_RECALL_FORMULAS:
+        # Builtins are implemented by the core Recall field.  They are
+        # identifiers, not registry factories, so the adapter receives the
+        # canonical composition below and keeps ``recall_formula=None``.
+        return None
     formula = resolve_formula(scale.recall_formula).instantiate()
     contract = getattr(formula, "recall_formula_contract", None)
     if not isinstance(contract, RecallFormulaContract):
@@ -752,8 +758,22 @@ def _instantiate_recall_formula(scale: AdapterScale) -> nn.Module | None:
     return formula
 
 
+def _scale_with_formula_composition(scale: AdapterScale) -> AdapterScale:
+    """Make a canonical builtin Formula authoritative for adapter sizing."""
+
+    if scale.recall_formula is None:
+        return scale
+    builtin = BUILTIN_RECALL_FORMULAS.get(scale.recall_formula)
+    if builtin is None:
+        return scale
+    return replace(scale, recall_value_composition=builtin.composition)
+
+
 def _recall_composition_factor(scale: AdapterScale) -> int:
     if scale.recall_formula is not None:
+        builtin = BUILTIN_RECALL_FORMULAS.get(scale.recall_formula)
+        if builtin is not None:
+            return builtin.contract.factor_count
         formula = _instantiate_recall_formula(scale)
         assert formula is not None
         contract = formula.recall_formula_contract

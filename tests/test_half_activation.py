@@ -79,6 +79,27 @@ def test_half_stochastic_mode_is_independent_of_module_mode() -> None:
     assert 0.45 < survived < 0.75
 
 
+def test_half_accepts_explicit_uniform_without_consuming_global_rng() -> None:
+    x = torch.full((2, 4), 0.25, requires_grad=True)
+    uniform = torch.tensor(
+        [[0.0, 0.2, 0.6, 0.9], [0.1, 0.3, 0.7, 0.8]],
+        dtype=x.dtype,
+    )
+    layer = arti_nn.Half(stochastic=True, learnable=True)
+    before = torch.random.get_rng_state().clone()
+    first = layer(x, uniform=uniform)
+    second = layer(x, uniform=uniform)
+
+    assert torch.equal(first, second)
+    assert torch.equal(torch.random.get_rng_state(), before)
+    first.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in layer.parameters()
+    )
+
+
 def test_half_learnable_survival_curve_has_parameters_and_gradients() -> None:
     layer = arti_nn.Half(stochastic=False, learnable=True)
     assert {name for name, _ in layer.named_parameters()} == {
@@ -108,6 +129,44 @@ def test_half_learnable_parameters_round_trip() -> None:
     restored.load_state_dict(layer.state_dict())
     x = torch.randn(3, 4)
     assert torch.equal(restored.survival(x), layer.survival(x))
+
+
+def test_contextual_half_is_same_shape_but_not_pointwise() -> None:
+    layer = arti_nn.Half(stochastic=False, context_mode="contextual", context_gain=0.5)
+    x = torch.tensor([[0.25, 0.25]], requires_grad=True)
+    q = layer.survival(x)
+    y = layer(x)
+
+    assert q.shape == x.shape
+    assert y.shape == x.shape
+    assert torch.allclose(y, q * x)
+
+    changed_context = torch.tensor([[0.25, 2.0]])
+    changed_q = layer.survival(changed_context)
+    assert not torch.equal(q[0, 0], changed_q[0, 0])
+
+    y[0, 0].backward()
+    assert x.grad is not None
+    assert x.grad[0, 1].abs() > 0
+
+
+def test_contextual_half_zero_gain_reduces_to_elementwise() -> None:
+    x = torch.randn(2, 3, 4)
+    pointwise = arti_nn.Half(stochastic=False)
+    contextual = arti_nn.Half(
+        stochastic=False,
+        context_mode="contextual",
+        context_gain=0.0,
+        context_axes=(-2, -1),
+    )
+    assert torch.equal(contextual.survival(x), pointwise.survival(x))
+
+
+def test_contextual_half_rejects_invalid_context_axes() -> None:
+    with pytest.raises(ValueError, match="context axis"):
+        arti_nn.Half(stochastic=False, context_mode="contextual", context_axes=4).survival(
+            torch.ones(2, 3)
+        )
 
 
 def test_half_public_namespaces() -> None:

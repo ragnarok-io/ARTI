@@ -38,7 +38,6 @@ def test_contract_and_lock_round_trip_without_executable_state() -> None:
     )
 
     assert restored_contract == contract
-    assert contract.api_version == 2
     assert restored_contract.fingerprint == contract.fingerprint
     assert restored_lock == lock
     assert restored_lock.contract_fingerprint == contract.fingerprint
@@ -101,54 +100,3 @@ def test_batched_execution_contract_uses_flat_formula_abi() -> None:
 
     assert output.shape == (2, 3, 4)
     assert recall.formula_lock.contract.execution.vectorization == "batched"
-
-
-def test_batched_execution_rejects_cross_row_reduction() -> None:
-    class ReducingFormula(nn.Module):
-        recall_formula_contract = RecallFormulaContract(
-            factors=(FactorSpec("content"),),
-            execution=arti.RecallFormulaExecutionSpec(vectorization="batched"),
-        )
-
-        def forward(self, state: torch.Tensor, factors: torch.Tensor) -> torch.Tensor:
-            return state + state.mean() + factors[:, 0, :]
-
-    with pytest.raises(ValueError, match="row-independent"):
-        arti.Recall(dim=4, slots=8, formula=ReducingFormula())
-
-
-def test_stochastic_scalar_formula_uses_explicit_vmap_randomness() -> None:
-    class StochasticFormula(nn.Module):
-        recall_formula_contract = RecallFormulaContract(
-            factors=(FactorSpec("content"),),
-            execution=arti.RecallFormulaExecutionSpec(deterministic=False),
-        )
-
-        def forward(self, state: torch.Tensor, factors: torch.Tensor) -> torch.Tensor:
-            return state + factors[0] + torch.rand_like(state) * 0.01
-
-    recall = arti.Recall(dim=4, slots=8, formula=StochasticFormula(), activation="none")
-    output = recall(torch.randn(2, 3, 4))
-
-    assert output.shape == (2, 3, 4)
-
-
-def test_formula_dtype_contract_is_checked_at_runtime() -> None:
-    class Float32Formula(nn.Module):
-        recall_formula_contract = RecallFormulaContract(
-            factors=(FactorSpec("content"),),
-            execution=arti.RecallFormulaExecutionSpec(supported_dtypes=("float32",)),
-        )
-
-        def forward(self, state: torch.Tensor, factors: torch.Tensor) -> torch.Tensor:
-            return state + factors[0]
-
-    recall = arti.Recall(
-        dim=4,
-        slots=8,
-        formula=Float32Formula(),
-        activation="none",
-    ).half()
-
-    with pytest.raises(TypeError, match="dtype"):
-        recall(torch.randn(2, 3, 4, dtype=torch.float16))

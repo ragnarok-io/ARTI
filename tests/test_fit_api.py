@@ -974,7 +974,7 @@ def test_direct_recall_artifact_rehydrates_without_output_bridge(
     assert isinstance(source_wrapper, ARTIAdapterWrapper)
     with torch.no_grad():
         source_wrapper.adapter.layer.state.recall.bank.normal_(std=0.02)
-    torch.manual_seed(102)
+    torch.manual_seed(103)
     expected = source_model(sample)
     artifact = source.export(tmp_path / "direct-recall.pt")
 
@@ -986,7 +986,7 @@ def test_direct_recall_artifact_rehydrates_without_output_bridge(
     assert isinstance(fresh_wrapper, ARTIAdapterWrapper)
     assert fresh_wrapper.adapter.direct_recall is True
     assert not hasattr(fresh_wrapper.adapter, "out")
-    torch.manual_seed(102)
+    torch.manual_seed(103)
     torch.testing.assert_close(fresh(sample), expected)
 
 

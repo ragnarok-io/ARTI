@@ -136,6 +136,13 @@ def main() -> None:
             "arti/vnext_contracts.py",
             "arti/vnext_pipeline.py",
             "arti/alpha/__init__.py",
+            "arti/batched_refine.py",
+            "arti/branch_formula.py",
+            "arti/branch_refine.py",
+            "arti/gpu_resident.py",
+            "arti/runtime_checkpoint.py",
+            "arti/tensor_binding.py",
+            "arti/tensor_transaction.py",
             "arti/providers.py",
             "arti/pretrained.py",
             "arti/pretrained_cli.py",
@@ -192,11 +199,15 @@ def main() -> None:
                         "root = pathlib.Path(os.environ['ARTI_INSTALL_ROOT']).resolve(); "
                         "assert pathlib.Path(arti.__file__).resolve().parent == root / 'arti'; "
                         "assert arti.__version__ == os.environ['ARTI_EXPECTED_VERSION']; "
-                        "from arti.alpha import Fold, FormulaFabric, FormulaFabricProgram, ObjectiveExposureBank, UnFold; "
+                        "from arti.alpha import BatchedRefinePlan, BranchBatchHarness, Fold, FormulaFabric, FormulaFabricProgram, ObjectiveExposureBank, UnFold, VolatileTensorRuntime, query_recall_branches, run_batched_refine; "
                         "assert arti.component_ref(Fold(active_count=2)) == 'arti/fold@2'; "
                         "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'; "
                         "assert callable(FormulaFabric) and callable(FormulaFabricProgram); "
-                        "assert arti.component_ref(ObjectiveExposureBank(slots=2, query_dim=4)) == 'arti/objective-exposure-bank@1'"
+                        "assert arti.component_ref(ObjectiveExposureBank(slots=2, query_dim=4)) == 'arti/objective-exposure-bank@1'; "
+                        "assert callable(query_recall_branches) and callable(run_batched_refine); "
+                        "assert callable(BatchedRefinePlan) and callable(BranchBatchHarness); "
+                        "assert callable(VolatileTensorRuntime); "
+                        "assert arti.component_ref(arti.nn.Recall(dim=4, slots=8, activation='none')) == 'arti/recall@4'"
                     ),
                 ],
                 env=env,
@@ -298,9 +309,14 @@ def main() -> None:
                     "assert arti.torch.RecallRefiner is arti.RecallRefiner; "
                     "assert callable(arti.RecallCapacityPlan); "
                     "assert callable(arti.RecallCapacityDecision); "
-                    "assert callable(arti.RecallExpertPool); "
-                    "assert callable(arti.RecallExpertContract); "
-                    "assert callable(arti.RecallExpertAssembly); "
+                    "assert callable(arti.alpha.RecallValueUpdater); "
+                    "assert callable(arti.alpha.query_recall_branches); "
+                    "assert callable(arti.alpha.run_batched_refine); "
+                    "assert callable(arti.alpha.BatchedRefinePlan); "
+                    "assert callable(arti.alpha.BranchBatchHarness); "
+                    "assert callable(arti.alpha.VolatileTensorRuntime); "
+                    "assert not hasattr(arti, 'StatefulRecall'); "
+                    "assert not hasattr(arti, 'LayerRecall'); "
                     "assert callable(arti.VisualField); "
                     "assert callable(arti.concat_visual_fields); "
                     "assert callable(arti.VisualScan); "
@@ -318,15 +334,10 @@ def main() -> None:
                     "assert callable(arti.ARTI.from_pretrained); "
                     "assert callable(arti.ARTICheckpointCallback); "
                     "assert callable(arti.ARTIDoctorReport); "
-                    "assert callable(arti.LayerRecall); "
-                    "assert callable(arti.LayeredRecallModel); "
-                    "assert callable(arti.layered_recall_trajectory_loss); "
                     "assert callable(arti.pixel_shift_observe); "
                     "assert callable(arti.shift_and_add); "
                     "assert arti.torch.RecallCapacityPlan is arti.RecallCapacityPlan; "
                     "assert arti.torch.RecallCapacityDecision is arti.RecallCapacityDecision; "
-                    "assert arti.torch.RecallExpertPool is arti.RecallExpertPool; "
-                    "assert arti.torch.RecallExpertContract is arti.RecallExpertContract; "
                     "assert callable(arti.functional.half); "
                     "assert arti.torch.half is arti.functional.half; "
                     "assert callable(arti.MembraneVisibilityRouter); "
@@ -346,7 +357,6 @@ def main() -> None:
                     "assert callable(arti.fit_literal_sequence); "
                     "assert callable(arti.save); "
                     "assert callable(arti.load); "
-                    "assert callable(arti.migrate_pt); "
                     "assert arti.ARTI_ST_FORMAT == 'arti.st'; "
                     "assert callable(arti.ARTIPlan); "
                     "assert callable(arti.pretrained); "

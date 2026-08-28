@@ -10,8 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 from torch import Tensor
+
+from .emission import (
+    EmissionRouter,
+    EmissionRouterConfig,
+    build_stream_visibility,
+    stream_emit_mask,
+)
 
 
 MEMBRANE_STREAM_ASSISTANT_PUBLIC = 0
@@ -53,39 +59,47 @@ class MembraneContext:
     visibility: Tensor
 
 
-class MembraneVisibilityRouter(nn.Module):
-    """Route generated tokens to public or inner assistant streams.
+class MembraneVisibilityRouter(EmissionRouter):
+    """Compatibility adapter for the legacy two-stream membrane API.
 
-    This module does not generate token ids. It only predicts the stream/domain
-    for already-normal autoregressive next-token outputs.
+    New integrations should use :class:`arti.EmissionRouter` and provide their
+    own numbered-stream policy.  This adapter preserves the old output field
+    names and diagnostics for existing callers.
     """
 
     def __init__(self, config: MembraneRoutingConfig) -> None:
-        super().__init__()
+        super().__init__(
+            EmissionRouterConfig(
+                hidden_dim=config.hidden_dim,
+                stream_count=len(MEMBRANE_STREAM_NAMES),
+                emit_streams=config.public_emit_streams,
+            )
+        )
         self.config = config
-        self.router = nn.Linear(config.hidden_dim, len(MEMBRANE_STREAM_NAMES))
 
-    def forward(self, hidden: Tensor, *, stream_ids: Tensor | None = None) -> MembraneRoutingOutput:
-        if hidden.ndim not in {2, 3}:
-            raise ValueError("hidden must have shape [B, D] or [B, T, D]")
-        logits = self.router(hidden)
-        probs = torch.softmax(logits, dim=-1)
-        if stream_ids is None:
-            routed = probs.argmax(dim=-1)
-        else:
-            if stream_ids.shape != logits.shape[:-1]:
-                raise ValueError(f"stream_ids must have shape {tuple(logits.shape[:-1])}")
-            routed = stream_ids.to(device=hidden.device, dtype=torch.long)
-        public_emit = membrane_public_emit_mask(routed, public_streams=self.config.public_emit_streams)
-        diagnostics = {
-            "membrane_public_probability": probs[..., self.config.public_stream_id].detach(),
-            "membrane_inner_probability": probs[..., self.config.inner_stream_id].detach(),
-        }
+    def forward(
+        self,
+        hidden: Tensor,
+        *,
+        stream_ids: Tensor | None = None,
+    ) -> MembraneRoutingOutput:
+        routed = super().forward(hidden, stream_ids=stream_ids)
+        diagnostics = dict(routed.diagnostics)
+        diagnostics.update(
+            {
+                "membrane_public_probability": routed.stream_probs[
+                    ..., self.config.public_stream_id
+                ].detach(),
+                "membrane_inner_probability": routed.stream_probs[
+                    ..., self.config.inner_stream_id
+                ].detach(),
+            }
+        )
         return MembraneRoutingOutput(
-            stream_logits=logits,
-            stream_probs=probs,
-            stream_ids=routed,
-            public_emit_mask=public_emit,
+            stream_logits=routed.stream_logits,
+            stream_probs=routed.stream_probs,
+            stream_ids=routed.stream_ids,
+            public_emit_mask=routed.emit_mask,
             diagnostics=diagnostics,
         )
 
@@ -93,11 +107,7 @@ class MembraneVisibilityRouter(nn.Module):
 def membrane_public_emit_mask(stream_ids: Tensor, *, public_streams: tuple[int, ...] = (MEMBRANE_STREAM_ASSISTANT_PUBLIC,)) -> Tensor:
     """Return a bool mask of tokens that should be emitted to the user."""
 
-    stream = stream_ids.to(dtype=torch.long)
-    out = torch.zeros_like(stream, dtype=torch.bool)
-    for stream_id in public_streams:
-        out = out | (stream == int(stream_id))
-    return out
+    return stream_emit_mask(stream_ids, streams=public_streams)
 
 
 def membrane_emit_tokens(token_ids: Tensor, stream_ids: Tensor, *, public_streams: tuple[int, ...] = (MEMBRANE_STREAM_ASSISTANT_PUBLIC,)) -> list[list[int]]:
@@ -130,18 +140,19 @@ def build_membrane_visibility(
     batch, tokens = stream_ids.shape
     if viewer_ids.shape != (batch,):
         raise ValueError(f"viewer_ids must have shape {(batch,)}")
-    readable = _expand_stream_readability(stream_readable_by, batch).to(device=stream_ids.device, dtype=torch.bool)
-    token_mask = torch.ones(batch, tokens, dtype=torch.bool, device=stream_ids.device) if mask is None else mask.to(device=stream_ids.device, dtype=torch.bool)
-    if token_mask.shape != (batch, tokens):
-        raise ValueError(f"mask must have shape {(batch, tokens)}")
-    if stream_ids.min().item() < 0 or stream_ids.max().item() >= readable.shape[2]:
-        raise ValueError("stream id is out of range for stream_readable_by")
-    if viewer_ids.min().item() < 0 or viewer_ids.max().item() >= readable.shape[1]:
-        raise ValueError("viewer id is out of range for stream_readable_by")
-    batch_indices = torch.arange(batch, device=stream_ids.device).unsqueeze(1)
-    viewer = viewer_ids.to(device=stream_ids.device, dtype=torch.long).unsqueeze(1).expand_as(stream_ids)
-    source_visible = readable[batch_indices, viewer, stream_ids.to(dtype=torch.long)] & token_mask
-    return source_visible.unsqueeze(1).expand(batch, tokens, tokens) & token_mask.unsqueeze(1)
+    readable = _expand_stream_readability(stream_readable_by, batch)
+    readable = readable.to(device=stream_ids.device, dtype=torch.bool)
+    legacy_mask = (
+        None
+        if mask is None
+        else mask.to(device=stream_ids.device, dtype=torch.bool)
+    )
+    return build_stream_visibility(
+        stream_ids.to(device=stream_ids.device),
+        viewer_ids.to(device=stream_ids.device),
+        readable,
+        valid_mask=legacy_mask,
+    )
 
 
 def append_membrane_tokens(
