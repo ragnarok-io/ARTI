@@ -47,8 +47,10 @@ from .recall_refine import (
     RecallStopReason,
     RecallTrace,
     RecallTraceV2,
+    RecallTraceV3,
     RefinePolicy,
 )
+from .refine_exit import RefineExitControl, RefineExitRequest
 from .utils import assert_floating_tensor, detach_diagnostics
 
 
@@ -2853,6 +2855,8 @@ class ARTIRecallWriteState(nn.Module):
         state_operation: nn.Module | None,
         refine_schedule: AdaptiveRefineSchedule | None,
         random_source: object | None,
+        refine_exit: nn.Module | None,
+        model_exit: bool,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         """Execute the version-2 token-resolved adaptive refine contract."""
 
@@ -2939,6 +2943,12 @@ class ARTIRecallWriteState(nn.Module):
         token_update_history: list[Tensor] = []
         token_route_change_history: list[Tensor] = []
         token_read_change_history: list[Tensor] = []
+        exit_requested_history: list[Tensor] = []
+        exit_allowed_history: list[Tensor] = []
+        exit_effective_history: list[Tensor] = []
+        exit_blocked_history: list[Tensor] = []
+        model_exit_stop_history: list[Tensor] = []
+        exit_score_history: list[Tensor] = []
         route_history: list[Tensor] = []
         index_history: list[Tensor] = []
         context_history: list[Tensor] = []
@@ -3169,6 +3179,63 @@ class ARTIRecallWriteState(nn.Module):
             nonfinite = attempted & ~candidate_finite if policy.check_finite else torch.zeros_like(active)
             newly_converged = attempted & ~nonfinite & converged
             newly_cycle = attempted & ~nonfinite & ~newly_converged & cyclic
+            exit_requested = torch.zeros_like(attempted)
+            exit_allowed = committed & eligible
+            exit_score = torch.zeros_like(token_update_ratio)
+            control_nonfinite = torch.zeros_like(attempted)
+            if refine_exit is not None and model_exit:
+                request = refine_exit(z, mask=committed)
+                if not isinstance(request, RefineExitRequest):
+                    raise TypeError("refine_exit must return RefineExitRequest")
+                if (
+                    request.requested.shape != attempted.shape
+                    or request.requested.dtype != torch.bool
+                    or request.score.shape != attempted.shape
+                    or not request.score.is_floating_point()
+                    or request.finite.shape != attempted.shape
+                    or request.finite.dtype != torch.bool
+                ):
+                    raise ValueError("RefineExitRequest fields must have shape [B, N]")
+                if any(
+                    value.device != z.device
+                    for value in (request.requested, request.score, request.finite)
+                ):
+                    raise ValueError("RefineExitRequest fields must use the state device")
+                exit_requested = request.requested & committed
+                exit_score = torch.where(
+                    committed & request.finite,
+                    request.score.to(dtype=z.dtype),
+                    torch.zeros_like(token_update_ratio),
+                )
+                if policy.nonfinite_action == "raise" and not torch._C._functorch.is_batchedtensor(z):
+                    torch._assert_async(
+                        torch.all(request.finite | ~committed),
+                        "RefineExit produced a non-finite control signal",
+                    )
+                control_nonfinite = committed & ~request.finite
+                nonfinite = nonfinite | control_nonfinite
+                newly_converged = attempted & ~nonfinite & converged
+                newly_cycle = attempted & ~nonfinite & ~newly_converged & cyclic
+            blocked_by_min_steps = exit_requested & ~exit_allowed
+            exit_effective = exit_requested & exit_allowed
+            model_exit_stop = (
+                exit_effective
+                & ~nonfinite
+                & ~newly_converged
+                & ~newly_cycle
+                & (step + 1 < max_steps)
+            )
+            exit_requested_history.append(exit_requested)
+            exit_allowed_history.append(exit_allowed)
+            exit_effective_history.append(exit_effective)
+            exit_blocked_history.append(blocked_by_min_steps)
+            model_exit_stop_history.append(model_exit_stop)
+            exit_score_history.append(exit_score)
+            token_stop_reason = torch.where(
+                model_exit_stop,
+                torch.full_like(token_stop_reason, int(RecallStopReason.MODEL_EXIT)),
+                token_stop_reason,
+            )
             token_stop_reason = torch.where(
                 nonfinite,
                 torch.full_like(token_stop_reason, int(RecallStopReason.NONFINITE)),
@@ -3184,7 +3251,7 @@ class ARTIRecallWriteState(nn.Module):
                 torch.full_like(token_stop_reason, int(RecallStopReason.CONVERGED)),
                 token_stop_reason,
             )
-            active = active & ~nonfinite & ~newly_cycle & ~newly_converged
+            active = active & ~nonfinite & ~newly_cycle & ~newly_converged & ~model_exit_stop
             active = active & (step + 1 < max_steps)
 
         if self._replaces_state:
@@ -3196,6 +3263,12 @@ class ARTIRecallWriteState(nn.Module):
             update_history = torch.stack(token_update_history, dim=1)
             route_change_tensor = torch.stack(token_route_change_history, dim=1)
             read_change_tensor = torch.stack(token_read_change_history, dim=1)
+            exit_requested_tensor = torch.stack(exit_requested_history, dim=1)
+            exit_allowed_tensor = torch.stack(exit_allowed_history, dim=1)
+            exit_effective_tensor = torch.stack(exit_effective_history, dim=1)
+            exit_blocked_tensor = torch.stack(exit_blocked_history, dim=1)
+            model_exit_stop_tensor = torch.stack(model_exit_stop_history, dim=1)
+            exit_score_tensor = torch.stack(exit_score_history, dim=1)
         else:
             shape = (z.shape[0], 0, z.shape[1])
             token_step_attempted = torch.empty(shape, device=z.device, dtype=torch.bool)
@@ -3203,6 +3276,12 @@ class ARTIRecallWriteState(nn.Module):
             update_history = z.new_empty(shape)
             route_change_tensor = z.new_empty(shape)
             read_change_tensor = z.new_empty(shape)
+            exit_requested_tensor = torch.empty(shape, device=z.device, dtype=torch.bool)
+            exit_allowed_tensor = torch.empty_like(exit_requested_tensor)
+            exit_effective_tensor = torch.empty_like(exit_requested_tensor)
+            exit_blocked_tensor = torch.empty_like(exit_requested_tensor)
+            model_exit_stop_tensor = torch.empty_like(exit_requested_tensor)
+            exit_score_tensor = z.new_empty(shape)
         if record_routes and executed:
             route_tensor = torch.stack(route_history, dim=1)
             index_tensor = torch.stack(index_history, dim=1)
@@ -3213,10 +3292,15 @@ class ARTIRecallWriteState(nn.Module):
             )
         active_fraction = token_step_attempted.to(z.dtype).mean(dim=(0, 2))
         logical_token_steps = token_steps_committed.sum(dtype=torch.int64)
-        trace = RecallTraceV2(
+        legacy_stop_reason = torch.where(
+            token_stop_reason == int(RecallStopReason.MODEL_EXIT),
+            torch.full_like(token_stop_reason, int(RecallStopReason.MAX_STEPS)),
+            token_stop_reason,
+        )
+        base_trace = RecallTraceV2(
             token_steps_attempted=token_steps_attempted,
             token_steps_committed=token_steps_committed,
-            token_stop_reason=token_stop_reason,
+            token_stop_reason=legacy_stop_reason,
             token_step_attempted=token_step_attempted,
             token_step_committed=token_step_committed,
             state_change_ratio=update_history,
@@ -3228,6 +3312,21 @@ class ARTIRecallWriteState(nn.Module):
             route=route_tensor,
             indices=index_tensor,
             checkpoints=checkpoints,
+        )
+        trace = (
+            RecallTraceV3(
+                base=base_trace,
+                token_stop_reason=token_stop_reason,
+                exit_requested=exit_requested_tensor,
+                exit_allowed=exit_allowed_tensor,
+                exit_effective=exit_effective_tensor,
+                blocked_by_min_steps=exit_blocked_tensor,
+                model_exit_stop=model_exit_stop_tensor,
+                exit_score=exit_score_tensor,
+                terminal_step=token_steps_attempted,
+            )
+            if refine_exit is not None and model_exit
+            else base_trace
         )
         diagnostics = trace.diagnostics()
         diagnostics.update(
@@ -3290,6 +3389,8 @@ class ARTIRecallWriteState(nn.Module):
         selected_groups_first_step_only: bool = True,
         state_operation: nn.Module | None = None,
         refine_schedule: AdaptiveRefineSchedule | None = None,
+        refine_exit: nn.Module | None = None,
+        model_exit: bool = False,
         _random_source: object | None = None,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
         self._calibrate_state_bank_once(z, mask)
@@ -3304,6 +3405,16 @@ class ARTIRecallWriteState(nn.Module):
         )
         if not isinstance(policy, (RefinePolicy, AdaptiveRefinePolicy)):
             raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
+        if not isinstance(model_exit, bool):
+            raise TypeError("model_exit must be a bool")
+        if refine_exit is not None and not isinstance(refine_exit, RefineExitControl):
+            raise TypeError("refine_exit must be RefineExitControl or None")
+        if refine_exit is not None and model_exit and not isinstance(policy, AdaptiveRefinePolicy):
+            raise ValueError("refine_exit requires AdaptiveRefinePolicy@2")
+        if refine_exit is not None and model_exit and policy.executor != "static_masked":
+            raise ValueError("refine_exit requires static_masked execution")
+        if refine_exit is not None and model_exit and not policy.check_finite:
+            raise ValueError("refine_exit requires finite-state checking")
         if route_plan is not None and recall is not None:
             raise ValueError("route_plan does not support external recall tensors")
         if route_plan is not None and selected_groups is not None:
@@ -3326,6 +3437,8 @@ class ARTIRecallWriteState(nn.Module):
                 state_operation=state_operation,
                 refine_schedule=refine_schedule,
                 random_source=_random_source,
+                refine_exit=refine_exit,
+                model_exit=model_exit,
             )
         if refine_schedule is not None:
             raise ValueError(

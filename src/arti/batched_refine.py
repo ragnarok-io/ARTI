@@ -3251,6 +3251,8 @@ def run_batched_refine(
     refine_policy: object | None = None,
     plan: BatchedRefinePlan | None = None,
     rng_plan: ExecutionRNGPlan | None = None,
+    refine_exit: nn.Module | None = None,
+    model_exit: bool = False,
 ) -> BatchedRefineResult:
     """Run K Recall trajectories from one Top-K query in one tensor call."""
 
@@ -3264,6 +3266,13 @@ def run_batched_refine(
 
     if not isinstance(recall, Recall):
         raise TypeError("recall must be arti.nn.Recall")
+    if not isinstance(model_exit, bool):
+        raise TypeError("model_exit must be a bool")
+    if refine_exit is not None:
+        from .refine_exit import RefineExitControl
+
+        if not isinstance(refine_exit, RefineExitControl):
+            raise TypeError("refine_exit must be RefineExitControl or None")
     plan = BatchedRefinePlan.recall_only() if plan is None else plan
     if not isinstance(plan, BatchedRefinePlan):
         raise TypeError("plan must be BatchedRefinePlan or None")
@@ -3368,6 +3377,19 @@ def run_batched_refine(
         raise BatchedRefineContractError(
             "Batched Refine requires static_masked execution to avoid host synchronization"
         )
+    if refine_exit is not None and model_exit:
+        if not isinstance(policy, AdaptiveRefinePolicy):
+            raise BatchedRefineContractError(
+                "refine_exit requires AdaptiveRefinePolicy@2"
+            )
+        if policy.executor != "static_masked":
+            raise BatchedRefineContractError(
+                "refine_exit requires static_masked execution"
+            )
+        if not policy.check_finite:
+            raise BatchedRefineContractError(
+                "refine_exit requires finite-state checking"
+            )
     refine_schedule = (
         None if branch_policy is None else branch_policy.bind(candidates)
     )
@@ -3491,6 +3513,8 @@ def run_batched_refine(
             selected_groups_first_step_only=True,
             state_operation=state_operation,
             refine_schedule=refine_schedule,
+            refine_exit=refine_exit,
+            model_exit=model_exit,
             _random_source=random_source,
         )
     else:
@@ -3499,7 +3523,9 @@ def run_batched_refine(
         token_step_shape = (0, refine_steps, tokens)
         diagnostics = {
             "recall_trace_schema": torch.tensor(
-                2, device=source_value.device, dtype=torch.int64
+                3 if refine_exit is not None and model_exit else 2,
+                device=source_value.device,
+                dtype=torch.int64,
             ),
             "recall_token_steps_attempted": torch.zeros(
                 token_shape, device=source_value.device, dtype=torch.int64
@@ -3558,6 +3584,30 @@ def run_batched_refine(
             "recall_effect_norm": source_value.new_zeros(token_shape),
             "recall_write_norm": source_value.new_zeros(token_shape),
         }
+        if refine_exit is not None and model_exit:
+            diagnostics.update(
+                {
+                    "recall_exit_requested": torch.zeros(
+                        token_step_shape, device=source_value.device, dtype=torch.bool
+                    ),
+                    "recall_exit_allowed": torch.zeros(
+                        token_step_shape, device=source_value.device, dtype=torch.bool
+                    ),
+                    "recall_exit_effective": torch.zeros(
+                        token_step_shape, device=source_value.device, dtype=torch.bool
+                    ),
+                    "recall_exit_blocked_by_min_steps": torch.zeros(
+                        token_step_shape, device=source_value.device, dtype=torch.bool
+                    ),
+                    "recall_model_exit_stop": torch.zeros(
+                        token_step_shape, device=source_value.device, dtype=torch.bool
+                    ),
+                    "recall_exit_score": source_value.new_zeros(token_step_shape),
+                    "recall_terminal_step": torch.zeros(
+                        token_shape, device=source_value.device, dtype=torch.int64
+                    ),
+                }
+            )
         refined = source_value.new_empty((0, tokens, dim))
         delta = source_value.new_empty((0, tokens, dim))
     plan.assert_unchanged()

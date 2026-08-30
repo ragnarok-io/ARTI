@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.9a3 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.10a1 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -29,7 +29,7 @@ uv add arti-fit
 To evaluate the current alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.9a3"
+uv add --prerelease allow "arti-fit==3.0.10a1"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -52,6 +52,37 @@ The alpha browser runtime is published separately:
 ```bash
 pnpm add @arti-fit/web@alpha
 ```
+
+## What Is New In 3.0.10 Alpha
+
+`FormulaFabricV2` (`arti/formula-fabric@2`) adds a typed, bounded Formula
+program with named axes and explicit Input and Bank operands. Contract, Scale,
+Add, and Reduce atoms can express LoRA-shaped and other tensor operations
+without giving the executor an opaque task-specific primitive. A fixed Query
+can select complete operand bundles from `FormulaOperandBank` while hard
+forward routing remains explicit.
+
+Deep Recall training can use `RefineStepTraining` to capture the model's own
+detached trajectory and train its successive one-step transitions with the
+real downstream objective. `FormulaRefineExit` adds an optional
+post-transition model exit request; host `min_steps` and `max_steps` remain the
+hard bounds. Exit-controller training uses detached task-quality curves rather
+than a teacher stop sequence.
+
+The new tensor-operation surface provides an always-backed
+`OperableTensorPort`, world-shaped `SharedCanvasFold`, hard typed tensor edits,
+independently scheduled operation/refine loops, and next-call state proposals.
+Mounted backing can be replaced between calls without changing parameters or
+the model call signature. Reader Refine and TensorOperation read the same
+call-boundary snapshot; an edit becomes visible only after the caller advances
+the port for a later call.
+
+These APIs remain under `arti.alpha`. This release establishes versioned
+execution, training, and lifecycle contracts; it does not claim downstream
+quality gains or physical runtime acceleration. See [Formula Fabric](docs/formula-fabric.md),
+[Flattened Refine Training](docs/flattened-refine-training.md),
+[Refine Exit](docs/refine-exit.md), and
+[Operable Tensor Port](docs/operable-tensor-port.md).
 
 ## What Is New In 3.0.9 Alpha
 

@@ -2451,6 +2451,8 @@ class Recall(nn.Module):
         route_plan=None,
         active_k: int | Tensor | None = None,
         rng_plan=None,
+        refine_exit: nn.Module | None = None,
+        model_exit: bool = False,
         return_info: bool = False,
         return_trace: bool = False,
         return_branches: bool = False,
@@ -2460,6 +2462,7 @@ class Recall(nn.Module):
             RecallRoutePlan,
             RecallTrace,
             RecallTraceV2,
+            RecallTraceV3,
             RefinePolicy,
         )
 
@@ -2471,6 +2474,13 @@ class Recall(nn.Module):
             )
         if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
             raise TypeError("route_plan must be a RecallRoutePlan or None")
+        if not isinstance(model_exit, bool):
+            raise TypeError("model_exit must be a bool")
+        if refine_exit is not None:
+            from .refine_exit import RefineExitControl
+
+            if not isinstance(refine_exit, RefineExitControl):
+                raise TypeError("refine_exit must be RefineExitControl or None")
         if sum((return_info, return_trace, return_branches)) > 1:
             raise ValueError(
                 "return_info, return_trace, and return_branches are mutually exclusive"
@@ -2540,6 +2550,8 @@ class Recall(nn.Module):
                 active_k=active_k,
                 refine_policy=refine_policy,
                 rng_plan=rng_plan,
+                refine_exit=refine_exit,
+                model_exit=model_exit,
             )
             merged, branch_weights, winner = self._merge_breadth_result(result, sequence)
             output = merged.squeeze(1) if was_vector else merged
@@ -2576,7 +2588,11 @@ class Recall(nn.Module):
                 ).mean(dim=(0, 2))
             if return_trace:
                 trace_type = (
-                    RecallTraceV2
+                    RecallTraceV3
+                    if isinstance(refine_policy, AdaptiveRefinePolicy)
+                    and refine_exit is not None
+                    and model_exit
+                    else RecallTraceV2
                     if isinstance(refine_policy, AdaptiveRefinePolicy)
                     else RecallTrace
                 )
@@ -2600,12 +2616,20 @@ class Recall(nn.Module):
             memory=memory,
             refine_policy=refine_policy,
             route_plan=route_plan,
+            refine_exit=refine_exit,
+            model_exit=model_exit,
         )
         output = next_state.squeeze(1) if was_vector else next_state
         if not return_info and not return_trace:
             return output
         trace_type = (
-            RecallTraceV2 if isinstance(refine_policy, AdaptiveRefinePolicy) else RecallTrace
+            RecallTraceV3
+            if isinstance(refine_policy, AdaptiveRefinePolicy)
+            and refine_exit is not None
+            and model_exit
+            else RecallTraceV2
+            if isinstance(refine_policy, AdaptiveRefinePolicy)
+            else RecallTrace
         )
         trace = (
             trace_type.from_diagnostics(
@@ -2665,7 +2689,7 @@ class RecallRefiner(nn.Module):
 
 Pulse = LearnedPulse
 
-from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput  # noqa: E402
+from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
 __all__ = [
     "Layer",
     "Half",

@@ -1255,6 +1255,17 @@ def _build_default_registry() -> ComponentRegistry:
         RoutedFormulaFabricCompute,
         IterativeRoutedFormulaFabricCompute,
     )
+    from .formula_v2 import (
+        AddAtom,
+        ContractAtom,
+        FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
+        FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION,
+        FormulaExecutionPlanV2,
+        FormulaFabricV2,
+        ReduceAtom,
+        ScaleAtom,
+    )
+    from .formula_learning import FormulaOperandBank
     from .gpu_resident import (
         BoundHotPagePool,
         CUDAActivityReceipt,
@@ -1306,10 +1317,14 @@ def _build_default_registry() -> ComponentRegistry:
         AdaptiveRefinePolicy,
         RecallRoutePlan,
         RecallRouteStack,
+        RecallTraceV3,
         RefineBudget,
         RefinePolicy,
         RefineStop,
     )
+    from .refine_training import RefineRollout, RefineStepTraining
+    from .refine_exit import FormulaRefineExit, RefineExitControl, RefineExitRequest
+    from .refine_exit_training import RefineExitCurve, RefineExitTraining
     from .target_bank import TargetBankUpdater, WriteRefinePolicy
     from .objective_bank import ObjectiveExposureBank
     from .objective_formula import ObjectiveFormulaFabricCompute
@@ -1334,6 +1349,31 @@ def _build_default_registry() -> ComponentRegistry:
         FixedObservationQuery,
         ObservationOperandBank,
         ObservationTrajectoryFormula,
+    )
+    from .tensor_operation import (
+        OperableTensorPort,
+        PortSnapshot,
+        PortSpec,
+        ReaderRefineSchedule,
+        SharedCanvas,
+        SharedCanvasFold,
+        TensorEditInstruction,
+        TensorEditFormula,
+        TensorEditResult,
+        TensorEditSurrogate,
+        TensorInvocation,
+        TensorInvocationResult,
+        TensorOperation,
+        TensorOperationBank,
+        TensorOperationDecision,
+        TensorOperationLoop,
+        TensorOperationQuery,
+        TensorOperationResult,
+        TensorOperationSchedule,
+        TensorOperationSelector,
+        TensorOperationStepResult,
+        TensorOperationStopPolicy,
+        TensorOperationTrace,
     )
 
     def add(reference: str, component_type: type[Any], **kwargs: Any) -> None:
@@ -1826,6 +1866,113 @@ def _build_default_registry() -> ComponentRegistry:
             "program": component.program.to_dict(),
             "program_fingerprint": component.program.fingerprint,
             "limits": dict(component.limits.__dict__),
+        },
+    )
+    add(
+        "arti/formula-atom-contract@1",
+        ContractAtom,
+        lifecycle=alpha,
+        variant="named-axis-parameter-free-contraction",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "left_type": component.left_type.to_dict(),
+            "right_type": component.right_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "reduce_axes": [list(pair) for pair in component.reduce_axes],
+            "output_axes": list(component.output_axes),
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
+        "arti/formula-atom-scale@1",
+        ScaleAtom,
+        lifecycle=alpha,
+        variant="named-axis-explicit-operand-scale",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "factor_type": component.factor_type.to_dict(),
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
+        "arti/formula-atom-add@1",
+        AddAtom,
+        lifecycle=alpha,
+        variant="typed-binary-add",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
+        "arti/formula-atom-reduce@1",
+        ReduceAtom,
+        lifecycle=alpha,
+        variant="ordered-named-axis-sum",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "mode": "sum",
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
+        "arti/formula-fabric@2",
+        FormulaFabricV2,
+        lifecycle=alpha,
+        variant="typed-heterogeneous-ssa-formula-executor",
+        config_schema_version=2,
+        capabilities=("formula.fabric.executor", "formula.fabric.typed-executor"),
+        config_builder=lambda component: {
+            "program": component.program.to_dict(),
+            "program_fingerprint": component.program.fingerprint,
+        },
+        dependency_builder=lambda component: tuple(
+            sorted({item.atom_ref for item in component.program.instructions})
+        ),
+    )
+    add(
+        "arti/formula-execution-plan@1",
+        FormulaExecutionPlanV2,
+        lifecycle=alpha,
+        variant="typed-static-positional-formula-lowering",
+        config_builder=lambda component: {
+            "schema_ref": FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
+            "schema_version": FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION,
+            "program": component.program.to_dict(),
+            "program_fingerprint": component.program_fingerprint,
+            "binding_names": list(component.binding_names),
+        },
+        dependency_builder=lambda component: tuple(
+            sorted({item.atom_ref for item in component.program.instructions})
+        ),
+        capabilities=("formula.fabric.compilable-plan", "formula.fabric.typed-executor"),
+    )
+    add(
+        "arti/formula-operand-bank@1",
+        FormulaOperandBank,
+        lifecycle=alpha,
+        variant="joint-typed-formula-operand-candidates",
+        capabilities=("formula.fabric.learned-route", "formula.fabric.operand-bank"),
+        config_builder=lambda component: {
+            "source_ref": component.source_ref,
+            "asset_fingerprint": component.asset_fingerprint,
+            "bundle_id": component.bundle_id,
+            "member_ids": list(component.member_ids),
+            "candidate_count": component.candidate_count,
+            "key_dim": component.key_dim,
+            "key_dtype": str(component.keys.dtype).removeprefix("torch."),
+            "operand_shapes": {
+                name: list(value.shape) for name, value in component.operands.items()
+            },
+            "operand_dtypes": {
+                name: str(value.dtype).removeprefix("torch.")
+                for name, value in component.operands.items()
+            },
         },
     )
     add(
@@ -2565,6 +2712,423 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
+        "arti/refine-rollout@1",
+        RefineRollout,
+        lifecycle=alpha,
+        variant="detached-on-policy-adjacent-steps",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda _component: {
+            "trajectory_source": "on_policy_snapshot",
+            "training_view": "flattened_adjacent_steps",
+            "hidden_teacher": "forbidden",
+            "route_cache": "forbidden",
+            "query_trainable": False,
+        },
+        dependency_builder=lambda component: (component.source_ref,),
+    )
+    add(
+        "arti/refine-step-training@1",
+        RefineStepTraining,
+        lifecycle=alpha,
+        variant="fresh-query-one-step-task-loss",
+        artifact_policy="runtime_only",
+        config_builder=_fields("max_snapshot_staleness"),
+    )
+    add(
+        "arti/formula-atom-refine-exit@1",
+        FormulaRefineExit,
+        lifecycle=alpha,
+        variant="post-transition-hard-refine-exit",
+        capabilities=("refine.exit.atom", "refine.exit.request"),
+        config_builder=_fields("input_kind", "scope", "threshold"),
+    )
+    add(
+        "arti/refine-exit-request@1",
+        RefineExitRequest,
+        lifecycle=alpha,
+        variant="tensor-only-post-transition-request",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda _component: {},
+        dependency_builder=lambda _component: ("arti/formula-atom-refine-exit@1",),
+    )
+    add(
+        "arti/refine-exit-control@1",
+        RefineExitControl,
+        lifecycle=alpha,
+        variant="neural-source-with-typed-exit-atom",
+        constructible=False,
+        artifact_policy="runtime_only",
+        capabilities=("refine.exit.control",),
+        config_builder=lambda component: {
+            "source_api": (
+                f"{type(component.source).__module__}."
+                f"{type(component.source).__qualname__}"
+            ),
+            "input_kind": component.atom.input_kind,
+            "scope": component.atom.scope,
+            "threshold": component.atom.threshold,
+        },
+        dependency_builder=lambda component: (component_ref(component.atom),),
+    )
+    add(
+        "arti/refine-exit-curve@1",
+        RefineExitCurve,
+        lifecycle=alpha,
+        variant="detached-full-depth-task-loss-curve",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "scope": component.scope,
+            "depth": component.depth,
+            "breadth": component.breadth,
+            "sampling_policy": component.sampling_policy,
+        },
+        dependency_builder=lambda component: (
+            component.source_ref,
+            "arti/refine-step-training@1",
+        ),
+    )
+    add(
+        "arti/refine-exit-training@1",
+        RefineExitTraining,
+        lifecycle=alpha,
+        variant="quality-constrained-task-loss-hazard",
+        artifact_policy="runtime_only",
+        config_builder=_fields(
+            "temperature",
+            "compute_weight",
+            "quality_tolerance",
+            "quality_weight",
+        ),
+        dependency_builder=lambda _component: (
+            "arti/refine-exit-curve@1",
+            "arti/refine-exit-control@1",
+        ),
+    )
+    add(
+        "arti/operable-tensor-port-spec@1",
+        PortSpec,
+        lifecycle=alpha,
+        variant="fixed-shape-shared-canvas-port-spec",
+        constructible=False,
+        config_builder=lambda component: {
+            "canvas_tokens": component.canvas_tokens,
+            "port_slots": component.port_slots,
+            "dim": component.dim,
+            "port_to_canvas": component.port_to_canvas,
+            "dtype": str(component.dtype).removeprefix("torch."),
+            "empty_value": component.empty_value,
+            "default_visible": component.default_visible,
+            "coordinate_frame": component.coordinate_frame,
+        },
+    )
+    add(
+        "arti/operable-tensor-port@1",
+        OperableTensorPort,
+        lifecycle=alpha,
+        variant="stable-runtime-owned-default-or-external-backing",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "batch_size": component.batch_size,
+        },
+        dependency_builder=lambda component: (component_ref(component.spec),),
+    )
+    add(
+        "arti/operable-tensor-snapshot@1",
+        PortSnapshot,
+        lifecycle=alpha,
+        variant="resolved-pre-step-backing",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "source": component.source,
+            "backing_epoch": component.backing_epoch,
+            "step_index": component.step_index,
+        },
+        dependency_builder=lambda _component: ("arti/operable-tensor-port@1",),
+    )
+    add(
+        "arti/shared-canvas@1",
+        SharedCanvas,
+        lifecycle=alpha,
+        variant="world-shaped-masked-overlay",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "shape": tuple(component.values.shape),
+            "backing_epoch": component.backing_epoch,
+            "step_index": component.step_index,
+        },
+        dependency_builder=lambda _component: ("arti/shared-canvas-fold@1",),
+    )
+    add(
+        "arti/shared-canvas-fold@1",
+        SharedCanvasFold,
+        lifecycle=alpha,
+        variant="fixed-map-masked-overlay",
+        constructible=False,
+        config_builder=lambda _component: {},
+        dependency_builder=lambda component: (component_ref(component.spec),),
+    )
+    add(
+        "arti/tensor-edit-instruction@1",
+        TensorEditInstruction,
+        lifecycle=alpha,
+        variant="single-hard-keep-copy-clear",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda _component: {},
+    )
+    add(
+        "arti/tensor-edit-formula@1",
+        TensorEditFormula,
+        lifecycle=alpha,
+        variant="functional-backing-only-hard-edit",
+        constructible=False,
+        config_builder=lambda _component: {
+            "operations": ("KEEP", "COPY", "CLEAR"),
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            "arti/tensor-edit-instruction@1",
+        ),
+    )
+    add(
+        "arti/tensor-edit-result@1",
+        TensorEditResult,
+        lifecycle=alpha,
+        variant="functional-next-backing",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "shape": tuple(component.value.shape),
+        },
+        dependency_builder=lambda _component: (
+            "arti/tensor-edit-formula@1",
+            "arti/tensor-edit-instruction@1",
+        ),
+    )
+    add(
+        "arti/tensor-edit-surrogate@1",
+        TensorEditSurrogate,
+        lifecycle=alpha,
+        variant="exact-hard-forward-continuous-backward",
+        constructible=False,
+        config_builder=lambda component: {"temperature": component.temperature},
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            "arti/tensor-edit-formula@1",
+        ),
+    )
+    add(
+        "arti/tensor-operation-query@1",
+        TensorOperationQuery,
+        lifecycle=alpha,
+        variant="fixed-full-canvas-projection",
+        constructible=False,
+        config_builder=lambda component: component.operation_query_contract(),
+        dependency_builder=lambda component: (component_ref(component.spec),),
+    )
+    add(
+        "arti/tensor-operation-bank@1",
+        TensorOperationBank,
+        lifecycle=alpha,
+        variant="trainable-hard-edit-candidates",
+        constructible=False,
+        config_builder=lambda component: component.operation_bank_contract(),
+        dependency_builder=lambda component: (component_ref(component.spec),),
+    )
+    add(
+        "arti/tensor-operation-decision@1",
+        TensorOperationDecision,
+        lifecycle=alpha,
+        variant="hard-instruction-with-training-logits",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "batch_size": int(component.instruction.operation.shape[0]),
+            "candidate_count": int(component.route.route.shape[-1]),
+        },
+        dependency_builder=lambda _component: (
+            "arti/tensor-edit-instruction@1",
+            "arti/tensor-operation-bank@1",
+        ),
+    )
+    add(
+        "arti/tensor-operation-selector@1",
+        TensorOperationSelector,
+        lifecycle=alpha,
+        variant="fixed-query-bank-selected-hard-edit",
+        constructible=False,
+        config_builder=lambda component: {
+            "estimator": component.estimator,
+            "temperature": component.temperature,
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            component_ref(component.query),
+            component_ref(component.bank),
+        ),
+    )
+    add(
+        "arti/tensor-operation@1",
+        TensorOperation,
+        lifecycle=alpha,
+        variant="fixed-query-bank-selected-hard-transition",
+        config_schema_version=2,
+        constructible=False,
+        config_builder=lambda component: {
+            "surrogate": (
+                None
+                if component.surrogate is None
+                else component_ref(component.surrogate)
+            ),
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            component_ref(component.selector),
+            component_ref(component.fold),
+            component_ref(component.formula),
+        )
+        + (() if component.surrogate is None else (component_ref(component.surrogate),)),
+    )
+    add(
+        "arti/tensor-operation-step-result@1",
+        TensorOperationStepResult,
+        lifecycle=alpha,
+        variant="one-local-shadow-transition",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {"shape": tuple(component.edit.value.shape)},
+        dependency_builder=lambda _component: (
+            "arti/tensor-operation@1",
+            "arti/tensor-operation-decision@1",
+            "arti/tensor-edit-result@1",
+        ),
+    )
+    add(
+        "arti/tensor-operation-stop@1",
+        TensorOperationStopPolicy,
+        lifecycle=alpha,
+        variant="bounded-post-transition-stop",
+        constructible=False,
+        config_builder=lambda component: {
+            "min_operation_steps": component.min_operation_steps,
+            "stop_on_stable": component.stop_on_stable,
+        },
+    )
+    add(
+        "arti/tensor-operation-schedule@1",
+        TensorOperationSchedule,
+        lifecycle=alpha,
+        variant="independent-operation-depth",
+        config_schema_version=2,
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "scalar_steps": (
+                component.operation_steps
+                if isinstance(component.operation_steps, int)
+                else None
+            ),
+            "max_steps": component.max_steps,
+        },
+    )
+    add(
+        "arti/tensor-operation-trace@1",
+        TensorOperationTrace,
+        lifecycle=alpha,
+        variant="bounded-operation-axis-trace",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "steps": int(component.attempted.shape[0]),
+            "batch_size": int(component.requested_steps.shape[0]),
+        },
+    )
+    add(
+        "arti/tensor-operation-loop@1",
+        TensorOperationLoop,
+        lifecycle=alpha,
+        variant="private-shadow-fresh-query-loop",
+        config_schema_version=2,
+        constructible=False,
+        config_builder=lambda component: {"executor": component.executor},
+        dependency_builder=lambda component: (
+            component_ref(component.operation),
+            component_ref(component.stop),
+        ),
+    )
+    add(
+        "arti/tensor-operation-result@1",
+        TensorOperationResult,
+        lifecycle=alpha,
+        variant="next-call-backing-proposal",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {"shape": tuple(component.value.shape)},
+        dependency_builder=lambda _component: (
+            "arti/tensor-operation-loop@1",
+            "arti/tensor-operation-trace@1",
+        ),
+    )
+    add(
+        "arti/reader-refine-schedule@1",
+        ReaderRefineSchedule,
+        lifecycle=alpha,
+        variant="independent-reader-depth",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {"reader_steps": component.reader_steps},
+    )
+    add(
+        "arti/tensor-invocation@1",
+        TensorInvocation,
+        lifecycle=alpha,
+        variant="same-root-independent-reader-operation-axes",
+        constructible=False,
+        config_builder=lambda component: {
+            "reader_api": (
+                f"{type(component.reader).__module__}."
+                f"{type(component.reader).__qualname__}"
+            ),
+        },
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            component_ref(component.fold),
+            component_ref(component.operation),
+        ),
+    )
+    add(
+        "arti/tensor-invocation-result@1",
+        TensorInvocationResult,
+        lifecycle=alpha,
+        variant="independent-reader-output-and-operation-proposal",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "output_shape": tuple(component.output.shape),
+            "reader_steps": component.reader_steps,
+        },
+        dependency_builder=lambda _component: (
+            "arti/tensor-invocation@1",
+            "arti/tensor-operation-result@1",
+        ),
+    )
+    add(
+        "arti/recall-trace@3",
+        RecallTraceV3,
+        lifecycle=alpha,
+        variant="post-transition-neural-exit-trace",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {"schema_version": component.schema_version},
+        dependency_builder=lambda _component: ("arti/refine-exit-request@1",),
+    )
+    add(
         "arti/recall-route-plan@1",
         RecallRoutePlan,
         lifecycle=alpha,
@@ -2933,12 +3497,349 @@ def _is_known_dependency(reference: str, registry: ComponentRegistry) -> bool:
                 return False
 
 
+def _validate_tensor_operation_dependency_closure(
+    reference: str,
+    config: Any,
+    dependencies: list[str],
+) -> bool:
+    refs = {
+        "arti/tensor-edit-surrogate@1",
+        "arti/tensor-operation-query@1",
+        "arti/tensor-operation-bank@1",
+        "arti/tensor-operation-selector@1",
+        "arti/tensor-operation@1",
+        "arti/tensor-operation-stop@1",
+        "arti/tensor-operation-schedule@1",
+        "arti/tensor-operation-loop@1",
+    }
+    if reference not in refs:
+        return False
+    if not isinstance(config, Mapping):
+        raise ComponentCompatibilityError("TensorOperation config must be a mapping")
+
+    spec_ref = "arti/operable-tensor-port-spec@1"
+    expected: set[str]
+    if reference == "arti/tensor-edit-surrogate@1":
+        if set(config) != {"temperature"} or not _is_finite_positive(config["temperature"]):
+            raise ComponentCompatibilityError("TensorEditSurrogate config is invalid")
+        expected = {spec_ref, "arti/tensor-edit-formula@1"}
+    elif reference == "arti/tensor-operation-query@1":
+        required = {
+            "ref",
+            "key_dim",
+            "seed",
+            "basis_hash",
+            "mask_basis_hash",
+            "fixed",
+            "deterministic",
+            "stateful",
+        }
+        if (
+            set(config) != required
+            or config["ref"] != reference
+            or not _is_positive_int(config["key_dim"])
+            or type(config["seed"]) is not int
+            or not _is_sha256(config["basis_hash"])
+            or not _is_sha256(config["mask_basis_hash"])
+            or config["fixed"] is not True
+            or config["deterministic"] is not True
+            or config["stateful"] is not False
+        ):
+            raise ComponentCompatibilityError("TensorOperationQuery config is invalid")
+        expected = {spec_ref}
+    elif reference == "arti/tensor-operation-bank@1":
+        required = {
+            "ref",
+            "candidate_count",
+            "key_dim",
+            "canvas_tokens",
+            "port_slots",
+            "dim",
+            "seed",
+        }
+        if (
+            set(config) != required
+            or config["ref"] != reference
+            or any(
+                not _is_positive_int(config[name])
+                for name in ("candidate_count", "key_dim", "canvas_tokens", "port_slots", "dim")
+            )
+            or type(config["seed"]) is not int
+        ):
+            raise ComponentCompatibilityError("TensorOperationBank config is invalid")
+        expected = {spec_ref}
+    elif reference == "arti/tensor-operation-selector@1":
+        if (
+            set(config) != {"estimator", "temperature"}
+            or config["estimator"] not in {"hard", "straight-through"}
+            or not _is_finite_positive(config["temperature"])
+        ):
+            raise ComponentCompatibilityError("TensorOperationSelector config is invalid")
+        expected = {
+            spec_ref,
+            "arti/tensor-operation-query@1",
+            "arti/tensor-operation-bank@1",
+        }
+    elif reference == "arti/tensor-operation@1":
+        if set(config) != {"surrogate"} or config["surrogate"] not in {
+            None,
+            "arti/tensor-edit-surrogate@1",
+        }:
+            raise ComponentCompatibilityError("TensorOperation config is invalid")
+        expected = {
+            spec_ref,
+            "arti/tensor-operation-selector@1",
+            "arti/shared-canvas-fold@1",
+            "arti/tensor-edit-formula@1",
+        }
+        if config["surrogate"] is not None:
+            expected.add(config["surrogate"])
+    elif reference == "arti/tensor-operation-stop@1":
+        if (
+            set(config) != {"min_operation_steps", "stop_on_stable"}
+            or not _is_non_negative_int(config["min_operation_steps"])
+            or type(config["stop_on_stable"]) is not bool
+        ):
+            raise ComponentCompatibilityError("TensorOperationStopPolicy config is invalid")
+        expected = set()
+    elif reference == "arti/tensor-operation-schedule@1":
+        scalar = config.get("scalar_steps")
+        maximum = config.get("max_steps")
+        if (
+            set(config) != {"scalar_steps", "max_steps"}
+            or (scalar is not None and not _is_non_negative_int(scalar))
+            or (maximum is not None and not _is_non_negative_int(maximum))
+            or (scalar is not None and maximum is not None and scalar > maximum)
+        ):
+            raise ComponentCompatibilityError("TensorOperationSchedule config is invalid")
+        expected = set()
+    else:
+        if set(config) != {"executor"} or config["executor"] not in {
+            "static_masked",
+            "early_break",
+        }:
+            raise ComponentCompatibilityError("TensorOperationLoop config is invalid")
+        expected = {
+            "arti/tensor-operation@1",
+            "arti/tensor-operation-stop@1",
+        }
+
+    if dependencies != sorted(expected):
+        raise ComponentCompatibilityError(
+            f"TensorOperation dependency closure is invalid for {reference!r}"
+        )
+    return True
+
+
+def _is_non_negative_int(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _is_positive_int(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def _is_finite_positive(value: Any) -> bool:
+    return type(value) in {int, float} and math.isfinite(float(value)) and value > 0
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _validate_vnext_dependency_closure(
     reference: str,
     config: Any,
     dependencies: list[str],
 ) -> None:
     """Recompute dependency closure for manifest-owned vNext components."""
+
+    if _validate_tensor_operation_dependency_closure(reference, config, dependencies):
+        return
+
+    formula_atom_refs = {
+        "arti/formula-atom-contract@1",
+        "arti/formula-atom-scale@1",
+        "arti/formula-atom-add@1",
+        "arti/formula-atom-reduce@1",
+    }
+    if reference == "arti/formula-operand-bank@1":
+        required = {
+            "source_ref",
+            "asset_fingerprint",
+            "bundle_id",
+            "member_ids",
+            "candidate_count",
+            "key_dim",
+            "key_dtype",
+            "operand_shapes",
+            "operand_dtypes",
+        }
+        if not isinstance(config, Mapping) or set(config) != required or dependencies:
+            raise ComponentCompatibilityError("FormulaOperandBank config is incomplete")
+        member_ids = config["member_ids"]
+        shapes = config["operand_shapes"]
+        dtypes = config["operand_dtypes"]
+        candidate_count = config["candidate_count"]
+        key_dim = config["key_dim"]
+        if (
+            not isinstance(config["source_ref"], str)
+            or not config["source_ref"]
+            or (
+                config["asset_fingerprint"] is not None
+                and (
+                    not isinstance(config["asset_fingerprint"], str)
+                    or len(config["asset_fingerprint"]) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in config["asset_fingerprint"]
+                    )
+                )
+            )
+            or not isinstance(config["bundle_id"], str)
+            or not config["bundle_id"]
+            or isinstance(candidate_count, bool)
+            or not isinstance(candidate_count, int)
+            or candidate_count <= 0
+            or isinstance(key_dim, bool)
+            or not isinstance(key_dim, int)
+            or key_dim <= 0
+            or not isinstance(config["key_dtype"], str)
+            or not isinstance(member_ids, list)
+            or len(member_ids) != candidate_count
+            or len(set(member_ids)) != candidate_count
+            or any(not isinstance(item, str) or not item for item in member_ids)
+            or not isinstance(shapes, Mapping)
+            or not shapes
+            or not isinstance(dtypes, Mapping)
+            or set(shapes) != set(dtypes)
+        ):
+            raise ComponentCompatibilityError("FormulaOperandBank config is invalid")
+        try:
+            ComponentRef.parse(config["source_ref"])
+        except InvalidComponentRefError as exc:
+            raise ComponentCompatibilityError(
+                "FormulaOperandBank source reference is invalid"
+            ) from exc
+        for name, shape in shapes.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(shape, list)
+                or not shape
+                or shape[0] != candidate_count
+                or any(
+                    isinstance(size, bool) or not isinstance(size, int) or size <= 0
+                    for size in shape
+                )
+                or not isinstance(dtypes[name], str)
+                or not dtypes[name]
+            ):
+                raise ComponentCompatibilityError("FormulaOperandBank operand schema is invalid")
+        return
+    if reference in {"arti/formula-fabric@2", "arti/formula-execution-plan@1"}:
+        from .formula_v2 import FormulaProgram
+
+        required = {"program", "program_fingerprint"}
+        if reference == "arti/formula-execution-plan@1":
+            required.update(
+                {
+                    "schema_ref",
+                    "schema_version",
+                    "binding_names",
+                }
+            )
+        if not isinstance(config, Mapping) or set(config) != required:
+            raise ComponentCompatibilityError("Formula execution config is incomplete")
+        try:
+            program = FormulaProgram.from_dict(config["program"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("Formula execution program is invalid") from exc
+        if config["program_fingerprint"] != program.fingerprint:
+            raise ComponentCompatibilityError("Formula execution program fingerprint is invalid")
+        if reference == "arti/formula-execution-plan@1":
+            from .formula_v2 import (
+                FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
+                FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION,
+            )
+
+            if (
+                config["schema_ref"] != FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF
+                or config["schema_version"]
+                != FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION
+            ):
+                raise ComponentCompatibilityError("Formula execution plan schema is invalid")
+            if config["binding_names"] != [binding.name for binding in program.bindings]:
+                raise ComponentCompatibilityError("Formula execution binding order is invalid")
+        expected_dependencies = sorted({item.atom_ref for item in program.instructions})
+        if dependencies != expected_dependencies or not set(dependencies).issubset(formula_atom_refs):
+            raise ComponentCompatibilityError("Formula execution dependency closure is invalid")
+        return
+    if reference in formula_atom_refs:
+        from .formula_v2 import AddAtom, ContractAtom, ReduceAtom, ScaleAtom, TensorType
+
+        if not isinstance(config, Mapping) or dependencies:
+            raise ComponentCompatibilityError("Formula atom config or dependency closure is invalid")
+        try:
+            if reference == "arti/formula-atom-contract@1":
+                required = {
+                    "left_type",
+                    "right_type",
+                    "output_type",
+                    "reduce_axes",
+                    "output_axes",
+                    "accumulation_dtype",
+                }
+                if set(config) != required:
+                    raise ValueError("contract config fields")
+                atom = ContractAtom(
+                    TensorType.from_dict(config["left_type"]),
+                    TensorType.from_dict(config["right_type"]),
+                    reduce_axes=config["reduce_axes"],
+                    output_axes=config["output_axes"],
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("contract output type")
+            elif reference == "arti/formula-atom-scale@1":
+                if set(config) != {"value_type", "factor_type", "accumulation_dtype"}:
+                    raise ValueError("scale config fields")
+                ScaleAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    TensorType.from_dict(config["factor_type"]),
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+            elif reference == "arti/formula-atom-add@1":
+                if set(config) != {"value_type", "accumulation_dtype"}:
+                    raise ValueError("add config fields")
+                AddAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+            else:
+                required = {
+                    "value_type",
+                    "output_type",
+                    "axis",
+                    "mode",
+                    "accumulation_dtype",
+                }
+                if set(config) != required or config["mode"] != "sum":
+                    raise ValueError("reduce config fields")
+                atom = ReduceAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    axis=config["axis"],
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("reduce output type")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("Formula atom config is invalid") from exc
+        return
 
     if reference == "arti/batched-refine-operation@1":
         required = {"operation_ref", "operation_config_fingerprint"}

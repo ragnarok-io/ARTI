@@ -136,13 +136,19 @@ def main() -> None:
             "arti/vnext_contracts.py",
             "arti/vnext_pipeline.py",
             "arti/alpha/__init__.py",
+            "arti/formula_v2.py",
+            "arti/formula_learning.py",
             "arti/batched_refine.py",
             "arti/branch_formula.py",
             "arti/branch_refine.py",
             "arti/gpu_resident.py",
             "arti/runtime_checkpoint.py",
+            "arti/refine_exit.py",
+            "arti/refine_exit_training.py",
+            "arti/refine_training.py",
             "arti/tensor_binding.py",
             "arti/tensor_transaction.py",
+            "arti/tensor_operation.py",
             "arti/providers.py",
             "arti/pretrained.py",
             "arti/pretrained_cli.py",
@@ -203,6 +209,14 @@ def main() -> None:
                         "assert arti.component_ref(Fold(active_count=2)) == 'arti/fold@2'; "
                         "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'; "
                         "assert callable(FormulaFabric) and callable(FormulaFabricProgram); "
+                        "assert callable(arti.alpha.FormulaFabricV2); "
+                        "assert callable(arti.alpha.FormulaOperandBank); "
+                        "assert callable(arti.alpha.RefineStepTraining); "
+                        "assert callable(arti.alpha.FormulaRefineExit); "
+                        "assert callable(arti.alpha.RefineExitTraining); "
+                        "assert callable(arti.alpha.OperableTensorPort); "
+                        "assert callable(arti.alpha.TensorOperationLoop); "
+                        "assert callable(arti.alpha.TensorInvocation); "
                         "assert arti.component_ref(ObjectiveExposureBank(slots=2, query_dim=4)) == 'arti/objective-exposure-bank@1'; "
                         "assert callable(query_recall_branches) and callable(run_batched_refine); "
                         "assert callable(BatchedRefinePlan) and callable(BranchBatchHarness); "
@@ -232,7 +246,7 @@ def main() -> None:
                 sys.executable,
                 "-c",
                     (
-                    "import arti, arti.functional, arti.torch, arti.jax, arti.web; "
+                    "import arti, arti.functional, arti.torch, arti.jax, arti.web, json, torch; "
                     "from arti.alpha import Fold as TopologyFold, TargetBankUpdater, UnFold as TopologyUnFold, WriteRefinePolicy; "
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
@@ -315,6 +329,28 @@ def main() -> None:
                     "assert callable(arti.alpha.BatchedRefinePlan); "
                     "assert callable(arti.alpha.BranchBatchHarness); "
                     "assert callable(arti.alpha.VolatileTensorRuntime); "
+                    "assert callable(arti.alpha.FormulaFabricV2); "
+                    "assert callable(arti.alpha.FormulaExecutionPlanV2); "
+                    "assert callable(arti.alpha.FormulaOperandBank); "
+                    "assert callable(arti.alpha.build_lora_program); "
+                    "assert callable(arti.alpha.build_routed_lora_program); "
+                    "assert callable(arti.alpha.hard_formula_route); "
+                    "assert callable(arti.alpha.RefineStepTraining); "
+                    "assert callable(arti.alpha.FormulaRefineExit); "
+                    "assert callable(arti.alpha.RefineExitTraining); "
+                    "assert callable(arti.alpha.OperableTensorPort); "
+                    "assert callable(arti.alpha.SharedCanvasFold); "
+                    "assert callable(arti.alpha.TensorEditFormula); "
+                    "assert callable(arti.alpha.TensorOperationLoop); "
+                    "assert callable(arti.alpha.TensorInvocation); "
+                    "port_spec = arti.alpha.PortSpec(2, 1, 2, (0,)); "
+                    "operable_port = arti.alpha.OperableTensorPort(port_spec, batch_size=1); "
+                    "assert arti.component_ref(operable_port) == 'arti/operable-tensor-port@1'; "
+                    "formula_program = arti.alpha.build_lora_program(input_dim=2, output_dim=2, rank=1, source_ref='arti/package-formula-bank@1', dtype='float32'); "
+                    "formula_payload = json.loads(json.dumps(formula_program.to_dict())); "
+                    "assert arti.alpha.FormulaProgram.from_dict(formula_payload).fingerprint == formula_program.fingerprint; "
+                    "exit_request = arti.alpha.FormulaRefineExit(input_kind='logit')(torch.ones(1, 1), mask=torch.ones(1, 1, dtype=torch.bool)); "
+                    "assert arti.component_ref(exit_request) == 'arti/refine-exit-request@1'; "
                     "assert not hasattr(arti, 'StatefulRecall'); "
                     "assert not hasattr(arti, 'LayerRecall'); "
                     "assert callable(arti.VisualField); "

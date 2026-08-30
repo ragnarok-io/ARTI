@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.9a3 is a
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.10a1 is a
 prerelease for the versioned vNext composition contracts described below; it
 does not promote those alpha components to the supported surface and is not an
 LTS promise.
@@ -78,6 +78,15 @@ namespace migration; it does not alter the Recall@4 contract.
 3.0.9a3 restores the declared Formula contract and lock schema v2 after an
 alpha snapshot regression, updates Recall Bank examples to the current API,
 and removes retired migration and namespace examples from the release docs.
+
+3.0.10a1 introduces typed `FormulaFabric@2`, detached on-policy one-step
+Refine training, Formula-controlled post-transition exit, and the operable
+tensor port/operation lifecycle under `arti.alpha`. The tensor-operation path
+uses a default or externally mounted backing, a world-shaped shared canvas,
+parallel Reader Refine and operation branches from one call-boundary snapshot,
+and caller-committed next-call proposals. Formula programs, training helpers,
+exit control, tensor operations, and their task/runtime effects remain alpha
+and are not part of the Stable Candidate compatibility promise.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

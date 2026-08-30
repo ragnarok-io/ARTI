@@ -4,6 +4,107 @@ Formula Fabric is an alpha, fixed-capacity tensor executor. A program declares
 a bounded set of Formula cells, while a route source selects their operands.
 The executor remains the only implementation of Formula mathematics.
 
+## Typed Atom Basis
+
+`FormulaFabricV2` is an alpha typed SSA executor. It is a separate component
+version from `FormulaFabric@1`; the original fixed-arena runtime remains
+unchanged. A v2 program declares named tensor axes, domains, dtypes, bounded
+slots, explicit Input and Bank bindings, and a sequence of four public atoms:
+
+- `Contract@1` contracts exactly the named axis pairs.
+- `Scale@1` applies a scalar or named-axis factor.
+- `Add@1` combines two tensors with the same typed shape.
+- `Reduce@1` performs an ordered deterministic sum over one named axis.
+
+For example, a rank-r LoRA-shaped operation is expanded into ordinary atoms:
+
+```python
+import torch
+
+from arti import alpha
+
+program = alpha.build_lora_program(
+    input_dim=64,
+    output_dim=64,
+    rank=8,
+    source_ref="my-package/adapter-bank@1",
+)
+fabric = alpha.FormulaFabricV2(program)
+
+x = torch.randn(2, 16, 64)
+base = torch.randn(2, 16, 64)
+values = {
+    "lora.A": torch.randn(8, 64),
+    "lora.B": torch.randn(64, 8),
+}
+banks = {
+    binding.name: binding.bind(values[binding.name])
+    for binding in program.bindings
+    if isinstance(binding, alpha.BankBinding)
+}
+result = fabric(
+    inputs={"x": x, "base": base, "lora.gain": torch.tensor(0.5)},
+    banks=banks,
+)
+y = result.values[0]
+```
+
+The program contains no opaque LoRA or matrix-multiply primitive. `A`, `B`, and
+`gain` remain explicit operands, so a Bank may learn and route them as one
+bundle. `build_routed_lora_program()` exposes the candidate-axis route as an
+ordinary typed input; this keeps Formula execution generic and also permits an
+explicit caller-selected mixture. `FormulaOperandBank.route()` is the public
+hard one-candidate producer. It uses stable member identities to break exact
+ties and can use a straight-through softmax surrogate during optimization
+without changing the hard forward value.
+
+The route query is a runtime tensor, not state owned by `FormulaOperandBank`.
+Gradients may flow through that tensor to the current hidden state, while the
+Bank state dict contains only its keys and Formula operands. In ARTI Refine
+compositions, the Query producer remains fixed and must not be added to the
+optimizer; a new hidden state still produces a fresh query value at every step.
+
+The numerical policy is also part of the immutable program. Contract and
+pointwise accumulation can independently use `"float32"` or `"activation"`.
+Contract defaults to float32 because it contains the long reductions;
+pointwise Scale/Add default to activation dtype. Using activation accumulation
+for Contract is an explicit opt-in for hardware-native low-precision execution.
+Admission requires every operand of an instruction to use the same concrete
+runtime dtype, including when its declared type is the generic `"floating"`
+category. `FormulaLimits` bounds both individual tensors and a conservative
+aggregate live working set; these limits are serialized into the program and
+therefore participate in its fingerprint. The aggregate includes bound values,
+accumulation-dtype operands, the accumulation result, its activation-dtype
+cast, and ordered-reduction accumulator overlap. Backend-owned kernel scratch
+space remains an execution-provider concern rather than part of this tensor
+ABI limit.
+
+Host-side validation remains mandatory before compiled execution:
+
+```python
+bindings = fabric.bind_tensors(inputs=inputs, banks=banks)
+plan = fabric.execution_plan()
+compiled = torch.compile(plan, fullgraph=True)
+outputs = compiled(bindings)
+```
+
+`bind_tensors()` returns `PreparedFormulaBindings`, a host-admission receipt for
+one exact program and binding order. `FormulaExecutionPlanV2` rejects raw tensor
+tuples and receipts from another program. This is an accidental-misuse guard,
+not caller authentication: identity metadata is a local calling contract. The
+compiled graph does not independently rediscover Bank provenance from tensor
+bytes. Trace data is diagnostic program provenance; it does not attest the
+bytes of externally supplied Bank tensors.
+
+The v2 reference executor operates on dense floating tensors with positive
+axis extents. Masks and ragged layouts are not implicit executor behavior; a
+caller must represent them as explicit typed operands in a compatible program
+or keep that policy outside Formula execution. Compiled plans consume bindings
+that have already passed host-side shape, dtype, device, identity, and working
+set admission.
+
+See `examples/formula_v2_typed_lora.py` for a complete hard-routed Bank example.
+
 ## Objective-Controlled Commits
 
 `ObjectiveFormulaFabricCompute` is an alpha composition adapter that lets an

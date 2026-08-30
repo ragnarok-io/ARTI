@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import importlib
 import json
 
@@ -89,6 +90,51 @@ def test_artifact_scope_rejects_runtime_only_provenance() -> None:
     assert validate_component_provenance(provenance) == provenance
     with pytest.raises(ComponentCompatibilityError, match="artifact_policy"):
         validate_component_provenance(provenance, artifact_scope=True)
+
+
+def test_tensor_operation_provenance_rejects_rehashed_config_and_dependency_forgery() -> None:
+    spec = arti.alpha.PortSpec(
+        canvas_tokens=4,
+        port_slots=2,
+        dim=3,
+        port_to_canvas=(2, 3),
+    )
+    bank = arti.alpha.TensorOperationBank(
+        spec,
+        candidate_count=4,
+        key_dim=7,
+        seed=97,
+    )
+    loop = arti.alpha.TensorOperationLoop(
+        arti.alpha.TensorOperation(
+            spec,
+            arti.alpha.TensorOperationSelector(spec, bank, query_seed=101),
+            surrogate=arti.alpha.TensorEditSurrogate(spec),
+        )
+    )
+    provenance = component_provenance(loop)
+
+    def reseal(value: dict) -> None:
+        for item in value["components"]:
+            payload = json.dumps(
+                item["config"], sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+            item["config_fingerprint"] = hashlib.sha256(payload).hexdigest()
+        value["fingerprint"] = component_graph_fingerprint(value["components"])
+
+    forged_executor = deepcopy(provenance)
+    root = next(item for item in forged_executor["components"] if item["path"] == "$")
+    root["config"]["executor"] = "forged"
+    reseal(forged_executor)
+    with pytest.raises(ComponentCompatibilityError, match="Loop config"):
+        validate_component_provenance(forged_executor)
+
+    forged_dependencies = deepcopy(provenance)
+    root = next(item for item in forged_dependencies["components"] if item["path"] == "$")
+    root["dependencies"].remove("arti/tensor-operation-stop@1")
+    reseal(forged_dependencies)
+    with pytest.raises(ComponentCompatibilityError, match="dependency closure"):
+        validate_component_provenance(forged_dependencies)
 
 
 def test_public_components_have_canonical_refs_and_aliases() -> None:

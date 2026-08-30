@@ -15,6 +15,8 @@ from torch import Tensor
 
 RECALL_TRACE_SCHEMA_VERSION = 1
 RECALL_TRACE_V2_SCHEMA_VERSION = 2
+RECALL_TRACE_V3_SCHEMA_VERSION = 3
+RECALL_TRACE_V3_SCHEMA_REF = "arti/recall-trace@3"
 
 
 _TRACE_LEVELS = frozenset({"none", "summary", "routes", "full"})
@@ -65,6 +67,17 @@ class RecallStopReason(IntEnum):
     NONFINITE = 2
     CYCLE = 3
     MASKED = 4
+    MODEL_EXIT = 5
+
+
+_RECALL_TRACE_V1_REASONS = (
+    RecallStopReason.MAX_STEPS,
+    RecallStopReason.CONVERGED,
+    RecallStopReason.NONFINITE,
+    RecallStopReason.CYCLE,
+    RecallStopReason.MASKED,
+)
+_RECALL_TRACE_V3_REASONS = (*_RECALL_TRACE_V1_REASONS, RecallStopReason.MODEL_EXIT)
 
 
 @dataclass(frozen=True)
@@ -560,7 +573,7 @@ class RecallTrace:
         if bool(torch.any(self.step_committed & ~self.step_attempted)):
             raise ValueError("a committed step must also be attempted")
         valid_reasons = torch.tensor(
-            [int(value) for value in RecallStopReason],
+            [int(value) for value in _RECALL_TRACE_V1_REASONS],
             device=self.stop_reason.device,
             dtype=self.stop_reason.dtype,
         )
@@ -789,7 +802,13 @@ class RecallTraceV2:
                 raise ValueError("token activity must be monotonically non-increasing")
 
         valid_reasons = torch.tensor(
-            [int(value) for value in RecallStopReason],
+            [
+                int(RecallStopReason.MAX_STEPS),
+                int(RecallStopReason.CONVERGED),
+                int(RecallStopReason.NONFINITE),
+                int(RecallStopReason.CYCLE),
+                int(RecallStopReason.MASKED),
+            ],
             device=self.token_stop_reason.device,
             dtype=self.token_stop_reason.dtype,
         )
@@ -934,15 +953,204 @@ class RecallTraceV2:
         return trace.validate() if validate_values else trace
 
 
+@dataclass(frozen=True)
+class RecallTraceV3:
+    """Version-3 adaptive trace with post-transition neural exit evidence."""
+
+    _component_reference: ClassVar[str] = RECALL_TRACE_V3_SCHEMA_REF
+
+    base: RecallTraceV2
+    token_stop_reason: Tensor
+    exit_requested: Tensor
+    exit_allowed: Tensor
+    exit_effective: Tensor
+    blocked_by_min_steps: Tensor
+    model_exit_stop: Tensor
+    exit_score: Tensor
+    terminal_step: Tensor
+    schema_version: int = RECALL_TRACE_V3_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != RECALL_TRACE_V3_SCHEMA_VERSION:
+            raise ValueError("unsupported RecallTraceV3 schema version")
+        if not isinstance(self.base, RecallTraceV2):
+            raise TypeError("base must be RecallTraceV2")
+        if (
+            self.token_stop_reason.shape != self.base.token_stop_reason.shape
+            or self.token_stop_reason.dtype != torch.int64
+        ):
+            raise TypeError("token_stop_reason must be int64 with shape [B, N]")
+        expected = self.base.token_step_attempted.shape
+        for name, value in (
+            ("exit_requested", self.exit_requested),
+            ("exit_allowed", self.exit_allowed),
+            ("exit_effective", self.exit_effective),
+            ("blocked_by_min_steps", self.blocked_by_min_steps),
+            ("model_exit_stop", self.model_exit_stop),
+        ):
+            if value.shape != expected or value.dtype != torch.bool:
+                raise TypeError(f"{name} must be boolean with shape [B, R, N]")
+        if self.exit_score.shape != expected or not self.exit_score.is_floating_point():
+            raise TypeError("exit_score must be floating point with shape [B, R, N]")
+        if (
+            self.terminal_step.shape != self.base.token_steps_attempted.shape
+            or self.terminal_step.dtype != torch.int64
+        ):
+            raise TypeError("terminal_step must be int64 with shape [B, N]")
+        device = self.base.token_steps_attempted.device
+        values = (
+            self.token_stop_reason,
+            self.exit_requested,
+            self.exit_allowed,
+            self.exit_effective,
+            self.blocked_by_min_steps,
+            self.model_exit_stop,
+            self.exit_score,
+            self.terminal_step,
+        )
+        if any(value.device != device for value in values):
+            raise ValueError("RecallTraceV3 tensors must use the base trace device")
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, "base"), name)
+
+    def validate(self) -> "RecallTraceV3":
+        """Validate the base trace and neural-control subset relations."""
+
+        self.base.validate()
+        valid_reasons = torch.tensor(
+            [int(value) for value in _RECALL_TRACE_V3_REASONS],
+            device=self.token_stop_reason.device,
+            dtype=self.token_stop_reason.dtype,
+        )
+        if not bool(torch.isin(self.token_stop_reason, valid_reasons).all()):
+            raise ValueError("token_stop_reason contains an unknown reason code")
+        projected_reason = torch.where(
+            self.token_stop_reason == int(RecallStopReason.MODEL_EXIT),
+            torch.full_like(
+                self.token_stop_reason,
+                int(RecallStopReason.MAX_STEPS),
+            ),
+            self.token_stop_reason,
+        )
+        if not torch.equal(self.base.token_stop_reason, projected_reason):
+            raise ValueError("base stop reason must be the V2-safe projection")
+        attempted = self.base.token_step_attempted
+        if bool(torch.any(self.exit_requested & ~attempted)):
+            raise ValueError("exit requests must belong to attempted token-steps")
+        if bool(torch.any(self.exit_requested & ~self.base.token_step_committed)):
+            raise ValueError("exit requests must belong to committed token-steps")
+        if bool(torch.any(self.exit_allowed & ~attempted)):
+            raise ValueError("exit allowance must belong to attempted token-steps")
+        if not torch.equal(
+            self.blocked_by_min_steps,
+            self.exit_requested & ~self.exit_allowed,
+        ):
+            raise ValueError("blocked_by_min_steps must equal requested and not allowed")
+        if bool(torch.any(self.exit_effective & ~(self.exit_requested & self.exit_allowed))):
+            raise ValueError("effective exit must be both requested and allowed")
+        if bool(torch.any(self.model_exit_stop & ~self.exit_effective)):
+            raise ValueError("model exit stops must be effective requests")
+        stopped = self.model_exit_stop.any(dim=1)
+        reason_is_exit = self.token_stop_reason == int(RecallStopReason.MODEL_EXIT)
+        if not torch.equal(stopped, reason_is_exit):
+            raise ValueError("MODEL_EXIT reason must match model_exit_stop history")
+        if bool(torch.any(~torch.isfinite(self.exit_score) & self.base.token_step_committed)):
+            raise ValueError("exit_score must be finite for committed token-steps")
+        stop_seen = self.model_exit_stop.to(torch.int64).cumsum(dim=1) > 0
+        if bool(torch.any(self.base.token_step_attempted[:, 1:] & stop_seen[:, :-1])):
+            raise ValueError("token-steps cannot be attempted after a model exit")
+        if not torch.equal(self.terminal_step, self.base.token_steps_attempted):
+            raise ValueError("terminal_step must equal attempted token-step count")
+        return self
+
+    def diagnostics(self) -> dict[str, Tensor]:
+        result = self.base.diagnostics()
+        result.update(
+            {
+                "recall_trace_schema": torch.tensor(
+                    self.schema_version,
+                    device=self.base.token_steps_attempted.device,
+                    dtype=torch.int64,
+                ),
+                "recall_token_stop_reason": self.token_stop_reason,
+                "recall_exit_requested": self.exit_requested,
+                "recall_exit_allowed": self.exit_allowed,
+                "recall_exit_effective": self.exit_effective,
+                "recall_exit_blocked_by_min_steps": self.blocked_by_min_steps,
+                "recall_model_exit_stop": self.model_exit_stop,
+                "recall_exit_score": self.exit_score,
+                "recall_terminal_step": self.terminal_step,
+            }
+        )
+        return result
+
+    @classmethod
+    def from_diagnostics(
+        cls,
+        values: Mapping[str, Tensor],
+        *,
+        validate_schema: bool = True,
+        validate_values: bool = True,
+    ) -> "RecallTraceV3":
+        schema = values.get("recall_trace_schema")
+        if validate_schema and (
+            not isinstance(schema, Tensor)
+            or schema.numel() != 1
+            or int(schema.detach().cpu()) != RECALL_TRACE_V3_SCHEMA_VERSION
+        ):
+            raise ValueError("Recall diagnostics use an unsupported trace schema")
+        required = {
+            "recall_exit_requested",
+            "recall_exit_allowed",
+            "recall_exit_effective",
+            "recall_exit_blocked_by_min_steps",
+            "recall_model_exit_stop",
+            "recall_exit_score",
+            "recall_terminal_step",
+        }
+        missing = required - set(values)
+        if missing:
+            raise ValueError(f"Recall diagnostics are missing exit fields: {sorted(missing)}")
+        token_stop_reason = values.get("recall_token_stop_reason")
+        if not isinstance(token_stop_reason, Tensor):
+            raise ValueError("Recall diagnostics are missing token stop reasons")
+        legacy_values = dict(values)
+        legacy_values["recall_token_stop_reason"] = torch.where(
+            token_stop_reason == int(RecallStopReason.MODEL_EXIT),
+            torch.full_like(token_stop_reason, int(RecallStopReason.MAX_STEPS)),
+            token_stop_reason,
+        )
+        trace = cls(
+            base=RecallTraceV2.from_diagnostics(
+                legacy_values,
+                validate_schema=False,
+                validate_values=False,
+            ),
+            token_stop_reason=token_stop_reason,
+            exit_requested=values["recall_exit_requested"],
+            exit_allowed=values["recall_exit_allowed"],
+            exit_effective=values["recall_exit_effective"],
+            blocked_by_min_steps=values["recall_exit_blocked_by_min_steps"],
+            model_exit_stop=values["recall_model_exit_stop"],
+            exit_score=values["recall_exit_score"],
+            terminal_step=values["recall_terminal_step"],
+        )
+        return trace.validate() if validate_values else trace
+
+
 __all__ = [
     "RECALL_TRACE_SCHEMA_VERSION",
     "RECALL_TRACE_V2_SCHEMA_VERSION",
+    "RECALL_TRACE_V3_SCHEMA_VERSION",
+    "RECALL_TRACE_V3_SCHEMA_REF",
     "AdaptiveRefinePolicy",
     "RecallRoutePlan",
     "RecallRouteStack",
     "RecallStopReason",
     "RecallTrace",
     "RecallTraceV2",
+    "RecallTraceV3",
     "RefineBudget",
     "RefinePolicy",
     "RefineStop",
