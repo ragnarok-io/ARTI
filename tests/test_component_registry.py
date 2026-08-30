@@ -95,9 +95,9 @@ def test_artifact_scope_rejects_runtime_only_provenance() -> None:
 def test_tensor_operation_provenance_rejects_rehashed_config_and_dependency_forgery() -> None:
     spec = arti.alpha.PortSpec(
         canvas_tokens=4,
-        port_slots=2,
+        tensor_shape=(2,),
         dim=3,
-        port_to_canvas=(2, 3),
+        tensor_to_canvas=(2, 3),
     )
     bank = arti.alpha.TensorOperationBank(
         spec,

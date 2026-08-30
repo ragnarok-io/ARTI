@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass, replace
 from enum import IntEnum
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Sequence
 
 import torch
 from torch import Tensor, nn
 
-from .formula_learning import FormulaOperandBank, FormulaRouteSelection
+from .formula_learning import FormulaOperandBank, hard_formula_route
 
 
 BackingSource = Literal["default", "external"]
@@ -25,6 +26,18 @@ def _require_tensor(condition: Tensor, message: str) -> None:
         raise ValueError(message)
 
 
+class _HardForwardRelaxedBackward(torch.autograd.Function):
+    """Return the hard tensor bit-exactly while differentiating the relaxation."""
+
+    @staticmethod
+    def forward(_ctx: object, hard: Tensor, _relaxed: Tensor) -> Tensor:
+        return hard.clone()
+
+    @staticmethod
+    def backward(_ctx: object, gradient: Tensor) -> tuple[None, Tensor]:
+        return None, gradient
+
+
 class CanvasSource(IntEnum):
     """Logical source recorded for each shared-canvas position."""
 
@@ -34,39 +47,61 @@ class CanvasSource(IntEnum):
 
 
 class EditOperation(IntEnum):
-    """Hard v1 edit operations over one backing snapshot."""
+    """Hard field operations over one backing snapshot."""
 
     KEEP = 0
     COPY = 1
-    CLEAR = 2
+    ERASE = 2
 
 
 @dataclass(frozen=True)
 class PortSpec:
-    """Immutable shape, mapping, and empty-value contract for one tensor port."""
+    """Immutable logical-tensor and folded-view contract for one tensor port."""
 
-    _component_reference: ClassVar[str] = "arti/operable-tensor-port-spec@1"
+    _component_reference: ClassVar[str] = "arti/operable-tensor-port-spec@3"
 
     canvas_tokens: int
-    port_slots: int
+    tensor_shape: tuple[int, ...]
     dim: int
-    port_to_canvas: tuple[int, ...]
+    tensor_to_canvas: tuple[int, ...]
+    folded_tensor_coordinates: tuple[tuple[int, ...], ...] | None = None
     dtype: torch.dtype = torch.float32
     empty_value: float = 0.0
     default_visible: bool = False
     coordinate_frame: str = "flat"
 
     def __post_init__(self) -> None:
-        for name in ("canvas_tokens", "port_slots", "dim"):
+        for name in ("canvas_tokens", "dim"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        if len(self.port_to_canvas) != self.port_slots:
-            raise ValueError("port_to_canvas must contain one index per port slot")
-        if len(set(self.port_to_canvas)) != self.port_slots:
-            raise ValueError("port_to_canvas must be injective")
-        if any(index < 0 or index >= self.canvas_tokens for index in self.port_to_canvas):
-            raise ValueError("port_to_canvas contains an out-of-range canvas index")
+        shape = tuple(self.tensor_shape)
+        if not shape or any(
+            isinstance(size, bool) or not isinstance(size, int) or size <= 0
+            for size in shape
+        ):
+            raise ValueError("tensor_shape must contain positive integer dimensions")
+        object.__setattr__(self, "tensor_shape", shape)
+        tensor_to_canvas = tuple(self.tensor_to_canvas)
+        object.__setattr__(self, "tensor_to_canvas", tensor_to_canvas)
+        folded = (
+            tuple(self.unravel_offset(index) for index in range(len(tensor_to_canvas)))
+            if self.folded_tensor_coordinates is None
+            else tuple(tuple(coordinate) for coordinate in self.folded_tensor_coordinates)
+        )
+        object.__setattr__(self, "folded_tensor_coordinates", folded)
+        if len(tensor_to_canvas) != len(folded):
+            raise ValueError(
+                "tensor_to_canvas and folded_tensor_coordinates must contain the same number of entries"
+            )
+        if len(set(tensor_to_canvas)) != len(tensor_to_canvas):
+            raise ValueError("tensor_to_canvas must be injective")
+        if any(index < 0 or index >= self.canvas_tokens for index in tensor_to_canvas):
+            raise ValueError("tensor_to_canvas contains an out-of-range canvas index")
+        if len(set(folded)) != len(folded):
+            raise ValueError("folded_tensor_coordinates must be injective")
+        for coordinate in folded:
+            self.ravel_coordinate(coordinate)
         if not isinstance(self.dtype, torch.dtype) or not torch.empty((), dtype=self.dtype).is_floating_point():
             raise TypeError("dtype must be a floating-point torch dtype")
         if isinstance(self.empty_value, bool) or not isinstance(self.empty_value, (int, float)):
@@ -83,29 +118,96 @@ class PortSpec:
         return self.canvas_tokens, self.dim
 
     @property
-    def port_shape(self) -> tuple[int, int]:
-        return self.port_slots, self.dim
+    def element_count(self) -> int:
+        return math.prod(self.tensor_shape)
+
+    @property
+    def backing_shape(self) -> tuple[int, ...]:
+        return (*self.tensor_shape, self.dim)
+
+    @property
+    def backing_mask_shape(self) -> tuple[int, ...]:
+        return self.tensor_shape
+
+    @property
+    def folded_tensor_offsets(self) -> tuple[int, ...]:
+        assert self.folded_tensor_coordinates is not None
+        return tuple(self.ravel_coordinate(value) for value in self.folded_tensor_coordinates)
+
+    def ravel_coordinate(self, coordinate: Sequence[int]) -> int:
+        resolved = tuple(coordinate)
+        if len(resolved) != len(self.tensor_shape):
+            raise ValueError(
+                f"tensor coordinate must have rank {len(self.tensor_shape)}, got {len(resolved)}"
+            )
+        offset = 0
+        for axis, (index, size) in enumerate(zip(resolved, self.tensor_shape, strict=True)):
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise TypeError("tensor coordinates must contain integers")
+            if index < 0 or index >= size:
+                raise ValueError(f"tensor coordinate axis {axis} is out of range")
+            offset = offset * size + index
+        return offset
+
+    def unravel_offset(self, offset: int) -> tuple[int, ...]:
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            raise TypeError("tensor offset must be an integer")
+        if offset < 0 or offset >= self.element_count:
+            raise ValueError("tensor offset is out of range")
+        result = [0] * len(self.tensor_shape)
+        remainder = offset
+        for axis in range(len(self.tensor_shape) - 1, -1, -1):
+            size = self.tensor_shape[axis]
+            result[axis] = remainder % size
+            remainder //= size
+        return tuple(result)
+
+    def region_offsets(self, *axes: slice | int) -> tuple[int, ...]:
+        """Compile one logical tensor region into row-major element offsets."""
+
+        if len(axes) != len(self.tensor_shape):
+            raise ValueError(f"region must provide {len(self.tensor_shape)} axes")
+        coordinates: list[tuple[int, ...]] = [()]
+        for axis, (selector, size) in enumerate(zip(axes, self.tensor_shape, strict=True)):
+            if isinstance(selector, int) and not isinstance(selector, bool):
+                if selector < 0 or selector >= size:
+                    raise ValueError(f"region axis {axis} is out of range")
+                selected = (selector,)
+            elif isinstance(selector, slice):
+                if selector.step == 0:
+                    raise ValueError("region slices cannot have a zero step")
+                selected = tuple(range(*selector.indices(size)))
+            else:
+                raise TypeError("region axes must be integers or slices")
+            coordinates = [prefix + (index,) for prefix in coordinates for index in selected]
+        return tuple(self.ravel_coordinate(value) for value in coordinates)
+
+    def flatten_value(self, value: Tensor) -> Tensor:
+        return value.reshape(value.shape[0], self.element_count, self.dim)
+
+    def flatten_mask(self, mask: Tensor) -> Tensor:
+        return mask.reshape(mask.shape[0], self.element_count)
+
+    def restore_value(self, value: Tensor) -> Tensor:
+        return value.reshape(value.shape[0], *self.backing_shape)
+
+    def restore_mask(self, mask: Tensor) -> Tensor:
+        return mask.reshape(mask.shape[0], *self.backing_mask_shape)
 
     def validate_backing(self, value: Tensor, mask: Tensor, *, batch_size: int) -> None:
-        if not isinstance(value, Tensor) or tuple(value.shape) != (
-            batch_size,
-            self.port_slots,
-            self.dim,
-        ):
+        expected_value = (batch_size, *self.backing_shape)
+        if not isinstance(value, Tensor) or tuple(value.shape) != expected_value:
             raise ValueError(
-                "backing must have shape "
-                f"[{batch_size}, {self.port_slots}, {self.dim}]"
+                f"backing must have shape {list(expected_value)}"
             )
         if value.dtype != self.dtype:
             raise TypeError(f"backing dtype must be {self.dtype}")
         if not value.is_contiguous():
             raise ValueError("backing must be contiguous")
-        if not isinstance(mask, Tensor) or tuple(mask.shape) != (
-            batch_size,
-            self.port_slots,
-        ):
+        expected_mask = (batch_size, *self.backing_mask_shape)
+        if not isinstance(mask, Tensor) or tuple(mask.shape) != expected_mask:
             raise ValueError(
-                f"backing mask must have shape [{batch_size}, {self.port_slots}]"
+                f"backing mask must have shape {list(expected_mask)}"
             )
         if mask.dtype != torch.bool:
             raise TypeError("backing mask must be boolean")
@@ -114,10 +216,52 @@ class PortSpec:
 
 
 @dataclass(frozen=True)
+class TensorOperationFieldSpec:
+    """Bounded shape and synchronous-write contract for one operation field."""
+
+    _component_reference: ClassVar[str] = "arti/tensor-operation-field-spec@2"
+
+    port: PortSpec
+    support_size: int
+    collision_policy: Literal["last_element"] = "last_element"
+    atomic_snapshot: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.port, PortSpec):
+            raise TypeError("port must be PortSpec")
+        if (
+            isinstance(self.support_size, bool)
+            or not isinstance(self.support_size, int)
+            or self.support_size <= 0
+        ):
+            raise ValueError("support_size must be a positive integer")
+        if self.collision_policy != "last_element":
+            raise ValueError("collision_policy must be 'last_element'")
+        if self.atomic_snapshot is not True:
+            raise ValueError("operation fields require atomic_snapshot=True")
+
+    @property
+    def source_capacity(self) -> int:
+        return self.port.canvas_tokens + self.port.element_count
+
+    def contract(self) -> dict[str, object]:
+        return {
+            "ref": self._component_reference,
+            "support_size": self.support_size,
+            "source_capacity": self.source_capacity,
+            "collision_policy": self.collision_policy,
+            "atomic_snapshot": self.atomic_snapshot,
+            "operations": tuple(operation.name for operation in EditOperation),
+            "index_dtype": "int64",
+            "value_dtype": str(self.port.dtype),
+        }
+
+
+@dataclass(frozen=True)
 class PortSnapshot:
     """Resolved pre-step backing selected at a call boundary."""
 
-    _component_reference: ClassVar[str] = "arti/operable-tensor-snapshot@1"
+    _component_reference: ClassVar[str] = "arti/operable-tensor-snapshot@2"
 
     value: Tensor
     mask: Tensor
@@ -129,7 +273,7 @@ class PortSnapshot:
 class OperableTensorPort:
     """Runtime-owned stable port with an always-present default backing."""
 
-    _component_reference: ClassVar[str] = "arti/operable-tensor-port@1"
+    _component_reference: ClassVar[str] = "arti/operable-tensor-port@2"
 
     def __init__(
         self,
@@ -149,14 +293,14 @@ class OperableTensorPort:
         resolved_device = torch.device("cpu" if device is None else device)
         if default_value is None:
             default_value = torch.full(
-                (batch_size, spec.port_slots, spec.dim),
+                (batch_size, *spec.backing_shape),
                 spec.empty_value,
                 dtype=spec.dtype,
                 device=resolved_device,
             )
         if default_mask is None:
             default_mask = torch.full(
-                (batch_size, spec.port_slots),
+                (batch_size, *spec.backing_mask_shape),
                 spec.default_visible,
                 dtype=torch.bool,
                 device=default_value.device,
@@ -243,7 +387,7 @@ class OperableTensorPort:
 class SharedCanvas:
     """World-shaped presentation of world and backing from one snapshot."""
 
-    _component_reference: ClassVar[str] = "arti/shared-canvas@1"
+    _component_reference: ClassVar[str] = "arti/shared-canvas@3"
 
     values: Tensor
     mask: Tensor
@@ -258,9 +402,9 @@ class SharedCanvas:
 
 
 class SharedCanvasFold(nn.Module):
-    """Overlay a mounted backing onto world coordinates without concatenation."""
+    """Fold declared tensor coordinates onto world positions without concatenation."""
 
-    _component_reference: ClassVar[str] = "arti/shared-canvas-fold@1"
+    _component_reference: ClassVar[str] = "arti/shared-canvas-fold@3"
 
     def __init__(self, spec: PortSpec) -> None:
         super().__init__()
@@ -269,7 +413,12 @@ class SharedCanvasFold(nn.Module):
         self.spec = spec
         self.register_buffer(
             "_canvas_index",
-            torch.tensor(spec.port_to_canvas, dtype=torch.int64),
+            torch.tensor(spec.tensor_to_canvas, dtype=torch.int64),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_backing_index",
+            torch.tensor(spec.folded_tensor_offsets, dtype=torch.int64),
             persistent=False,
         )
 
@@ -332,40 +481,42 @@ class SharedCanvasFold(nn.Module):
         source_index = torch.where(world_mask, source_index, torch.full_like(source_index, -1))
 
         canvas_index = self._canvas_index
+        backing_index = self._backing_index
         if canvas_index.device != world.device:
             # SharedCanvasFold is otherwise stateless, so a standalone call should
             # remain device-native like the original implementation. Composite
             # modules still move this buffer once with ``module.to(device)``.
             canvas_index = canvas_index.to(device=world.device, non_blocking=True)
+            backing_index = backing_index.to(device=world.device, non_blocking=True)
+        flat_backing = self.spec.flatten_value(snapshot.value)
+        flat_backing_mask = self.spec.flatten_mask(snapshot.mask)
+        exposed_value = flat_backing.index_select(1, backing_index)
+        exposed_mask = flat_backing_mask.index_select(1, backing_index)
         previous = canvas.index_select(1, canvas_index)
         canvas[:, canvas_index, :] = torch.where(
-            snapshot.mask.unsqueeze(-1),
-            snapshot.value,
+            exposed_mask.unsqueeze(-1),
+            exposed_value,
             previous,
         )
         previous_mask = canvas_mask.index_select(1, canvas_index)
-        canvas_mask[:, canvas_index] = snapshot.mask | previous_mask
+        canvas_mask[:, canvas_index] = exposed_mask | previous_mask
         backing_plane = torch.full(
-            snapshot.mask.shape,
+            exposed_mask.shape,
             int(CanvasSource.BACKING),
             dtype=torch.int8,
             device=world.device,
         )
         selected_plane = source_plane.index_select(1, canvas_index)
         source_plane[:, canvas_index] = torch.where(
-            snapshot.mask,
+            exposed_mask,
             backing_plane,
             selected_plane,
         )
-        backing_index = torch.arange(
-            self.spec.port_slots,
-            dtype=torch.int64,
-            device=world.device,
-        ).expand(batch, -1)
+        exposed_index = backing_index.expand(batch, -1)
         selected_index = source_index.index_select(1, canvas_index)
         source_index[:, canvas_index] = torch.where(
-            snapshot.mask,
-            backing_index,
+            exposed_mask,
+            exposed_index,
             selected_index,
         )
         return SharedCanvas(
@@ -388,9 +539,9 @@ def _tensor_hash(value: Tensor) -> str:
 
 
 class TensorOperationQuery(nn.Module):
-    """Deterministic, non-trainable projection of one shared canvas."""
+    """Fixed projection over complete world and backing snapshots."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-query@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-query@4"
 
     def __init__(self, spec: PortSpec, key_dim: int, *, seed: int = 0) -> None:
         super().__init__()
@@ -402,10 +553,17 @@ class TensorOperationQuery(nn.Module):
         self.key_dim = key_dim
         self.seed = int(seed)
         generator = torch.Generator(device="cpu").manual_seed(self.seed)
-        scale = (spec.canvas_tokens * spec.dim) ** -0.5
+        scale = ((spec.canvas_tokens + spec.element_count) * spec.dim) ** -0.5
         basis = torch.randn(
             key_dim,
             spec.canvas_tokens,
+            spec.dim,
+            generator=generator,
+            dtype=spec.dtype,
+        ) * scale
+        backing_basis = torch.randn(
+            key_dim,
+            spec.element_count,
             spec.dim,
             generator=generator,
             dtype=spec.dtype,
@@ -415,9 +573,17 @@ class TensorOperationQuery(nn.Module):
             spec.canvas_tokens,
             generator=generator,
             dtype=spec.dtype,
-        ) * spec.canvas_tokens**-0.5
+        ) * (spec.canvas_tokens + spec.element_count) ** -0.5
+        backing_mask_basis = torch.randn(
+            key_dim,
+            spec.element_count,
+            generator=generator,
+            dtype=spec.dtype,
+        ) * (spec.canvas_tokens + spec.element_count) ** -0.5
         self.register_buffer("basis", basis, persistent=True)
+        self.register_buffer("backing_basis", backing_basis, persistent=True)
         self.register_buffer("mask_basis", mask_basis, persistent=True)
+        self.register_buffer("backing_mask_basis", backing_mask_basis, persistent=True)
 
     def forward(self, canvas: SharedCanvas) -> Tensor:
         if not isinstance(canvas, SharedCanvas):
@@ -426,10 +592,29 @@ class TensorOperationQuery(nn.Module):
             raise ValueError("canvas shape does not match the TensorOperation Query PortSpec")
         if canvas.values.dtype != self.spec.dtype:
             raise TypeError("canvas dtype does not match the TensorOperation Query PortSpec")
-        value = canvas.values.detach()
-        mask = canvas.mask.detach().to(dtype=value.dtype)
-        return torch.einsum("bnd,knd->bk", value, self.basis.to(value)) + torch.einsum(
-            "bn,kn->bk", mask, self.mask_basis.to(value)
+        world_visible = canvas.world_mask.detach()
+        backing_visible = self.spec.flatten_mask(canvas.backing_mask.detach())
+        world = torch.where(
+            world_visible.unsqueeze(-1),
+            canvas.world_values.detach(),
+            torch.full_like(canvas.world_values, self.spec.empty_value),
+        )
+        backing = torch.where(
+            backing_visible.unsqueeze(-1),
+            self.spec.flatten_value(canvas.backing_values.detach()),
+            torch.full_like(
+                self.spec.flatten_value(canvas.backing_values), self.spec.empty_value
+            ),
+        )
+        world_mask = world_visible.to(dtype=world.dtype)
+        backing_mask = backing_visible.to(dtype=backing.dtype)
+        return (
+            torch.einsum("bnd,knd->bk", world, self.basis.to(world))
+            + torch.einsum("bn,kn->bk", world_mask, self.mask_basis.to(world))
+            + torch.einsum("bsd,ksd->bk", backing, self.backing_basis.to(backing))
+            + torch.einsum(
+                "bs,ks->bk", backing_mask, self.backing_mask_basis.to(backing)
+            )
         )
 
     def operation_query_contract(self) -> dict[str, object]:
@@ -438,17 +623,36 @@ class TensorOperationQuery(nn.Module):
             "key_dim": self.key_dim,
             "seed": self.seed,
             "basis_hash": _tensor_hash(self.basis),
+            "backing_basis_hash": _tensor_hash(self.backing_basis),
             "mask_basis_hash": _tensor_hash(self.mask_basis),
+            "backing_mask_basis_hash": _tensor_hash(self.backing_mask_basis),
+            "input_view": "complete_world_and_backing",
             "fixed": True,
             "deterministic": True,
             "stateful": False,
         }
 
 
-class TensorOperationBank(FormulaOperandBank):
-    """Trainable candidate Bank for one bounded hard edit instruction."""
+@dataclass(frozen=True)
+class TensorOperationRouteSelection:
+    """Hard member identity plus concat-local routing diagnostics."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-bank@1"
+    route: Tensor
+    hard_indices: Tensor
+    logits: Tensor
+    entropy: Tensor
+    estimator: Literal["hard", "straight-through"]
+    bank_indices: Tensor
+    local_indices: Tensor
+    local_probabilities: Tensor
+    bank_probabilities: Tensor
+    bank_ids: tuple[str, ...]
+
+
+class TensorOperationBank(FormulaOperandBank):
+    """Trainable candidates whose values are complete bounded operation fields."""
+
+    _component_reference: ClassVar[str] = "arti/tensor-operation-bank@3"
 
     def __init__(
         self,
@@ -456,15 +660,15 @@ class TensorOperationBank(FormulaOperandBank):
         *,
         candidate_count: int,
         key_dim: int,
+        support_size: int | None = None,
+        bank_id: str | None = None,
+        member_ids: Sequence[str] | None = None,
         seed: int = 0,
         init_scale: float = 0.02,
     ) -> None:
         if not isinstance(spec, PortSpec):
             raise TypeError("spec must be PortSpec")
-        for value, name in (
-            (candidate_count, "candidate_count"),
-            (key_dim, "key_dim"),
-        ):
+        for value, name in ((candidate_count, "candidate_count"), (key_dim, "key_dim")):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if (
@@ -474,6 +678,16 @@ class TensorOperationBank(FormulaOperandBank):
             or float(init_scale) <= 0
         ):
             raise ValueError("init_scale must be a finite positive number")
+        size = spec.element_count if support_size is None else support_size
+        field_spec = TensorOperationFieldSpec(spec, size)
+        resolved_bank_id = f"tensor-operation-{int(seed)}" if bank_id is None else bank_id
+        if not isinstance(resolved_bank_id, str) or not resolved_bank_id:
+            raise ValueError("bank_id must be a non-empty string")
+        resolved_members = (
+            tuple(f"{resolved_bank_id}-member-{index:03d}" for index in range(candidate_count))
+            if member_ids is None
+            else tuple(member_ids)
+        )
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
         keys = torch.randn(
             candidate_count,
@@ -482,69 +696,269 @@ class TensorOperationBank(FormulaOperandBank):
             dtype=spec.dtype,
         ) * key_dim**-0.5
 
-        def logits(width: int) -> Tensor:
-            return (
-                torch.randn(
-                    candidate_count,
-                    width,
-                    generator=generator,
-                    dtype=spec.dtype,
-                )
-                * float(init_scale)
-            )
+        def logits(*shape: int) -> Tensor:
+            return torch.randn(
+                candidate_count,
+                *shape,
+                generator=generator,
+                dtype=spec.dtype,
+            ) * float(init_scale)
 
         operands = {
-            "operation": logits(len(EditOperation)),
-            "source_plane": logits(2),
-            "world_source": logits(spec.canvas_tokens),
-            "backing_source": logits(spec.port_slots),
-            "destination": logits(spec.port_slots),
+            "active": logits(field_spec.support_size) - float(init_scale),
+            "operation": logits(field_spec.support_size, len(EditOperation)),
+            "source": logits(field_spec.support_size, field_spec.source_capacity),
+            "destination": logits(field_spec.support_size, spec.element_count),
         }
-        operands["operation"][:, int(EditOperation.KEEP)] += float(init_scale)
+        operands["operation"][:, :, int(EditOperation.KEEP)] += float(init_scale)
         super().__init__(
             keys=keys,
             operands=operands,
             source_ref=self._component_reference,
-            bundle_id="tensor-operation",
-            member_ids=tuple(
-                f"tensor-operation-{index:03d}" for index in range(candidate_count)
-            ),
+            bundle_id=resolved_bank_id,
+            member_ids=resolved_members,
         )
         self.spec = spec
+        self.field_spec = field_spec
         self.seed = int(seed)
         self.init_scale = float(init_scale)
+        self.bank_ids = (resolved_bank_id,)
+        self.group_slices = ((0, candidate_count),)
+        self.parent_fingerprints: tuple[str, ...] = ()
+        self.composition_kind = "native"
+        self.register_buffer(
+            "_group_influences",
+            torch.ones(1, dtype=keys.dtype, device=keys.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "_member_group",
+            torch.zeros(candidate_count, dtype=torch.int64, device=keys.device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_member_local",
+            torch.arange(candidate_count, dtype=torch.int64, device=keys.device),
+            persistent=False,
+        )
+
+    @classmethod
+    def concat(
+        cls,
+        banks: Sequence[TensorOperationBank],
+        *,
+        name: str,
+        influences: Sequence[float] | None = None,
+    ) -> TensorOperationBank:
+        """Materialize a typed candidate-axis union without remixing member values."""
+
+        resolved = tuple(banks)
+        if not resolved or any(not isinstance(bank, cls) for bank in resolved):
+            raise TypeError("banks must be a non-empty sequence of TensorOperationBank")
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if influences is None:
+            parent_influences = (1.0,) * len(resolved)
+        else:
+            parent_influences = tuple(float(value) for value in influences)
+            if len(parent_influences) != len(resolved):
+                raise ValueError("influences must contain one value per Bank")
+        if any(not math.isfinite(value) or value < 0 for value in parent_influences):
+            raise ValueError("influences must be finite and non-negative")
+        if not any(value > 0 for value in parent_influences):
+            raise ValueError("at least one Bank influence must be positive")
+
+        first = resolved[0]
+        operand_names = tuple(first.operands)
+        for bank in resolved[1:]:
+            if bank.spec != first.spec or bank.field_spec != first.field_spec:
+                raise ValueError("all Banks must share the exact operation field contract")
+            if bank.key_dim != first.key_dim or tuple(bank.operands) != operand_names:
+                raise ValueError("all Banks must share key and operand schemas")
+            if any(
+                bank.operands[key].shape[1:] != first.operands[key].shape[1:]
+                for key in operand_names
+            ):
+                raise ValueError("all Bank operand trailing shapes must match")
+            if bank.keys.dtype != first.keys.dtype or bank.keys.device != first.keys.device:
+                raise ValueError("all Banks must share key dtype and device")
+
+        member_ids = tuple(member for bank in resolved for member in bank.member_ids)
+        if len(set(member_ids)) != len(member_ids):
+            raise ValueError("concat requires globally unique member_ids")
+        group_ids = tuple(group for bank in resolved for group in bank.bank_ids)
+        if len(set(group_ids)) != len(group_ids):
+            raise ValueError("concat requires globally unique bank_ids")
+        keys = torch.cat(tuple(bank.keys.detach() for bank in resolved), dim=0)
+        operands = {
+            key: torch.cat(tuple(bank.operands[key].detach() for bank in resolved), dim=0)
+            for key in operand_names
+        }
+        result = cls.__new__(cls)
+        FormulaOperandBank.__init__(
+            result,
+            keys=keys,
+            operands=operands,
+            source_ref=cls._component_reference,
+            bundle_id=name,
+            member_ids=member_ids,
+        )
+        result.spec = first.spec
+        result.field_spec = first.field_spec
+        result.seed = 0
+        result.init_scale = first.init_scale
+        result.bank_ids = group_ids
+        result.composition_kind = "concat"
+        result.parent_fingerprints = tuple(bank.operation_bank_fingerprint() for bank in resolved)
+
+        group_slices: list[tuple[int, int]] = []
+        group_weights: list[Tensor] = []
+        member_groups: list[Tensor] = []
+        member_locals: list[Tensor] = []
+        candidate_offset = 0
+        group_offset = 0
+        for bank, parent_weight in zip(resolved, parent_influences, strict=True):
+            for start, end in bank.group_slices:
+                group_slices.append((candidate_offset + start, candidate_offset + end))
+            group_weights.append(bank._group_influences.detach() * parent_weight)
+            member_groups.append(bank._member_group.detach() + group_offset)
+            member_locals.append(bank._member_local.detach())
+            candidate_offset += bank.candidate_count
+            group_offset += len(bank.group_slices)
+        result.group_slices = tuple(group_slices)
+        result.register_buffer(
+            "_group_influences",
+            torch.cat(group_weights).to(device=keys.device, dtype=keys.dtype),
+            persistent=True,
+        )
+        result.register_buffer(
+            "_member_group",
+            torch.cat(member_groups).to(device=keys.device),
+            persistent=False,
+        )
+        result.register_buffer(
+            "_member_local",
+            torch.cat(member_locals).to(device=keys.device),
+            persistent=False,
+        )
+        return result
+
+    def route(
+        self,
+        query: Tensor,
+        *,
+        estimator: Literal["hard", "straight-through"] = "straight-through",
+        temperature: float = 1.0,
+    ) -> TensorOperationRouteSelection:
+        if not isinstance(query, Tensor) or not query.is_floating_point():
+            raise TypeError("query must be a floating Tensor")
+        if query.ndim != 2 or query.shape[0] <= 0 or query.shape[1] != self.key_dim:
+            raise ValueError(f"query must have shape [B, {self.key_dim}]")
+        if query.device != self.keys.device or query.dtype != self.keys.dtype:
+            raise ValueError("query and TensorOperationBank keys must share device and dtype")
+        if estimator not in {"hard", "straight-through"}:
+            raise ValueError("estimator must be 'hard' or 'straight-through'")
+        if not math.isfinite(float(temperature)) or float(temperature) <= 0:
+            raise ValueError("temperature must be a finite positive number")
+        _require_tensor(torch.isfinite(query).all(), "query must contain only finite values")
+
+        logits = torch.nn.functional.normalize(query, dim=-1) @ torch.nn.functional.normalize(
+            self.keys, dim=-1
+        ).transpose(0, 1)
+        weights = self._group_influences.to(logits)
+        normalized_weights = weights / weights.sum()
+        member_weights = normalized_weights.index_select(0, self._member_group)
+        disabled_bias = torch.full_like(member_weights, torch.finfo(logits.dtype).min)
+        member_bias = torch.where(member_weights > 0, member_weights.log(), disabled_bias)
+        effective_logits = logits + member_bias.unsqueeze(0)
+        hard = hard_formula_route(
+            effective_logits,
+            estimator="hard",
+            temperature=float(temperature),
+            member_ids=self.member_ids,
+            member_priority=self._member_priority,
+        )
+        local_parts = [
+            torch.softmax(logits[:, start:end] / float(temperature), dim=-1)
+            for start, end in self.group_slices
+        ]
+        local_probabilities = torch.cat(local_parts, dim=-1)
+        soft_route = torch.cat(
+            [
+                probabilities * normalized_weights[index]
+                for index, probabilities in enumerate(local_parts)
+            ],
+            dim=-1,
+        )
+        route = hard.route if estimator == "hard" else hard.route + soft_route - soft_route.detach()
+        entropy = -(
+            soft_route
+            * soft_route.clamp_min(torch.finfo(soft_route.dtype).tiny).log()
+        ).sum(dim=-1)
+        bank_indices = self._member_group.index_select(0, hard.hard_indices)
+        local_indices = self._member_local.index_select(0, hard.hard_indices)
+        return TensorOperationRouteSelection(
+            route=route,
+            hard_indices=hard.hard_indices,
+            logits=effective_logits,
+            entropy=entropy,
+            estimator=estimator,
+            bank_indices=bank_indices,
+            local_indices=local_indices,
+            local_probabilities=local_probabilities,
+            bank_probabilities=normalized_weights.unsqueeze(0).expand(query.shape[0], -1),
+            bank_ids=self.bank_ids,
+        )
 
     def operation_bank_contract(self) -> dict[str, object]:
+        operand_schema = {
+            name: {
+                "shape": tuple(value.shape),
+                "dtype": str(value.dtype),
+            }
+            for name, value in sorted(self.operands.items())
+        }
         return {
             "ref": self._component_reference,
+            "schema_version": 3,
             "candidate_count": self.candidate_count,
             "key_dim": self.key_dim,
-            "canvas_tokens": self.spec.canvas_tokens,
-            "port_slots": self.spec.port_slots,
-            "dim": self.spec.dim,
-            "seed": self.seed,
+            "field": self.field_spec.contract(),
+            "operand_schema": operand_schema,
+            "member_ids": self.member_ids,
+            "bank_ids": self.bank_ids,
+            "group_slices": self.group_slices,
+            "group_influences": tuple(float(value) for value in self._group_influences.tolist()),
+            "route_normalizer": "per_bank_local",
+            "composition_kind": self.composition_kind,
+            "parent_fingerprints": self.parent_fingerprints,
         }
+
+    def operation_bank_fingerprint(self) -> str:
+        payload = json.dumps(
+            self.operation_bank_contract(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
 class TensorOperationDecision:
-    """Hard instruction plus differentiable Bank-routing diagnostics."""
+    """One selected complete operation field plus differentiable diagnostics."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-decision@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-decision@3"
 
     instruction: TensorEditInstruction
-    route: FormulaRouteSelection
+    route: TensorOperationRouteSelection
+    active_logits: Tensor
     operation_logits: Tensor
-    source_plane_logits: Tensor
-    world_source_logits: Tensor
-    backing_source_logits: Tensor
+    source_logits: Tensor
     destination_logits: Tensor
 
 
 class TensorOperationSelector(nn.Module):
-    """Select one hard edit from a fixed Query and trainable operand Bank."""
+    """Select and decode one complete field from a fixed Query and trainable Bank."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-selector@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-selector@3"
 
     def __init__(
         self,
@@ -595,9 +1009,8 @@ class TensorOperationSelector(nn.Module):
         self.temperature = float(temperature)
 
     def forward(self, canvas: SharedCanvas) -> TensorOperationDecision:
-        query = self.query(canvas)
         route = self.bank.route(
-            query,
+            self.query(canvas),
             estimator=self.estimator,
             temperature=self.temperature,
         )
@@ -605,70 +1018,66 @@ class TensorOperationSelector(nn.Module):
         def select(name: str) -> Tensor:
             return torch.einsum("bk,k...->b...", route.route, self.bank.operands[name])
 
+        active_logits = select("active")
         operation_logits = select("operation")
-        source_plane_logits = select("source_plane")
-        world_source_logits = select("world_source")
-        backing_source_logits = select("backing_source")
+        source_logits = select("source")
         destination_logits = select("destination")
-        operation = operation_logits.argmax(dim=-1)
-        source_plane = source_plane_logits.argmax(dim=-1)
-        world_source = world_source_logits.argmax(dim=-1)
-        backing_source = backing_source_logits.argmax(dim=-1)
-        source_index = torch.where(
-            source_plane == int(CanvasSource.WORLD),
-            world_source,
-            backing_source,
-        )
+        unified_source = source_logits.argmax(dim=-1)
+        from_world = unified_source < self.spec.canvas_tokens
         instruction = TensorEditInstruction(
-            operation=operation.to(torch.int64),
-            source_plane=source_plane.to(torch.int64),
-            source_index=source_index.to(torch.int64),
-            destination_index=destination_logits.argmax(dim=-1).to(torch.int64),
-            active=torch.ones(
-                operation.shape,
-                dtype=torch.bool,
-                device=operation.device,
-            ),
+            operation=operation_logits.argmax(dim=-1).to(torch.int64),
+            source_plane=torch.where(
+                from_world,
+                torch.full_like(unified_source, int(CanvasSource.WORLD)),
+                torch.full_like(unified_source, int(CanvasSource.BACKING)),
+            ).to(torch.int64),
+            source_offset=torch.where(
+                from_world,
+                unified_source,
+                unified_source - self.spec.canvas_tokens,
+            ).to(torch.int64),
+            destination_offset=destination_logits.argmax(dim=-1).to(torch.int64),
+            active=active_logits >= 0,
         )
         return TensorOperationDecision(
             instruction=instruction,
             route=route,
+            active_logits=active_logits,
             operation_logits=operation_logits,
-            source_plane_logits=source_plane_logits,
-            world_source_logits=world_source_logits,
-            backing_source_logits=backing_source_logits,
+            source_logits=source_logits,
             destination_logits=destination_logits,
         )
 
 
 @dataclass(frozen=True)
 class TensorEditInstruction:
-    """One hard edit instruction per batch row."""
+    """One bounded parallel index-map operation over a logical tensor."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-edit-instruction@1"
+    _component_reference: ClassVar[str] = "arti/tensor-edit-instruction@3"
 
     operation: Tensor
     source_plane: Tensor
-    source_index: Tensor
-    destination_index: Tensor
+    source_offset: Tensor
+    destination_offset: Tensor
     active: Tensor
 
 
 @dataclass(frozen=True)
 class TensorEditResult:
-    """Functional next backing and mask returned by a tensor edit."""
+    """Functional next backing returned by one synchronous operation field."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-edit-result@1"
+    _component_reference: ClassVar[str] = "arti/tensor-edit-result@3"
 
     value: Tensor
     mask: Tensor
     instruction: TensorEditInstruction
+    changed_support: Tensor
 
 
 class TensorEditFormula(nn.Module):
-    """Apply exact KEEP, COPY, or CLEAR semantics to a backing snapshot."""
+    """Apply a complete KEEP/COPY/ERASE field from one immutable snapshot."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-edit-formula@1"
+    _component_reference: ClassVar[str] = "arti/tensor-edit-formula@3"
 
     def __init__(self, spec: PortSpec) -> None:
         super().__init__()
@@ -690,40 +1099,69 @@ class TensorEditFormula(nn.Module):
             raise ValueError("canvas and backing must use the same device")
         self._validate_instruction(instruction, batch=batch, device=snapshot.value.device)
 
-        next_value = snapshot.value.clone()
-        next_mask = snapshot.mask.clone()
-        row = torch.arange(batch, device=snapshot.value.device)
-        active = instruction.active
-        copy = active & (instruction.operation == int(EditOperation.COPY))
-        clear = active & (instruction.operation == int(EditOperation.CLEAR))
-
-        destination = instruction.destination_index.clamp(0, self.spec.port_slots - 1)
-        world_source = instruction.source_index.clamp(0, self.spec.canvas_tokens - 1)
-        backing_source = instruction.source_index.clamp(0, self.spec.port_slots - 1)
+        support_size = instruction.operation.shape[1]
+        feature_index = (-1, -1, self.spec.dim)
+        world_source = instruction.source_offset.clamp(0, self.spec.canvas_tokens - 1)
+        backing_source = instruction.source_offset.clamp(0, self.spec.element_count - 1)
+        flat_value = self.spec.flatten_value(snapshot.value)
+        flat_mask = self.spec.flatten_mask(snapshot.mask)
+        world_value = torch.gather(
+            canvas.world_values,
+            1,
+            world_source.unsqueeze(-1).expand(*feature_index),
+        )
+        backing_value = torch.gather(
+            flat_value,
+            1,
+            backing_source.unsqueeze(-1).expand(*feature_index),
+        )
+        world_visible = torch.gather(canvas.world_mask, 1, world_source)
+        backing_visible = torch.gather(flat_mask, 1, backing_source)
         from_world = instruction.source_plane == int(CanvasSource.WORLD)
-        copied_value = torch.where(
-            from_world.unsqueeze(-1),
-            canvas.world_values[row, world_source],
-            snapshot.value[row, backing_source],
+        copied_value = torch.where(from_world.unsqueeze(-1), world_value, backing_value)
+        copied_mask = torch.where(from_world, world_visible, backing_visible)
+
+        writes = instruction.active & (instruction.operation != int(EditOperation.KEEP))
+        destination = instruction.destination_offset.clamp(0, self.spec.element_count - 1)
+        elements = torch.arange(self.spec.element_count, device=snapshot.value.device)
+        lanes = torch.arange(1, support_size + 1, device=snapshot.value.device)
+        destination_match = destination.unsqueeze(-1) == elements
+        priority = torch.where(
+            writes.unsqueeze(-1) & destination_match,
+            lanes.view(1, support_size, 1),
+            torch.zeros((), dtype=lanes.dtype, device=lanes.device),
         )
-        copied_mask = torch.where(
-            from_world,
-            canvas.world_mask[row, world_source],
-            snapshot.mask[row, backing_source],
+        winning_priority, winner = priority.max(dim=1)
+        has_write = winning_priority > 0
+        gather_lane = winner.unsqueeze(-1)
+        selected_operation = torch.gather(instruction.operation, 1, winner)
+        selected_value = torch.gather(
+            copied_value,
+            1,
+            gather_lane.expand(-1, -1, self.spec.dim),
         )
-        destination_value = next_value[row, destination]
-        destination_mask = next_mask[row, destination]
-        destination_value = torch.where(copy.unsqueeze(-1), copied_value, destination_value)
-        destination_mask = torch.where(copy, copied_mask, destination_mask)
-        destination_value = torch.where(
-            clear.unsqueeze(-1),
-            torch.full_like(destination_value, self.spec.empty_value),
-            destination_value,
+        selected_mask = torch.gather(copied_mask, 1, winner)
+        copy = has_write & (selected_operation == int(EditOperation.COPY))
+        erase = has_write & (selected_operation == int(EditOperation.ERASE))
+        next_flat_value = torch.where(copy.unsqueeze(-1), selected_value, flat_value)
+        next_flat_value = torch.where(
+            erase.unsqueeze(-1),
+            torch.full_like(next_flat_value, self.spec.empty_value),
+            next_flat_value,
         )
-        destination_mask = torch.where(clear, torch.zeros_like(destination_mask), destination_mask)
-        next_value[row, destination] = destination_value
-        next_mask[row, destination] = destination_mask
-        return TensorEditResult(next_value, next_mask, instruction)
+        next_flat_mask = torch.where(copy, selected_mask, flat_mask)
+        next_flat_mask = torch.where(erase, torch.zeros_like(next_flat_mask), next_flat_mask)
+        winner_for_support = torch.gather(winner, 1, destination)
+        support_index = torch.arange(support_size, device=snapshot.value.device).view(
+            1, support_size
+        )
+        changed_support = writes & (winner_for_support == support_index)
+        return TensorEditResult(
+            self.spec.restore_value(next_flat_value).contiguous(),
+            self.spec.restore_mask(next_flat_mask).contiguous(),
+            instruction,
+            changed_support,
+        )
 
     def _validate_instruction(
         self,
@@ -737,12 +1175,15 @@ class TensorEditFormula(nn.Module):
         fields = (
             instruction.operation,
             instruction.source_plane,
-            instruction.source_index,
-            instruction.destination_index,
+            instruction.source_offset,
+            instruction.destination_offset,
             instruction.active,
         )
-        if any(not isinstance(value, Tensor) or value.shape != (batch,) for value in fields):
-            raise ValueError("every instruction field must have shape [B]")
+        if any(not isinstance(value, Tensor) or value.ndim != 2 for value in fields):
+            raise ValueError("every instruction field must have shape [B, M]")
+        shape = instruction.operation.shape
+        if shape[0] != batch or shape[1] <= 0 or any(value.shape != shape for value in fields):
+            raise ValueError("every instruction field must share shape [B, M]")
         if any(value.device != device for value in fields):
             raise ValueError("instruction fields must use the backing device")
         if instruction.active.dtype != torch.bool:
@@ -755,7 +1196,7 @@ class TensorEditFormula(nn.Module):
         valid_operation = (
             (instruction.operation == int(EditOperation.KEEP))
             | (instruction.operation == int(EditOperation.COPY))
-            | (instruction.operation == int(EditOperation.CLEAR))
+            | (instruction.operation == int(EditOperation.ERASE))
         )
         _require_tensor(
             ~(active & ~valid_operation).any(),
@@ -766,8 +1207,8 @@ class TensorEditFormula(nn.Module):
             ~(
                 writes
                 & (
-                    (instruction.destination_index < 0)
-                    | (instruction.destination_index >= self.spec.port_slots)
+                    (instruction.destination_offset < 0)
+                    | (instruction.destination_offset >= self.spec.element_count)
                 )
             ).any(),
             "instruction contains an invalid destination index",
@@ -777,17 +1218,14 @@ class TensorEditFormula(nn.Module):
             (instruction.source_plane == int(CanvasSource.WORLD))
             | (instruction.source_plane == int(CanvasSource.BACKING))
         )
-        _require_tensor(
-            ~(copy & ~valid_plane).any(),
-            "COPY requires WORLD or BACKING as its source plane",
-        )
+        _require_tensor(~(copy & ~valid_plane).any(), "COPY requires a valid source plane")
         _require_tensor(
             ~(
                 copy
                 & (instruction.source_plane == int(CanvasSource.WORLD))
                 & (
-                    (instruction.source_index < 0)
-                    | (instruction.source_index >= self.spec.canvas_tokens)
+                    (instruction.source_offset < 0)
+                    | (instruction.source_offset >= self.spec.canvas_tokens)
                 )
             ).any(),
             "COPY contains an invalid world source index",
@@ -797,8 +1235,8 @@ class TensorEditFormula(nn.Module):
                 copy
                 & (instruction.source_plane == int(CanvasSource.BACKING))
                 & (
-                    (instruction.source_index < 0)
-                    | (instruction.source_index >= self.spec.port_slots)
+                    (instruction.source_offset < 0)
+                    | (instruction.source_offset >= self.spec.element_count)
                 )
             ).any(),
             "COPY contains an invalid backing source index",
@@ -806,9 +1244,9 @@ class TensorEditFormula(nn.Module):
 
 
 class TensorEditSurrogate(nn.Module):
-    """Attach field-level gradients while preserving the exact hard edit forward."""
+    """Keep the hard field forward while relaxing its route for gradients."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-edit-surrogate@1"
+    _component_reference: ClassVar[str] = "arti/tensor-edit-surrogate@3"
 
     def __init__(self, spec: PortSpec, *, temperature: float = 1.0) -> None:
         super().__init__()
@@ -831,65 +1269,55 @@ class TensorEditSurrogate(nn.Module):
         decision: TensorOperationDecision,
         hard_edit: TensorEditResult,
     ) -> TensorEditResult:
-        """Return hard values with the gradient of a continuous edit relaxation."""
-
-        if not isinstance(canvas, SharedCanvas):
-            raise TypeError("canvas must be SharedCanvas")
-        if not isinstance(snapshot, PortSnapshot):
-            raise TypeError("snapshot must be PortSnapshot")
         if not isinstance(decision, TensorOperationDecision):
             raise TypeError("decision must be TensorOperationDecision")
         if not isinstance(hard_edit, TensorEditResult):
             raise TypeError("hard_edit must be TensorEditResult")
         batch = snapshot.value.shape[0]
         self.spec.validate_backing(snapshot.value, snapshot.mask, batch_size=batch)
-        if tuple(canvas.world_values.shape) != (
-            batch,
-            self.spec.canvas_tokens,
-            self.spec.dim,
-        ):
-            raise ValueError("canvas world values do not match the surrogate PortSpec")
-        if hard_edit.value.shape != snapshot.value.shape:
-            raise ValueError("hard edit does not match the backing shape")
-
         temperature = self.temperature
+        active = torch.sigmoid(decision.active_logits / temperature)
         operation = torch.softmax(decision.operation_logits / temperature, dim=-1)
-        source_plane = torch.softmax(decision.source_plane_logits / temperature, dim=-1)
-        world_source = torch.softmax(decision.world_source_logits / temperature, dim=-1)
-        backing_source = torch.softmax(
-            decision.backing_source_logits / temperature,
-            dim=-1,
-        )
+        source = torch.softmax(decision.source_logits / temperature, dim=-1)
         destination = torch.softmax(decision.destination_logits / temperature, dim=-1)
-
-        world_value = torch.einsum("bn,bnd->bd", world_source, canvas.world_values)
-        backing_value = torch.einsum("bs,bsd->bd", backing_source, snapshot.value)
-        copied_value = (
-            source_plane[:, int(CanvasSource.WORLD)].unsqueeze(-1) * world_value
-            + source_plane[:, int(CanvasSource.BACKING)].unsqueeze(-1) * backing_value
+        flat_value = self.spec.flatten_value(snapshot.value)
+        source_values = torch.cat((canvas.world_values, flat_value), dim=1)
+        copied_value = torch.einsum("bmv,bvd->bmd", source, source_values)
+        copy_probability = operation[..., int(EditOperation.COPY)]
+        erase_probability = operation[..., int(EditOperation.ERASE)]
+        write_probability = (copy_probability + erase_probability).clamp_min(
+            torch.finfo(snapshot.value.dtype).tiny
         )
-        copy_probability = operation[:, int(EditOperation.COPY)]
-        clear_probability = operation[:, int(EditOperation.CLEAR)]
-        active = decision.instruction.active.to(dtype=snapshot.value.dtype)
-        destination_probability = destination * active.unsqueeze(-1)
-        replacement = (
+        conditional_value = (
             copy_probability.unsqueeze(-1) * copied_value
-            + clear_probability.unsqueeze(-1) * self.spec.empty_value
+            + erase_probability.unsqueeze(-1) * self.spec.empty_value
+        ) / write_probability.unsqueeze(-1)
+        assignment = active.unsqueeze(-1) * write_probability.unsqueeze(-1) * destination
+        total = assignment.sum(dim=1)
+        normalized = assignment / total.unsqueeze(1).clamp_min(
+            torch.finfo(snapshot.value.dtype).tiny
         )
-        write_probability = copy_probability + clear_probability
-        delta = replacement.unsqueeze(1) - (
-            write_probability[:, None, None] * snapshot.value
+        replacement = torch.einsum("bms,bmd->bsd", normalized, conditional_value)
+        occupancy = 1 - torch.prod((1 - assignment).clamp(0, 1), dim=1)
+        relaxed_flat_value = (
+            flat_value * (1 - occupancy).unsqueeze(-1)
+            + replacement * occupancy.unsqueeze(-1)
         )
-        relaxed_value = snapshot.value + destination_probability.unsqueeze(-1) * delta
-        value = hard_edit.value + (relaxed_value - relaxed_value.detach())
-        return TensorEditResult(value, hard_edit.mask, hard_edit.instruction)
+        relaxed_value = self.spec.restore_value(relaxed_flat_value)
+        value = _HardForwardRelaxedBackward.apply(hard_edit.value, relaxed_value)
+        return TensorEditResult(
+            value,
+            hard_edit.mask,
+            hard_edit.instruction,
+            hard_edit.changed_support,
+        )
 
 
 @dataclass(frozen=True)
 class TensorOperationStepResult:
     """One fresh Query/Bank/Formula transition over a local backing."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-step-result@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-step-result@3"
 
     canvas: SharedCanvas
     decision: TensorOperationDecision
@@ -899,7 +1327,7 @@ class TensorOperationStepResult:
 class TensorOperation(nn.Module):
     """Apply one Bank-selected typed transition without mutating a live port."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation@3"
 
     def __init__(
         self,
@@ -942,14 +1370,17 @@ class TensorOperation(nn.Module):
         if active is not None:
             if (
                 not isinstance(active, Tensor)
-                or active.shape != decision.instruction.active.shape
+                or active.shape != (world.shape[0],)
                 or active.dtype != torch.bool
                 or active.device != world.device
             ):
                 raise TypeError("active must be boolean with shape [B] on the world device")
             decision = replace(
                 decision,
-                instruction=replace(decision.instruction, active=active),
+                instruction=replace(
+                    decision.instruction,
+                    active=decision.instruction.active & active.unsqueeze(-1),
+                ),
             )
         hard_edit = self.formula(canvas, snapshot, decision.instruction)
         edit = (
@@ -1053,7 +1484,7 @@ class TensorOperationSchedule:
 class TensorOperationTrace:
     """Bounded operation-axis diagnostics; it never owns persistent state."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-trace@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-trace@3"
 
     requested_steps: Tensor
     completed_steps: Tensor
@@ -1068,7 +1499,7 @@ class TensorOperationTrace:
 class TensorOperationResult:
     """Final local backing proposal plus an operation-only trace."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-result@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-result@3"
 
     value: Tensor
     mask: Tensor
@@ -1078,7 +1509,7 @@ class TensorOperationResult:
 class TensorOperationLoop(nn.Module):
     """Repeatedly re-query a private shadow backing and return one proposal."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-operation-loop@1"
+    _component_reference: ClassVar[str] = "arti/tensor-operation-loop@3"
 
     def __init__(
         self,
@@ -1150,7 +1581,7 @@ class TensorOperationLoop(nn.Module):
                 active=active,
             )
             value_changed = (step.edit.value != shadow_value).flatten(1).any(dim=1)
-            mask_changed = (step.edit.mask != shadow_mask).any(dim=1)
+            mask_changed = (step.edit.mask != shadow_mask).flatten(1).any(dim=1)
             changed = active & (value_changed | mask_changed)
             shadow_value = step.edit.value
             shadow_mask = step.edit.mask
@@ -1166,7 +1597,7 @@ class TensorOperationLoop(nn.Module):
             )
             operation_rows.append(
                 torch.where(
-                    active,
+                    active.unsqueeze(-1),
                     step.decision.instruction.operation,
                     torch.full_like(step.decision.instruction.operation, -1),
                 )
@@ -1174,7 +1605,12 @@ class TensorOperationLoop(nn.Module):
             if self.stop.stop_on_stable and step_index + 1 >= self.stop.min_operation_steps:
                 stopped = stopped | (active & ~changed)
 
-        empty = torch.empty((0, batch), dtype=torch.int64, device=world.device)
+        empty_routes = torch.empty((0, batch), dtype=torch.int64, device=world.device)
+        empty_operations = torch.empty(
+            (0, batch, self.operation.selector.bank.field_spec.support_size),
+            dtype=torch.int64,
+            device=world.device,
+        )
         attempted = (
             torch.stack(attempted_rows)
             if attempted_rows
@@ -1185,8 +1621,8 @@ class TensorOperationLoop(nn.Module):
             if changed_rows
             else torch.empty((0, batch), dtype=torch.bool, device=world.device)
         )
-        route_index = torch.stack(route_rows) if route_rows else empty
-        operations = torch.stack(operation_rows) if operation_rows else empty
+        route_index = torch.stack(route_rows) if route_rows else empty_routes
+        operations = torch.stack(operation_rows) if operation_rows else empty_operations
         reason = torch.full(
             (batch,), int(TensorOperationStopReason.MAX_STEPS), dtype=torch.int64, device=world.device
         )
@@ -1233,7 +1669,7 @@ class ReaderRefineSchedule:
 class TensorInvocationResult:
     """Independent Reader result and next-call operation proposal."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-invocation-result@1"
+    _component_reference: ClassVar[str] = "arti/tensor-invocation-result@2"
 
     output: Tensor
     canvas: SharedCanvas
@@ -1244,7 +1680,7 @@ class TensorInvocationResult:
 class TensorInvocation(nn.Module):
     """Coordinate independent Reader and tensor-operation axes for one call."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-invocation@1"
+    _component_reference: ClassVar[str] = "arti/tensor-invocation@2"
 
     def __init__(
         self,
@@ -1320,9 +1756,11 @@ __all__ = [
     "TensorOperationBank",
     "TensorOperationDecision",
     "TensorOperationExecutor",
+    "TensorOperationFieldSpec",
     "TensorOperationLoop",
     "TensorOperationQuery",
     "TensorOperationResult",
+    "TensorOperationRouteSelection",
     "TensorOperationSchedule",
     "TensorOperationSelector",
     "TensorOperationStepResult",

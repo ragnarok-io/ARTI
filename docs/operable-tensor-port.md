@@ -12,9 +12,10 @@ from arti import alpha
 
 spec = alpha.PortSpec(
     canvas_tokens=64,
-    port_slots=16,
+    tensor_shape=(16, 16),
     dim=128,
-    port_to_canvas=tuple(range(16)),
+    tensor_to_canvas=tuple(range(16)),
+    folded_tensor_coordinates=tuple((0, column) for column in range(16)),
 )
 port = alpha.OperableTensorPort(spec, batch_size=1, device="cuda")
 fold = alpha.SharedCanvasFold(spec)
@@ -23,43 +24,58 @@ snapshot = port.resolve()
 canvas = fold(world, snapshot, world_mask=world_mask)
 ```
 
-`SharedCanvasFold` returns a world-shaped `[B, N, D]` tensor. It overlays
-visible backing slots at their declared canvas coordinates; it does not append
-a modality or feature axis. `canvas.source_plane` and `canvas.source_index`
-retain provenance for each visible value.
+The backing is a logical tensor with shape `[B, *tensor_shape, D]`; it is not a
+sequence of Bank slots. `SharedCanvasFold` returns a world-shaped `[B, N, D]`
+view. It overlays only the backing coordinates named by
+`folded_tensor_coordinates` at the corresponding `tensor_to_canvas` positions;
+it does not append a modality or feature axis.
+The Reader therefore receives a bounded Fold view even when the complete
+backing is larger. `canvas.source_plane` and `canvas.source_index` retain
+provenance for each exposed value.
 
-## Typed Edits
+## Typed Operation Fields
 
-The first edit Formula accepts one hard instruction per batch row:
+`TensorEditFormula@3` accepts one bounded operation field per batch row. Every
+field has shape `[B, M]`, so one selected Bank member can act on any number of
+tensor elements up to its declared support size:
 
 - `KEEP` preserves the backing.
-- `COPY` copies one pre-transition value from the world or backing into a
-  backing slot.
-- `CLEAR` writes the declared empty value and clears that slot's visibility.
+- `COPY` copies a pre-transition value from the world or backing into a tensor
+  coordinate.
+- `ERASE` writes the declared empty value and clears that coordinate's visibility.
 
 ```python
 instruction = alpha.TensorEditInstruction(
-    operation=torch.tensor([int(alpha.EditOperation.COPY)], device="cuda"),
-    source_plane=torch.tensor([int(alpha.CanvasSource.WORLD)], device="cuda"),
-    source_index=torch.tensor([12], device="cuda"),
-    destination_index=torch.tensor([3], device="cuda"),
-    active=torch.tensor([True], device="cuda"),
+    operation=torch.tensor([[1, 1, 2]], device="cuda"),
+    source_plane=torch.tensor([[0, 0, -1]], device="cuda"),
+    source_offset=torch.tensor([[12, 37, -1]], device="cuda"),
+    destination_offset=torch.tensor([[3, 9, 11]], device="cuda"),
+    active=torch.tensor([[True, True, True]], device="cuda"),
 )
 
 edited = alpha.TensorEditFormula(spec)(canvas, snapshot, instruction)
 port.advance(edited.value, edited.mask)
 ```
 
-The Formula reads one immutable snapshot and returns a separate next-backing
-proposal. It never writes the world tensor. `port.advance(...)` makes an edit
+Offsets are a compiled execution representation. Developers can construct
+them from logical coordinates or slices with `spec.ravel_coordinate(...)` and
+`spec.region_offsets(...)`; the persistent tensor retains its original shape.
+The Formula gathers every source from one immutable pre-state snapshot, then
+applies all destinations synchronously. This permits swaps, moves expressed as
+`COPY + ERASE`, rotations, sparse ranges, and other multi-position edits
+without sequential read-after-write artifacts. If multiple active elements target
+the same destination, the later support element wins deterministically. The
+Formula never writes the world tensor. `port.advance(...)` makes the proposal
 visible to a later call; it cannot alter the canvas already consumed by the
 current call.
 
 ## Learned Operations
 
-`TensorOperationSelector` uses a fixed, deterministic Query to select a hard
-edit from a trainable `TensorOperationBank`. All optimizer-owned selection
-values live in the Bank.
+`TensorOperationSelector` uses a fixed, deterministic Query to select one
+complete hard operation field from a trainable `TensorOperationBank`. The
+Query reads the complete world snapshot and complete backing independently;
+it is not limited to the Reader's folded view. All optimizer-owned selection
+and field values live in the Bank.
 
 ```python
 bank = alpha.TensorOperationBank(
@@ -85,7 +101,7 @@ proposal = loop(
 port.advance(proposal.value, proposal.mask)
 ```
 
-Every operation iteration folds the latest internal shadow backing, runs a fresh
+Every operation iteration folds the latest private shadow backing, runs a fresh
 Query, selects a typed instruction, and applies one Formula transition. The
 loop never mutates the live port. Its schedule may be a scalar or an `int64
 [B]` tensor, so batch rows can request different operation depths. Optional
@@ -96,11 +112,32 @@ For compiled or accelerator execution, a tensor-valued schedule must also set
 `max_steps`; this provides the fixed execution and trace capacity without
 reading the requested depth back to the host.
 
-The decoded instruction and training logits are available through each
-operation result and trace. Free-running inference always executes a hard
-`KEEP`, `COPY`, or `CLEAR`; the Formula never applies a weighted mixture of
-edits. The Query remains fixed while its input changes after every shadow
-transition.
+The decoded field and training logits are available through each operation
+result and trace. Free-running inference always executes one hard Bank member,
+whose index map contains hard `KEEP`, `COPY`, or `ERASE` operations. It never combines
+parts from different candidate members. The Query remains fixed while its input
+changes after every shadow transition.
+
+## Concatenating Operation Banks
+
+Operation Banks compose along the candidate axis. Concatenation preserves each
+member's complete field, member ID, source Bank ID, local route normalization,
+and explicit Bank influence:
+
+```python
+combined = alpha.TensorOperationBank.concat(
+    (navigation_bank, layout_bank, cleanup_bank),
+    name="project-operations",
+    influences=(1.0, 0.75, 1.0),
+)
+selector = alpha.TensorOperationSelector(spec, combined)
+```
+
+No operand is remixed during concatenation. The default hard route still
+selects exactly one complete member from the expanded candidate set. Setting a
+Bank influence to zero disables that Bank without changing the remaining
+members; positive influences control cross-Bank competition while local member
+probabilities remain normalized inside each source Bank.
 
 `TensorEditSurrogate` is optional. It leaves the hard Formula result unchanged
 while attaching a continuous backward path to the selected Bank fields. Omit it
@@ -133,6 +170,11 @@ current_output = result.output
 next_backing = result.operation
 ```
 
+Training may supervise only the final next-call task result. Tensor differences
+between internal steps need not be treated as a stream or as labels; the core
+operation contract does not require action, route, or intermediate-state
+supervision.
+
 An external backing can be selected at call boundaries:
 
 ```python
@@ -145,11 +187,12 @@ Detaching returns to the retained default backing. Mounting does not register
 the external tensor as a parameter or model buffer and does not merge it into
 the default state.
 
-This alpha slice establishes exact port, shared-canvas Fold, fixed-Query Bank
-selection, typed hard edits, independently scheduled multi-step operation, and
-next-call proposal semantics. It does not claim geometric edit macros,
-persistence infrastructure, transactions, row-level sparse execution, or
-physical performance gains.
+This alpha slice establishes an arbitrary-rank logical tensor port,
+shared-canvas Fold, fixed-Query Bank selection, complete hard index-map fields,
+concat-native Bank composition,
+independently scheduled multi-step operation, and next-call proposal semantics.
+It does not claim persistence infrastructure, transactions, row-level sparse
+execution, or physical performance gains.
 
 ## Long-Lived Validation
 
@@ -171,6 +214,6 @@ different events, with committed checkpoints and matched `frozen`, `reset`,
 shuffled-state, and event-order controls. Reload and fork checks must begin
 from a committed root; an uncommitted proposal is not persistent state.
 
-Lifecycle checks establish state transport and causal ordering only. A
-downstream application must separately evaluate whether the accumulated state
-improves its task; a single changed output is not quality evidence.
+Applications should validate long-lived lifecycle causality with committed
+checkpoints, reload, fork isolation, reset, matched controls, and bounded state
+storage. A single changed output is not evidence of downstream quality.

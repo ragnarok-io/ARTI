@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.10a1 is a
+ARTI 3.0.6 remains the Stable Candidate baseline. ARTI 3.0.10a2 is a
 prerelease for the versioned vNext composition contracts described below; it
 does not promote those alpha components to the supported surface and is not an
 LTS promise.
@@ -87,6 +87,13 @@ parallel Reader Refine and operation branches from one call-boundary snapshot,
 and caller-committed next-call proposals. Formula programs, training helpers,
 exit control, tensor operations, and their task/runtime effects remain alpha
 and are not part of the Stable Candidate compatibility promise.
+
+3.0.10a2 refines that alpha tensor-operation contract: backing state is an
+arbitrary-rank logical tensor, Reader Refine receives a bounded Fold view, and
+the parallel operation branch can address the complete backing through hard
+range or sparse index-map fields. Concatenated operation Banks preserve whole
+members and source-local routing metadata. These additions remain alpha and do
+not change the Stable Candidate surface.
 
 ARTI 3.0 removes the experimental `RecallTTTSession` API and introduces the
 Formula contract/manifest schema v2. Current Recall,

@@ -1366,6 +1366,7 @@ def _build_default_registry() -> ComponentRegistry:
         TensorOperation,
         TensorOperationBank,
         TensorOperationDecision,
+        TensorOperationFieldSpec,
         TensorOperationLoop,
         TensorOperationQuery,
         TensorOperationResult,
@@ -2808,16 +2809,17 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/operable-tensor-port-spec@1",
+        "arti/operable-tensor-port-spec@3",
         PortSpec,
         lifecycle=alpha,
-        variant="fixed-shape-shared-canvas-port-spec",
+        variant="logical-tensor-shape-and-folded-view-spec",
         constructible=False,
         config_builder=lambda component: {
             "canvas_tokens": component.canvas_tokens,
-            "port_slots": component.port_slots,
+            "tensor_shape": component.tensor_shape,
             "dim": component.dim,
-            "port_to_canvas": component.port_to_canvas,
+            "tensor_to_canvas": component.tensor_to_canvas,
+            "folded_tensor_coordinates": component.folded_tensor_coordinates,
             "dtype": str(component.dtype).removeprefix("torch."),
             "empty_value": component.empty_value,
             "default_visible": component.default_visible,
@@ -2825,7 +2827,7 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
-        "arti/operable-tensor-port@1",
+        "arti/operable-tensor-port@2",
         OperableTensorPort,
         lifecycle=alpha,
         variant="stable-runtime-owned-default-or-external-backing",
@@ -2837,7 +2839,7 @@ def _build_default_registry() -> ComponentRegistry:
         dependency_builder=lambda component: (component_ref(component.spec),),
     )
     add(
-        "arti/operable-tensor-snapshot@1",
+        "arti/operable-tensor-snapshot@2",
         PortSnapshot,
         lifecycle=alpha,
         variant="resolved-pre-step-backing",
@@ -2848,10 +2850,10 @@ def _build_default_registry() -> ComponentRegistry:
             "backing_epoch": component.backing_epoch,
             "step_index": component.step_index,
         },
-        dependency_builder=lambda _component: ("arti/operable-tensor-port@1",),
+        dependency_builder=lambda _component: ("arti/operable-tensor-port@2",),
     )
     add(
-        "arti/shared-canvas@1",
+        "arti/shared-canvas@3",
         SharedCanvas,
         lifecycle=alpha,
         variant="world-shaped-masked-overlay",
@@ -2862,42 +2864,52 @@ def _build_default_registry() -> ComponentRegistry:
             "backing_epoch": component.backing_epoch,
             "step_index": component.step_index,
         },
-        dependency_builder=lambda _component: ("arti/shared-canvas-fold@1",),
+        dependency_builder=lambda _component: ("arti/shared-canvas-fold@3",),
     )
     add(
-        "arti/shared-canvas-fold@1",
+        "arti/shared-canvas-fold@3",
         SharedCanvasFold,
         lifecycle=alpha,
-        variant="fixed-map-masked-overlay",
+        variant="partial-fixed-map-masked-overlay",
         constructible=False,
         config_builder=lambda _component: {},
         dependency_builder=lambda component: (component_ref(component.spec),),
     )
     add(
-        "arti/tensor-edit-instruction@1",
+        "arti/tensor-operation-field-spec@2",
+        TensorOperationFieldSpec,
+        lifecycle=alpha,
+        variant="bounded-synchronous-operation-field",
+        constructible=False,
+        config_builder=lambda component: component.contract(),
+        dependency_builder=lambda component: (component_ref(component.port),),
+    )
+    add(
+        "arti/tensor-edit-instruction@3",
         TensorEditInstruction,
         lifecycle=alpha,
-        variant="single-hard-keep-copy-clear",
+        variant="complete-hard-operation-field",
         constructible=False,
         artifact_policy="runtime_only",
         config_builder=lambda _component: {},
     )
     add(
-        "arti/tensor-edit-formula@1",
+        "arti/tensor-edit-formula@3",
         TensorEditFormula,
         lifecycle=alpha,
-        variant="functional-backing-only-hard-edit",
+        variant="synchronous-pre-state-operation-field",
         constructible=False,
         config_builder=lambda _component: {
-            "operations": ("KEEP", "COPY", "CLEAR"),
+            "operations": ("KEEP", "COPY", "ERASE"),
+            "collision_policy": "last_element",
         },
         dependency_builder=lambda component: (
             component_ref(component.spec),
-            "arti/tensor-edit-instruction@1",
+            "arti/tensor-edit-instruction@3",
         ),
     )
     add(
-        "arti/tensor-edit-result@1",
+        "arti/tensor-edit-result@3",
         TensorEditResult,
         lifecycle=alpha,
         variant="functional-next-backing",
@@ -2907,12 +2919,12 @@ def _build_default_registry() -> ComponentRegistry:
             "shape": tuple(component.value.shape),
         },
         dependency_builder=lambda _component: (
-            "arti/tensor-edit-formula@1",
-            "arti/tensor-edit-instruction@1",
+            "arti/tensor-edit-formula@3",
+            "arti/tensor-edit-instruction@3",
         ),
     )
     add(
-        "arti/tensor-edit-surrogate@1",
+        "arti/tensor-edit-surrogate@3",
         TensorEditSurrogate,
         lifecycle=alpha,
         variant="exact-hard-forward-continuous-backward",
@@ -2920,29 +2932,32 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=lambda component: {"temperature": component.temperature},
         dependency_builder=lambda component: (
             component_ref(component.spec),
-            "arti/tensor-edit-formula@1",
+            "arti/tensor-edit-formula@3",
         ),
     )
     add(
-        "arti/tensor-operation-query@1",
+        "arti/tensor-operation-query@4",
         TensorOperationQuery,
         lifecycle=alpha,
-        variant="fixed-full-canvas-projection",
+        variant="fixed-complete-world-and-backing-projection",
         constructible=False,
         config_builder=lambda component: component.operation_query_contract(),
         dependency_builder=lambda component: (component_ref(component.spec),),
     )
     add(
-        "arti/tensor-operation-bank@1",
+        "arti/tensor-operation-bank@3",
         TensorOperationBank,
         lifecycle=alpha,
-        variant="trainable-hard-edit-candidates",
+        variant="concat-native-complete-operation-fields",
         constructible=False,
         config_builder=lambda component: component.operation_bank_contract(),
-        dependency_builder=lambda component: (component_ref(component.spec),),
+        dependency_builder=lambda component: (
+            component_ref(component.spec),
+            component_ref(component.field_spec),
+        ),
     )
     add(
-        "arti/tensor-operation-decision@1",
+        "arti/tensor-operation-decision@3",
         TensorOperationDecision,
         lifecycle=alpha,
         variant="hard-instruction-with-training-logits",
@@ -2950,15 +2965,17 @@ def _build_default_registry() -> ComponentRegistry:
         artifact_policy="runtime_only",
         config_builder=lambda component: {
             "batch_size": int(component.instruction.operation.shape[0]),
+            "support_size": int(component.instruction.operation.shape[1]),
             "candidate_count": int(component.route.route.shape[-1]),
+            "bank_count": len(component.route.bank_ids),
         },
         dependency_builder=lambda _component: (
-            "arti/tensor-edit-instruction@1",
-            "arti/tensor-operation-bank@1",
+            "arti/tensor-edit-instruction@3",
+            "arti/tensor-operation-bank@3",
         ),
     )
     add(
-        "arti/tensor-operation-selector@1",
+        "arti/tensor-operation-selector@3",
         TensorOperationSelector,
         lifecycle=alpha,
         variant="fixed-query-bank-selected-hard-edit",
@@ -2974,7 +2991,7 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/tensor-operation@1",
+        "arti/tensor-operation@3",
         TensorOperation,
         lifecycle=alpha,
         variant="fixed-query-bank-selected-hard-transition",
@@ -2996,7 +3013,7 @@ def _build_default_registry() -> ComponentRegistry:
         + (() if component.surrogate is None else (component_ref(component.surrogate),)),
     )
     add(
-        "arti/tensor-operation-step-result@1",
+        "arti/tensor-operation-step-result@3",
         TensorOperationStepResult,
         lifecycle=alpha,
         variant="one-local-shadow-transition",
@@ -3004,9 +3021,9 @@ def _build_default_registry() -> ComponentRegistry:
         artifact_policy="runtime_only",
         config_builder=lambda component: {"shape": tuple(component.edit.value.shape)},
         dependency_builder=lambda _component: (
-            "arti/tensor-operation@1",
-            "arti/tensor-operation-decision@1",
-            "arti/tensor-edit-result@1",
+            "arti/tensor-operation@3",
+            "arti/tensor-operation-decision@3",
+            "arti/tensor-edit-result@3",
         ),
     )
     add(
@@ -3038,7 +3055,7 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
-        "arti/tensor-operation-trace@1",
+        "arti/tensor-operation-trace@3",
         TensorOperationTrace,
         lifecycle=alpha,
         variant="bounded-operation-axis-trace",
@@ -3050,7 +3067,7 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
-        "arti/tensor-operation-loop@1",
+        "arti/tensor-operation-loop@3",
         TensorOperationLoop,
         lifecycle=alpha,
         variant="private-shadow-fresh-query-loop",
@@ -3063,7 +3080,7 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/tensor-operation-result@1",
+        "arti/tensor-operation-result@3",
         TensorOperationResult,
         lifecycle=alpha,
         variant="next-call-backing-proposal",
@@ -3071,8 +3088,8 @@ def _build_default_registry() -> ComponentRegistry:
         artifact_policy="runtime_only",
         config_builder=lambda component: {"shape": tuple(component.value.shape)},
         dependency_builder=lambda _component: (
-            "arti/tensor-operation-loop@1",
-            "arti/tensor-operation-trace@1",
+            "arti/tensor-operation-loop@3",
+            "arti/tensor-operation-trace@3",
         ),
     )
     add(
@@ -3085,7 +3102,7 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=lambda component: {"reader_steps": component.reader_steps},
     )
     add(
-        "arti/tensor-invocation@1",
+        "arti/tensor-invocation@2",
         TensorInvocation,
         lifecycle=alpha,
         variant="same-root-independent-reader-operation-axes",
@@ -3103,7 +3120,7 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/tensor-invocation-result@1",
+        "arti/tensor-invocation-result@2",
         TensorInvocationResult,
         lifecycle=alpha,
         variant="independent-reader-output-and-operation-proposal",
@@ -3114,8 +3131,8 @@ def _build_default_registry() -> ComponentRegistry:
             "reader_steps": component.reader_steps,
         },
         dependency_builder=lambda _component: (
-            "arti/tensor-invocation@1",
-            "arti/tensor-operation-result@1",
+            "arti/tensor-invocation@2",
+            "arti/tensor-operation-result@3",
         ),
     )
     add(
@@ -3503,33 +3520,36 @@ def _validate_tensor_operation_dependency_closure(
     dependencies: list[str],
 ) -> bool:
     refs = {
-        "arti/tensor-edit-surrogate@1",
-        "arti/tensor-operation-query@1",
-        "arti/tensor-operation-bank@1",
-        "arti/tensor-operation-selector@1",
-        "arti/tensor-operation@1",
+        "arti/tensor-edit-surrogate@3",
+        "arti/tensor-operation-query@4",
+        "arti/tensor-operation-bank@3",
+        "arti/tensor-operation-selector@3",
+        "arti/tensor-operation@3",
         "arti/tensor-operation-stop@1",
         "arti/tensor-operation-schedule@1",
-        "arti/tensor-operation-loop@1",
+        "arti/tensor-operation-loop@3",
     }
     if reference not in refs:
         return False
     if not isinstance(config, Mapping):
         raise ComponentCompatibilityError("TensorOperation config must be a mapping")
 
-    spec_ref = "arti/operable-tensor-port-spec@1"
+    spec_ref = "arti/operable-tensor-port-spec@3"
     expected: set[str]
-    if reference == "arti/tensor-edit-surrogate@1":
+    if reference == "arti/tensor-edit-surrogate@3":
         if set(config) != {"temperature"} or not _is_finite_positive(config["temperature"]):
             raise ComponentCompatibilityError("TensorEditSurrogate config is invalid")
-        expected = {spec_ref, "arti/tensor-edit-formula@1"}
-    elif reference == "arti/tensor-operation-query@1":
+        expected = {spec_ref, "arti/tensor-edit-formula@3"}
+    elif reference == "arti/tensor-operation-query@4":
         required = {
             "ref",
             "key_dim",
             "seed",
             "basis_hash",
+            "backing_basis_hash",
             "mask_basis_hash",
+            "backing_mask_basis_hash",
+            "input_view",
             "fixed",
             "deterministic",
             "stateful",
@@ -3540,35 +3560,138 @@ def _validate_tensor_operation_dependency_closure(
             or not _is_positive_int(config["key_dim"])
             or type(config["seed"]) is not int
             or not _is_sha256(config["basis_hash"])
+            or not _is_sha256(config["backing_basis_hash"])
             or not _is_sha256(config["mask_basis_hash"])
+            or not _is_sha256(config["backing_mask_basis_hash"])
+            or config["input_view"] != "complete_world_and_backing"
             or config["fixed"] is not True
             or config["deterministic"] is not True
             or config["stateful"] is not False
         ):
             raise ComponentCompatibilityError("TensorOperationQuery config is invalid")
         expected = {spec_ref}
-    elif reference == "arti/tensor-operation-bank@1":
+    elif reference == "arti/tensor-operation-bank@3":
         required = {
             "ref",
+            "schema_version",
             "candidate_count",
             "key_dim",
-            "canvas_tokens",
-            "port_slots",
-            "dim",
-            "seed",
+            "field",
+            "operand_schema",
+            "member_ids",
+            "bank_ids",
+            "group_slices",
+            "group_influences",
+            "route_normalizer",
+            "composition_kind",
+            "parent_fingerprints",
         }
+        field = config.get("field")
+        operands = config.get("operand_schema")
+        member_ids = config.get("member_ids")
+        bank_ids = config.get("bank_ids")
+        group_slices = config.get("group_slices")
+        influences = config.get("group_influences")
+        candidate_count = config.get("candidate_count")
         if (
             set(config) != required
             or config["ref"] != reference
+            or config["schema_version"] != 3
+            or not _is_positive_int(candidate_count)
+            or not _is_positive_int(config["key_dim"])
+            or not isinstance(field, Mapping)
+            or set(field) != {
+                "ref",
+                "support_size",
+                "source_capacity",
+                "collision_policy",
+                "atomic_snapshot",
+                "operations",
+                "index_dtype",
+                "value_dtype",
+            }
+            or field["ref"] != "arti/tensor-operation-field-spec@2"
+            or not _is_positive_int(field["support_size"])
+            or not _is_positive_int(field["source_capacity"])
+            or field["collision_policy"] != "last_element"
+            or field["atomic_snapshot"] is not True
+            or tuple(field["operations"]) != ("KEEP", "COPY", "ERASE")
+            or field["index_dtype"] != "int64"
+            or not isinstance(field["value_dtype"], str)
+            or not isinstance(operands, Mapping)
+            or set(operands) != {"active", "operation", "source", "destination"}
+            or not isinstance(member_ids, (list, tuple))
+            or len(member_ids) != candidate_count
+            or any(not isinstance(value, str) or not value for value in member_ids)
+            or len(set(member_ids)) != len(member_ids)
+            or not isinstance(bank_ids, (list, tuple))
+            or not bank_ids
+            or any(not isinstance(value, str) or not value for value in bank_ids)
+            or len(set(bank_ids)) != len(bank_ids)
+            or not isinstance(group_slices, (list, tuple))
+            or len(group_slices) != len(bank_ids)
+            or not isinstance(influences, (list, tuple))
+            or len(influences) != len(bank_ids)
             or any(
-                not _is_positive_int(config[name])
-                for name in ("candidate_count", "key_dim", "canvas_tokens", "port_slots", "dim")
+                type(value) not in {int, float}
+                or not math.isfinite(float(value))
+                or value < 0
+                for value in influences
             )
-            or type(config["seed"]) is not int
+            or not any(value > 0 for value in influences)
+            or config["route_normalizer"] != "per_bank_local"
+            or config["composition_kind"] not in {"native", "concat"}
+            or not isinstance(config["parent_fingerprints"], (list, tuple))
+            or any(not _is_sha256(value) for value in config["parent_fingerprints"])
         ):
             raise ComponentCompatibilityError("TensorOperationBank config is invalid")
-        expected = {spec_ref}
-    elif reference == "arti/tensor-operation-selector@1":
+        expected_start = 0
+        for pair in group_slices:
+            if (
+                not isinstance(pair, (list, tuple))
+                or len(pair) != 2
+                or type(pair[0]) is not int
+                or type(pair[1]) is not int
+                or pair[0] != expected_start
+                or pair[1] <= pair[0]
+            ):
+                raise ComponentCompatibilityError("TensorOperationBank group slices are invalid")
+            expected_start = pair[1]
+        if expected_start != candidate_count:
+            raise ComponentCompatibilityError("TensorOperationBank groups must cover all members")
+        expected_shapes = {
+            "active": (candidate_count, field["support_size"]),
+            "operation": (candidate_count, field["support_size"], 3),
+            "source": (
+                candidate_count,
+                field["support_size"],
+                field["source_capacity"],
+            ),
+        }
+        for name, expected_shape in expected_shapes.items():
+            entry = operands[name]
+            if (
+                not isinstance(entry, Mapping)
+                or set(entry) != {"shape", "dtype"}
+                or tuple(entry["shape"]) != expected_shape
+                or entry["dtype"] != field["value_dtype"]
+            ):
+                raise ComponentCompatibilityError("TensorOperationBank operand schema is invalid")
+        destination = operands["destination"]
+        destination_shape = (
+            tuple(destination.get("shape", ())) if isinstance(destination, Mapping) else ()
+        )
+        if (
+            not isinstance(destination, Mapping)
+            or set(destination) != {"shape", "dtype"}
+            or len(destination_shape) != 3
+            or destination_shape[:2] != (candidate_count, field["support_size"])
+            or not _is_positive_int(destination_shape[2])
+            or destination["dtype"] != field["value_dtype"]
+        ):
+            raise ComponentCompatibilityError("TensorOperationBank destination schema is invalid")
+        expected = {spec_ref, "arti/tensor-operation-field-spec@2"}
+    elif reference == "arti/tensor-operation-selector@3":
         if (
             set(config) != {"estimator", "temperature"}
             or config["estimator"] not in {"hard", "straight-through"}
@@ -3577,20 +3700,20 @@ def _validate_tensor_operation_dependency_closure(
             raise ComponentCompatibilityError("TensorOperationSelector config is invalid")
         expected = {
             spec_ref,
-            "arti/tensor-operation-query@1",
-            "arti/tensor-operation-bank@1",
+            "arti/tensor-operation-query@4",
+            "arti/tensor-operation-bank@3",
         }
-    elif reference == "arti/tensor-operation@1":
+    elif reference == "arti/tensor-operation@3":
         if set(config) != {"surrogate"} or config["surrogate"] not in {
             None,
-            "arti/tensor-edit-surrogate@1",
+            "arti/tensor-edit-surrogate@3",
         }:
             raise ComponentCompatibilityError("TensorOperation config is invalid")
         expected = {
             spec_ref,
-            "arti/tensor-operation-selector@1",
-            "arti/shared-canvas-fold@1",
-            "arti/tensor-edit-formula@1",
+            "arti/tensor-operation-selector@3",
+            "arti/shared-canvas-fold@3",
+            "arti/tensor-edit-formula@3",
         }
         if config["surrogate"] is not None:
             expected.add(config["surrogate"])
@@ -3620,7 +3743,7 @@ def _validate_tensor_operation_dependency_closure(
         }:
             raise ComponentCompatibilityError("TensorOperationLoop config is invalid")
         expected = {
-            "arti/tensor-operation@1",
+            "arti/tensor-operation@3",
             "arti/tensor-operation-stop@1",
         }
 

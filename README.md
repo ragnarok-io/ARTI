@@ -13,7 +13,7 @@ hidden tensor -> ARTI layer or block -> transformed latent tensor
 ARTI does not define a tokenizer, task head, data schema, or business model.
 Applications remain responsible for encoding their context into tensors.
 
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.10a1 is a
+Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.10a2 is a
 prerelease for new versioned composition contracts under `arti.alpha`; it does
 not promote those components to the stable surface. See
 [Stability](STABILITY.md) and [Security](SECURITY.md).
@@ -29,7 +29,7 @@ uv add arti-fit
 To evaluate the current alpha line explicitly:
 
 ```bash
-uv add --prerelease allow "arti-fit==3.0.10a1"
+uv add --prerelease allow "arti-fit==3.0.10a2"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -69,13 +69,16 @@ post-transition model exit request; host `min_steps` and `max_steps` remain the
 hard bounds. Exit-controller training uses detached task-quality curves rather
 than a teacher stop sequence.
 
-The new tensor-operation surface provides an always-backed
-`OperableTensorPort`, world-shaped `SharedCanvasFold`, hard typed tensor edits,
-independently scheduled operation/refine loops, and next-call state proposals.
-Mounted backing can be replaced between calls without changing parameters or
-the model call signature. Reader Refine and TensorOperation read the same
-call-boundary snapshot; an edit becomes visible only after the caller advances
-the port for a later call.
+The tensor-operation surface provides an always-backed `OperableTensorPort`
+whose backing is an arbitrary-rank logical tensor `[B, *tensor_shape, D]`.
+`SharedCanvasFold` exposes a bounded world-shaped Reader view while the
+parallel operation branch addresses the complete backing. Hard operation
+fields can edit ranges or sparse index maps, and concatenated operation Banks
+preserve complete members, provenance, local normalization, and explicit
+influence. Mounted backing can be replaced between calls without changing
+parameters or the model call signature. Both branches read one call-boundary
+snapshot; a proposal becomes visible only after the caller advances the port
+for a later call.
 
 These APIs remain under `arti.alpha`. This release establishes versioned
 execution, training, and lifecycle contracts; it does not claim downstream
