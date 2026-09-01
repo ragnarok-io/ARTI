@@ -237,6 +237,13 @@ class FederalBankStep:
             raise FederalRecallError("candidate_id values must be unique within one Bank step")
 
 
+@dataclass(frozen=True)
+class _BankLocalPath:
+    value: Tensor
+    cumulative_log_score: Tensor
+    lineage: tuple[str, ...]
+
+
 class AutonomousBankProgram(nn.Module, ABC):
     """Base class for one shape-autonomous Bank program used by FederalRecall."""
 
@@ -349,106 +356,189 @@ class BankOwnedQueryProgram(nn.Module, ABC):
             value,
             name=f"{self.bank_id}.input",
         )
+        if (
+            isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, int)
+            or max_candidates <= 0
+        ):
+            raise FederalRecallError("max_candidates must be a positive integer")
         policy = self.local_refine
-        if policy is not None and max_candidates != 1:
-            raise FederalRecallError("Bank-local Refine@1 requires serial K=1 execution")
         min_steps = 1 if policy is None else policy.min_steps
         max_steps = 1 if policy is None else policy.max_steps
-        current = value
-        accumulated_score = value.new_zeros(())
+        active = (
+            _BankLocalPath(
+                value=value,
+                cumulative_log_score=value.new_zeros(()),
+                lineage=(),
+            ),
+        )
+        completed: tuple[tuple[FederalCandidate, tuple[str, ...]], ...] = ()
         trace: list[BankLocalRefineTraceStep] = []
         for local_step in range(1, max_steps + 1):
-            query_result = self.query(current)
-            step = self.execute(
-                current,
-                query_result=query_result,
-                max_candidates=max_candidates,
-            )
-            if not isinstance(step, FederalBankStep):
-                raise TypeError("BankOwnedQueryProgram.execute must return FederalBankStep")
-            if step.local_trace:
-                raise FederalRecallError(
-                    "BankOwnedQueryProgram.execute cannot forge local refine receipts"
-                )
-            if len(step.candidates) > max_candidates:
-                raise FederalRecallError("local Bank returned more than the global K limit")
-            local_candidates = tuple(
-                candidate
-                for candidate in step.candidates
-                if candidate.next_value is not None and candidate.next_bank_id is None
-            )
-            if local_candidates:
-                if policy is None:
-                    raise FederalRecallError(
-                        "local continuation requires BankLocalRefinePolicy@1"
-                    )
-                if len(step.candidates) != 1:
-                    raise FederalRecallError(
-                        "local continuation must be the only serial Bank candidate"
-                    )
-                candidate = local_candidates[0]
-                assert candidate.next_value is not None
-                trace.append(
-                    self._local_trace_step(
-                        local_step=local_step,
-                        candidate=candidate,
-                        input_value=current,
-                        query_result=query_result,
-                        action="continue-local",
-                        exit_reason=None,
-                    )
-                )
-                accumulated_score = accumulated_score + candidate.local_log_score.to(
-                    device=accumulated_score.device,
-                    dtype=accumulated_score.dtype,
-                ).reshape(())
-                if local_step >= max_steps:
-                    raise FederalRecallError(
-                        "Bank-local Refine reached max_steps without a valid exit"
-                    )
-                current = candidate.next_value
-                self.signature.input_schema.validate_tensor(
+            next_active: list[_BankLocalPath] = []
+            next_completed = list(completed)
+            saw_early_exit = False
+            for branch in active:
+                current = branch.value
+                query_result = self.query(current)
+                step = self.execute(
                     current,
-                    name=f"{self.bank_id}.local[{local_step}]",
+                    query_result=query_result,
+                    max_candidates=max_candidates,
                 )
-                continue
-
-            if local_step < min_steps:
-                raise FederalRecallError(
-                    "Bank-local exit is invalid before min_steps"
-                )
-            adjusted: list[FederalCandidate] = []
-            for candidate in step.candidates:
-                if candidate.next_value is not None:
-                    self.signature.output_schema.validate_tensor(
-                        candidate.next_value,
-                        name=f"{self.bank_id}.output",
+                if not isinstance(step, FederalBankStep):
+                    raise TypeError(
+                        "BankOwnedQueryProgram.execute must return FederalBankStep"
                     )
-                action = "terminal" if candidate.terminal_outputs is not None else "descend"
-                trace.append(
-                    self._local_trace_step(
-                        local_step=local_step,
-                        candidate=candidate,
-                        input_value=current,
-                        query_result=query_result,
-                        action=action,
-                        exit_reason="formula-exit",
+                if step.local_trace:
+                    raise FederalRecallError(
+                        "BankOwnedQueryProgram.execute cannot forge local refine receipts"
                     )
-                )
-                adjusted.append(
-                    replace(
+                if len(step.candidates) > max_candidates:
+                    raise FederalRecallError(
+                        "local Bank returned more than the global K limit"
+                    )
+                for candidate in step.candidates:
+                    lineage = (*branch.lineage, candidate.candidate_id)
+                    trace_candidate = self._lineage_candidate(
                         candidate,
-                        local_log_score=(
-                            accumulated_score
-                            + candidate.local_log_score.to(
-                                device=accumulated_score.device,
-                                dtype=accumulated_score.dtype,
-                            ).reshape(())
-                        ),
+                        lineage=lineage,
+                        preserve_identity=max_candidates == 1,
                     )
-                )
-            return FederalBankStep(tuple(adjusted), tuple(trace))
-        raise AssertionError("unreachable Bank-local Refine state")
+                    cumulative = branch.cumulative_log_score + (
+                        candidate.local_log_score.to(
+                            device=branch.cumulative_log_score.device,
+                            dtype=branch.cumulative_log_score.dtype,
+                        ).reshape(())
+                    )
+                    is_local = (
+                        candidate.next_value is not None
+                        and candidate.next_bank_id is None
+                    )
+                    if is_local:
+                        if policy is None:
+                            raise FederalRecallError(
+                                "local continuation requires BankLocalRefinePolicy@1"
+                            )
+                        assert candidate.next_value is not None
+                        trace.append(
+                            self._local_trace_step(
+                                local_step=local_step,
+                                candidate=trace_candidate,
+                                input_value=current,
+                                query_result=query_result,
+                                action="continue-local",
+                                exit_reason=None,
+                            )
+                        )
+                        self.signature.input_schema.validate_tensor(
+                            candidate.next_value,
+                            name=f"{self.bank_id}.local[{local_step}]",
+                        )
+                        if local_step < max_steps:
+                            next_active.append(
+                                _BankLocalPath(
+                                    value=candidate.next_value,
+                                    cumulative_log_score=cumulative,
+                                    lineage=lineage,
+                                )
+                            )
+                        continue
+
+                    if local_step < min_steps:
+                        saw_early_exit = True
+                        continue
+                    if candidate.next_value is not None:
+                        self.signature.output_schema.validate_tensor(
+                            candidate.next_value,
+                            name=f"{self.bank_id}.output",
+                        )
+                    action = (
+                        "terminal"
+                        if candidate.terminal_outputs is not None
+                        else "descend"
+                    )
+                    trace.append(
+                        self._local_trace_step(
+                            local_step=local_step,
+                            candidate=trace_candidate,
+                            input_value=current,
+                            query_result=query_result,
+                            action=action,
+                            exit_reason="formula-exit",
+                        )
+                    )
+                    next_completed.append(
+                        (
+                            replace(
+                                trace_candidate,
+                                local_log_score=cumulative,
+                            ),
+                            lineage,
+                        )
+                    )
+
+            choices: list[
+                tuple[str, _BankLocalPath | FederalCandidate, tuple[str, ...]]
+            ] = [
+                ("active", branch, branch.lineage) for branch in next_active
+            ] + [
+                ("completed", candidate, lineage)
+                for candidate, lineage in next_completed
+            ]
+            choices.sort(key=self._local_choice_order)
+            choices = choices[:max_candidates]
+            active = tuple(
+                choice
+                for kind, choice, _lineage in choices
+                if kind == "active" and isinstance(choice, _BankLocalPath)
+            )
+            completed = tuple(
+                (choice, lineage)
+                for kind, choice, lineage in choices
+                if kind == "completed" and isinstance(choice, FederalCandidate)
+            )
+            if not active:
+                if completed:
+                    return FederalBankStep(
+                        tuple(candidate for candidate, _lineage in completed),
+                        tuple(trace),
+                    )
+                if saw_early_exit:
+                    raise FederalRecallError(
+                        "Bank-local exit is invalid before min_steps"
+                    )
+                break
+        if completed:
+            return FederalBankStep(
+                tuple(candidate for candidate, _lineage in completed),
+                tuple(trace),
+            )
+        raise FederalRecallError(
+            "Bank-local Refine reached max_steps without a valid exit"
+        )
+
+    @staticmethod
+    def _local_choice_order(
+        item: tuple[str, _BankLocalPath | FederalCandidate, tuple[str, ...]],
+    ) -> tuple[float, str]:
+        _kind, choice, lineage = item
+        score = choice.cumulative_log_score if isinstance(
+            choice, _BankLocalPath
+        ) else choice.local_log_score
+        return (-float(score.detach().reshape(()).cpu()), "/".join(lineage))
+
+    @staticmethod
+    def _lineage_candidate(
+        candidate: FederalCandidate,
+        *,
+        lineage: tuple[str, ...],
+        preserve_identity: bool,
+    ) -> FederalCandidate:
+        if preserve_identity or len(lineage) == 1:
+            return candidate
+        digest = hashlib.sha256("/".join(lineage).encode("utf-8")).hexdigest()[:12]
+        return replace(candidate, candidate_id=f"{candidate.candidate_id}-{digest}")
 
     def _local_trace_step(
         self,
@@ -934,9 +1024,10 @@ class FederalRecall(nn.Module):
 
 
 class FederalRecallV2(FederalRecall):
-    """K=1 Federation whose autonomous Banks own sealed local Queries."""
+    """Fixed-K Federation whose autonomous Banks own sealed local Queries."""
 
     _component_reference: ClassVar[str] = "arti/federal-recall@2"
+    recommended_breadth: ClassVar[int] = 8
 
     def __init__(
         self,
@@ -945,7 +1036,7 @@ class FederalRecallV2(FederalRecall):
         terminal_abi: TerminalOutputABI,
         root_bank_ids: tuple[str, ...],
         max_levels: int = 8,
-        max_k: int = 1,
+        max_k: int = recommended_breadth,
         winner_policy: str = "hard_one_winner",
     ) -> None:
         nn.Module.__init__(self)
@@ -973,10 +1064,8 @@ class FederalRecallV2(FederalRecall):
             or max_levels <= 0
         ):
             raise FederalRecallError("max_levels must be a positive integer")
-        if type(max_k) is not int or max_k != 1:
-            raise FederalRecallError(
-                "FederalRecall@2 initially supports only serial K=1 execution"
-            )
+        if isinstance(max_k, bool) or not isinstance(max_k, int) or max_k <= 0:
+            raise FederalRecallError("max_k must be a positive integer")
         if winner_policy != "hard_one_winner":
             raise FederalRecallError("FederalRecall@2 supports only hard_one_winner")
         score_fields = tuple(

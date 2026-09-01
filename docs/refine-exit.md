@@ -129,32 +129,8 @@ the fixed Query, Bank, Formula, task head, and Recall transition receive no
 gradient during this phase. Deployment still uses the hard post-transition
 request from `FormulaRefineExit`.
 
-Two bounded benchmarks keep the evidence levels separate:
-
-- `benchmarks/train_refine_exit_task_curve.py` is a synthetic objective smoke
-  test. It checks that the hazard can assign different depths when states carry
-  different convergence rates.
-- `benchmarks/train_refine_exit_combined.py` trains a real `arti.Recall` at full
-  depth, freezes it, trains the controller from replayed task loss, and finally
-  evaluates the hard `model_exit=True` runtime against fixed-depth Recall.
-- `benchmarks/train_qwen_refine_exit_next_token.py` freezes a locally cached
-  Qwen model, trains Recall from full-vocabulary next-token cross-entropy on
-  complete and disjoint train/control/validation/test text splits, then evaluates
-  learned hard exit against fixed Refine depths on the held-out test split. It
-  uses controlled latent corruption to expose a bounded repair task.
-
-The combined benchmark uses a controlled classification task so its result is
-mechanism evidence, not a claim about a particular pretrained model or
-downstream dataset. It fails unless learned hard-exit loss remains within the
-explicit `--quality-loss-tolerance` of the fixed full-depth loss for the same
-seed. A production evaluation should keep complete samples
-separate across train, validation, and test, select quality tolerances on
-validation data, and execute the hard Recall runtime once on the held-out test
-set. It should report task quality, actual logical step distribution, and all
-non-model termination reasons separately.
-
-The Qwen gate is pretrained-model downstream evidence, but its scope remains
-narrow: next-token prediction from cached final hidden states under controlled
-corruption. It does not establish open-generation quality, Qwen fine-tuning, or
-physical runtime acceleration. Its default hard-exit gate preserves full-depth
-loss within `0.05` while requiring at least 25% fewer logical Refine steps.
+Evaluate a learned exit against fixed-depth Recall on disjoint validation and
+test samples. Select quality tolerances on validation data, then execute the
+hard runtime once on the held-out test set. Report task quality, the logical
+step distribution, and every non-model termination reason separately. Logical
+step reduction alone is not evidence of physical runtime acceleration.

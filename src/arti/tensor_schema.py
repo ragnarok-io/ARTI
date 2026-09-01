@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import ClassVar, Literal, Mapping
+from typing import ClassVar, Literal, Mapping, Sequence
 
 import torch
 from torch import Tensor
@@ -32,6 +32,34 @@ GradientMode = Literal["autograd", "custom_vjp", "straight_through", "detached"]
 
 class TensorSchemaError(ValueError):
     """Raised when a tensor contract or tensor admission is invalid."""
+
+
+def is_shape_dimension(value: object, *, allow_zero: bool = True) -> bool:
+    """Return whether a value uses ARTI's canonical dimension representation."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return False
+    if isinstance(value, int):
+        return value >= 0 if allow_zero else value > 0
+    return _SYMBOL.fullmatch(value) is not None
+
+
+def normalize_shape_dimensions(
+    dimensions: Sequence[ShapeDimension],
+    *,
+    allow_zero: bool = True,
+) -> tuple[ShapeDimension, ...]:
+    """Validate and freeze concrete or symbolic dimensions."""
+
+    if isinstance(dimensions, (str, bytes)):
+        raise TensorSchemaError("dimensions must be a sequence, not text")
+    result = tuple(dimensions)
+    if not all(is_shape_dimension(item, allow_zero=allow_zero) for item in result):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise TensorSchemaError(
+            f"dimensions must be {qualifier} integers or valid symbols"
+        )
+    return result
 
 
 def _canonical_json(value: object) -> str:
@@ -76,7 +104,11 @@ class TensorSchema:
     _component_reference: ClassVar[str] = "arti/tensor-schema@1"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "dimensions", tuple(self.dimensions))
+        object.__setattr__(
+            self,
+            "dimensions",
+            normalize_shape_dimensions(self.dimensions),
+        )
         object.__setattr__(self, "semantic_axes", tuple(self.semantic_axes))
         if self.schema_version != TENSOR_SCHEMA_VERSION:
             raise TensorSchemaError("unsupported TensorSchema version")
@@ -90,13 +122,6 @@ class TensorSchema:
         for axis in self.semantic_axes:
             if not isinstance(axis, str) or _SYMBOL.fullmatch(axis) is None:
                 raise TensorSchemaError("semantic axes must be valid identifiers")
-        for dimension in self.dimensions:
-            if isinstance(dimension, bool) or not isinstance(dimension, (int, str)):
-                raise TensorSchemaError("dimensions must be non-negative integers or symbols")
-            if isinstance(dimension, int) and dimension < 0:
-                raise TensorSchemaError("concrete dimensions must be non-negative")
-            if isinstance(dimension, str) and _SYMBOL.fullmatch(dimension) is None:
-                raise TensorSchemaError("symbolic dimensions must be valid identifiers")
         if self.mask_semantics is not None:
             _validate_token(self.mask_semantics, name="mask_semantics")
 

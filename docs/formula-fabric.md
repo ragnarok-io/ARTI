@@ -9,12 +9,36 @@ The executor remains the only implementation of Formula mathematics.
 `FormulaFabricV2` is a stable typed SSA executor. It is a separate component
 version from `FormulaFabric@1`; the original fixed-arena runtime remains
 unchanged. A v2 program declares named tensor axes, domains, dtypes, bounded
-slots, explicit Input and Bank bindings, and a sequence of four public atoms:
+slots, explicit Input and Bank bindings, and a bounded public atom basis:
 
 - `Contract@1` contracts exactly the named axis pairs.
 - `Scale@1` applies a scalar or named-axis factor.
 - `Add@1` combines two tensors with the same typed shape.
 - `Reduce@1` performs an ordered deterministic sum over one named axis.
+- `Reshape@1` changes named shape without changing element count.
+- `Permute@1` reorders named axes.
+- `Gather@1` selects an explicitly indexed workset.
+- `Scatter@1` restores or replaces an explicitly indexed workset.
+- `ScalarMap@1` applies a declared elementwise function such as GELU or SiLU.
+- `Broadcast@1` explicitly expands named singleton or new axes.
+- `Select@1` chooses values with a broadcastable boolean tensor.
+- `Lookup@1` reads a typed table with arbitrary-rank integer indices.
+- `Slice@1` takes a bounded positive-step slice from one named axis.
+- `Concat@1` joins statically sized segments along one named axis.
+- `MaskedSoftmax@1` performs stable visible-only normalization and returns
+  zeros for a fully masked row.
+
+These atoms are sufficient to express the data movement, nonlinearities,
+attention normalization, and table access used by a small Transformer. ARTI
+does not provide an opaque Transformer, Attention, MLP, or RoPE Formula atom;
+those structures remain ordinary typed SSA programs whose operands can come
+from Banks.
+
+`index_fold()` and `index_unfold()` are convenience macros over `Gather@1` and
+`Scatter@1`. They do not have Formula atom identities of their own. In
+particular, they are not `arti/fold@2` and `arti/unfold@2`: those references
+belong exclusively to the reversible-topology components, which preserve the
+folded payload and carry a `FoldRecord` for exact inversion.
 
 For example, a rank-r LoRA-shaped operation is expanded into ordinary atoms:
 
@@ -96,14 +120,77 @@ compiled graph does not independently rediscover Bank provenance from tensor
 bytes. Trace data is diagnostic program provenance; it does not attest the
 bytes of externally supplied Bank tensors.
 
-The v2 reference executor operates on dense floating tensors with positive
-axis extents. Masks and ragged layouts are not implicit executor behavior; a
-caller must represent them as explicit typed operands in a compatible program
-or keep that policy outside Formula execution. Compiled plans consume bindings
-that have already passed host-side shape, dtype, device, identity, and working
-set admission.
+The v2 arithmetic atoms operate on dense floating tensors with positive axis
+extents. Gather and Scatter may also transport explicit boolean masks. Masks
+and ragged layouts are not implicit executor behavior; a caller must represent
+them as typed operands in a compatible program or keep that policy outside
+Formula execution. Compiled plans consume bindings that have already passed
+host-side shape, dtype, device, identity, and working-set admission.
 
 See `examples/formula_v2_typed_lora.py` for a complete hard-routed Bank example.
+
+## Transformer Composition
+
+Formula Fabric can express a causal Transformer block without introducing an
+opaque Transformer atom. Token and position lookup, normalization, Q/K/V
+projections, masked attention, residual connections, an MLP, and an output head
+can be expanded into ordinary typed SSA instructions. The required operations
+come from public atom identities such as:
+
+```text
+Lookup, Contract, Reduce, Broadcast, ScalarMap,
+MaskedSoftmax, Reshape, Scale, Add
+```
+
+The resulting structure remains a composition of public Formula atoms and Bank
+values rather than hidden implementation code. Expressibility does not imply a
+runtime advantage over optimized Transformer kernels or unrestricted neural
+architecture search.
+
+## Bounded Program Query
+
+`FormulaProgramQuery` is an alpha composition for learning a small typed SSA
+program from final task loss. Each `FormulaProgramCandidate` must contain
+exactly one Formula instruction and explicitly declares its existing input
+slots and one previously empty output slot. At each step, candidates whose
+inputs are absent, whose output has already been written, or whose Formula
+types do not admit the current tensors are removed before normalization.
+`requires_empty_slots` may additionally close a branch after another SSA slot
+has been produced. It is a serialized program-grammar constraint shared by
+training and hard execution; it does not identify a preferred candidate.
+
+```python
+query = mechanisms.FormulaProgramQuery(
+    slot_ids=("x", "hidden", "activated", "output"),
+    candidates=(project, gelu, output),
+    terminal_slot="output",
+    min_steps=3,
+    max_steps=3,
+)
+
+loss = mechanisms.ExactFormulaProgramQueryTraining().loss(
+    query,
+    initial={"x": x},
+    target=target,
+    task_loss=final_task_loss,
+)
+```
+
+The exact trainer enumerates only the bounded shape-valid path graph. It uses
+the final task loss and supplies no atom, wiring, route, transition, or stop
+teacher. Equivalent execution orders are merged by the immutable SSA producer
+map, so independent operations such as Q/K/V projection are evaluated once per
+unique tensor state rather than once per permutation. This remains an exact
+expected-policy loss, not a sampled or mixed-output estimator. Hard execution
+currently accepts one sample because different samples
+may choose heterogeneous atoms and tensor shapes. It selects one candidate,
+never a weighted merge of candidate outputs.
+
+The component is intentionally bounded: the host supplies the candidate catalog,
+slot schema, step limits, and final task loss. It does not generate Python code,
+invent new atoms, or claim unrestricted architecture search. Training cost can
+grow with the number of reachable SSA states, so catalogs should stay small or
+use an application-owned search strategy.
 
 ## Objective-Controlled Commits
 

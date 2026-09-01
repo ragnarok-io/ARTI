@@ -312,9 +312,13 @@ def build_routed_lora_program(
     tensor = lambda axes, sizes: TensorType.axes(  # noqa: E731
         axes, sizes=sizes, dtype=dtype, domain=domain
     )
-    x = InputBinding("x", tensor(("B", "S", "Din"), (None, None, input_dim)))
-    base = InputBinding("base", tensor(("B", "S", "Dout"), (None, None, output_dim)))
-    route = InputBinding("formula.route", tensor(("B", "K"), (None, candidate_count)))
+    x = InputBinding("x", tensor(("B", "S", "Din"), ("B", "S", input_dim)))
+    base = InputBinding(
+        "base", tensor(("B", "S", "Dout"), ("B", "S", output_dim))
+    )
+    route = InputBinding(
+        "formula.route", tensor(("B", "K"), ("B", candidate_count))
+    )
     bank_kwargs = {
         "source_ref": source_ref,
         "asset_fingerprint": asset_fingerprint,

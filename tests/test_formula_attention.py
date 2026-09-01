@@ -284,6 +284,23 @@ def test_selective_recall_matches_direct_packed_recall() -> None:
     torch.testing.assert_close(result.value, expected)
 
 
+def test_selective_recall_keeps_default_k_wide_recall_inside_pulse_compute() -> None:
+    recall = arti.nn.Recall(dim=3, slots=16, activation="none")
+    kernel = arti.mechanisms.SelectiveRecallKernel(recall)
+    compute = SelectiveCompute(kernel, max_queries=2, max_sources=3)
+    value = torch.randn(1, 4, 3)
+    exposed = torch.tensor([[True, True, True, False]])
+    intervened = torch.tensor([[True, False, True, False]])
+
+    result = compute(
+        active_workspace(value, exposed=exposed, intervened=intervened)
+    )
+
+    assert recall.breadth == recall.recommended_breadth == 8
+    assert recall.breadth_aggregation == "winner"
+    assert result.value.shape == value.shape
+
+
 def test_component_graph_separates_intervention_from_compute() -> None:
     attention = FormulaAttention(
         FactorInterventionPolicy(1),

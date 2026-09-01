@@ -769,6 +769,41 @@ def _federal_recall_v2_dependencies(component: Any) -> Sequence[str]:
     return tuple(sorted(result))
 
 
+def _bank_execution_signature_v3_dependencies(component: Any) -> Sequence[str]:
+    return tuple(
+        sorted(
+            {
+                "arti/gradient-contract@1",
+                "arti/query-execution-signature@2",
+                "arti/tensor-view-pattern@1",
+                "arti/terminal-output-abi@1",
+                component.program_ref,
+                component.query_signature.query_ref,
+                component.query_signature.observer_ref,
+                component.query_signature.matcher_ref,
+                component.terminal_adapter_ref,
+                component.local_formula_ref,
+                component.local_refine_ref,
+            }
+        )
+    )
+
+
+def _federal_recall_v3_dependencies(component: Any) -> Sequence[str]:
+    result = {
+        "arti/bank-execution-signature@3",
+        "arti/sealed-bank-query@2",
+        "arti/terminal-output-abi@1",
+    }
+    for bank_id in component.banks:
+        result.update(
+            _bank_execution_signature_v3_dependencies(
+                component.banks[bank_id].signature
+            )
+        )
+    return tuple(sorted(result))
+
+
 def _target_bank_updater_config(component: Any) -> Mapping[str, Any]:
     policy = _attr(component, "policy")
     return {
@@ -1301,17 +1336,25 @@ def _build_default_registry() -> ComponentRegistry:
     )
     from .formula_v2 import (
         AddAtom,
+        BroadcastAtom,
+        ConcatAtom,
         ContractAtom,
         FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
         FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION,
         FormulaExecutionPlanV2,
         FormulaFabricV2,
+        formula_program_dependency_refs,
         GatherAtom,
+        LookupAtom,
+        MaskedSoftmaxAtom,
         PermuteAtom,
         ReduceAtom,
         ReshapeAtom,
         ScaleAtom,
+        ScalarMapAtom,
         ScatterAtom,
+        SelectAtom,
+        SliceAtom,
     )
     from .formula_learning import FormulaOperandBank
     from .gpu_resident import (
@@ -1362,6 +1405,14 @@ def _build_default_registry() -> ComponentRegistry:
         TypedTopologyPriorityFormula,
     )
     from .tensor_schema import GradientContract, ShapeRelation, TensorSchema
+    from .tensor_view import AxisDescriptor, TensorViewPattern
+    from .shape_query import (
+        BankMemberMatcher,
+        CoordinateTensorViewObserver,
+        SealedTensorViewBankQuery,
+        TensorViewBankQuery,
+        TensorViewQueryExecutionSignature,
+    )
     from .bank_query import (
         LinearBankQuery,
         QueryExecutionSignature,
@@ -1376,12 +1427,24 @@ def _build_default_registry() -> ComponentRegistry:
         ExactBankLocalProgramTraining,
         ValueTerminalAdapter,
     )
+    from .formula_program_query import (
+        ExactFormulaProgramQueryTraining,
+        FormulaProgramCandidate,
+        FormulaProgramQuery,
+    )
     from .terminal_abi import (
         BankExecutionSignature,
         BankExecutionSignatureV2,
+        BankExecutionSignatureV3,
         TerminalOutputABI,
     )
     from .federal_recall import BankLocalRefinePolicy, FederalRecall, FederalRecallV2
+    from .federal_tensor_view import (
+        FederalRecallV3,
+        TensorViewFormulaAction,
+        TensorViewFormulaProgram,
+        TensorViewLayoutTransition,
+    )
     from .recall_refine import (
         AdaptiveRefinePolicy,
         RecallRoutePlan,
@@ -2046,6 +2109,99 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
+        "arti/formula-atom-scalar-map@1",
+        ScalarMapAtom,
+        lifecycle=stable,
+        variant="typed-elementwise-scalar-function",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "mode": component.mode,
+        },
+    )
+    add(
+        "arti/formula-atom-broadcast@1",
+        BroadcastAtom,
+        lifecycle=stable,
+        variant="typed-explicit-named-axis-broadcast",
+        capabilities=("formula.fabric.shape", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "output_axes": list(component.output_axes),
+            "output_sizes": list(component.output_sizes),
+        },
+    )
+    add(
+        "arti/formula-atom-select@1",
+        SelectAtom,
+        lifecycle=stable,
+        variant="typed-boolean-selection",
+        capabilities=("formula.fabric.control", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "mask_type": component.mask_type.to_dict(),
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+        },
+    )
+    add(
+        "arti/formula-atom-lookup@1",
+        LookupAtom,
+        lifecycle=stable,
+        variant="typed-indexed-table-lookup",
+        capabilities=("formula.fabric.memory", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "table_type": component.table_type.to_dict(),
+            "index_type": component.index_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "table_axis": component.table_axis,
+            "output_axes": list(component.output_axes),
+        },
+    )
+    add(
+        "arti/formula-atom-slice@1",
+        SliceAtom,
+        lifecycle=stable,
+        variant="typed-bounded-named-axis-slice",
+        capabilities=("formula.fabric.shape", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "start": component.start,
+            "stop": component.stop,
+            "step": component.step,
+        },
+    )
+    add(
+        "arti/formula-atom-concat@1",
+        ConcatAtom,
+        lifecycle=stable,
+        variant="typed-static-axis-concatenation",
+        capabilities=("formula.fabric.shape", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "left_type": component.left_type.to_dict(),
+            "right_type": component.right_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+        },
+    )
+    add(
+        "arti/formula-atom-masked-softmax@1",
+        MaskedSoftmaxAtom,
+        lifecycle=stable,
+        variant="typed-stable-masked-normalization",
+        capabilities=("formula.fabric.normalization", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "logits_type": component.logits_type.to_dict(),
+            "mask_type": component.mask_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
         "arti/formula-fabric@2",
         FormulaFabricV2,
         lifecycle=stable,
@@ -2056,8 +2212,8 @@ def _build_default_registry() -> ComponentRegistry:
             "program": component.program.to_dict(),
             "program_fingerprint": component.program.fingerprint,
         },
-        dependency_builder=lambda component: tuple(
-            sorted({item.atom_ref for item in component.program.instructions})
+        dependency_builder=lambda component: formula_program_dependency_refs(
+            component.program
         ),
     )
     add(
@@ -2072,8 +2228,8 @@ def _build_default_registry() -> ComponentRegistry:
             "program_fingerprint": component.program_fingerprint,
             "binding_names": list(component.binding_names),
         },
-        dependency_builder=lambda component: tuple(
-            sorted({item.atom_ref for item in component.program.instructions})
+        dependency_builder=lambda component: formula_program_dependency_refs(
+            component.program
         ),
         capabilities=("formula.fabric.compilable-plan", "formula.fabric.typed-executor"),
     )
@@ -2624,6 +2780,84 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.contract.tensor-schema",),
     )
     add(
+        "arti/axis-descriptor@1",
+        AxisDescriptor,
+        lifecycle="alpha",
+        variant="named-logical-axis",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.contract.tensor-view.axis",),
+    )
+    add(
+        "arti/tensor-view-pattern@1",
+        TensorViewPattern,
+        lifecycle="alpha",
+        variant="bounded-shape-polymorphic-admission",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.contract.tensor-view.pattern",),
+    )
+    add(
+        "arti/coordinate-tensor-view-observer@1",
+        CoordinateTensorViewObserver,
+        lifecycle="alpha",
+        variant="coordinate-aware-variable-observation-stream",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("federal.query.shape-polymorphic.observer",),
+    )
+    add(
+        "arti/bank-member-matcher@1",
+        BankMemberMatcher,
+        lifecycle="alpha",
+        variant="appendable-member-late-interaction",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("federal.query.member-matcher",),
+    )
+    add(
+        "arti/tensor-view-bank-query@2",
+        TensorViewBankQuery,
+        lifecycle="alpha",
+        variant="bank-owned-shape-polymorphic-query",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.observer),
+            component_ref(component.matcher),
+            "arti/tensor-view-pattern@1",
+        ),
+        capabilities=(
+            "federal.query.pretrainable",
+            "federal.query.shape-polymorphic",
+        ),
+    )
+    add(
+        "arti/query-execution-signature@2",
+        TensorViewQueryExecutionSignature,
+        lifecycle="alpha",
+        variant="sealed-shape-polymorphic-query-identity",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: (
+            component.query_ref,
+            component.observer_ref,
+            component.matcher_ref,
+            "arti/tensor-view-pattern@1",
+        ),
+        capabilities=("federal.query.sealed-signature",),
+    )
+    add(
+        "arti/sealed-bank-query@2",
+        SealedTensorViewBankQuery,
+        lifecycle="alpha",
+        variant="bank-owned-shape-polymorphic-pretrained-then-sealed",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.query),
+            "arti/query-execution-signature@2",
+        ),
+        capabilities=(
+            "federal.query.bank-owned",
+            "federal.query.runtime-fixed",
+            "federal.query.shape-polymorphic",
+        ),
+    )
+    add(
         "arti/shape-relation@1",
         ShapeRelation,
         lifecycle=stable,
@@ -2715,6 +2949,15 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.contract.bank-owned-query-signature",),
     )
     add(
+        "arti/bank-execution-signature@3",
+        BankExecutionSignatureV3,
+        lifecycle="alpha",
+        variant="shape-polymorphic-bank-owned-query-signature",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=_bank_execution_signature_v3_dependencies,
+        capabilities=("federal.contract.shape-polymorphic-bank-signature",),
+    )
+    add(
         "arti/bank-local-refine-policy@1",
         BankLocalRefinePolicy,
         lifecycle=stable,
@@ -2782,6 +3025,52 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
+        "arti/tensor-view-layout-transition@1",
+        TensorViewLayoutTransition,
+        lifecycle="alpha",
+        variant="formula-successor-logical-view",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.tensor-view.successor-layout",),
+    )
+    add(
+        "arti/tensor-view-formula-action@1",
+        TensorViewFormulaAction,
+        lifecycle="alpha",
+        variant="typed-formula-to-successor-view",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.action),
+            "arti/tensor-view-layout-transition@1",
+        ),
+        capabilities=("federal.bank-local.tensor-view-formula-action",),
+    )
+    add(
+        "arti/tensor-view-formula-program@1",
+        TensorViewFormulaProgram,
+        lifecycle="alpha",
+        variant="latest-tensor-view-local-refine-program",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted(
+                {
+                    *(component_ref(action) for action in component.actions),
+                    component_ref(component.terminal_action),
+                    component_ref(component.query),
+                    component_ref(component.local_refine),
+                    "arti/bank-execution-signature@3",
+                    "arti/terminal-output-abi@1",
+                    "arti/tensor-view-pattern@1",
+                }
+            )
+        ),
+        capabilities=(
+            "federal.bank-local.latest-tensor-view-requery",
+            "federal.bank-local.variable-rank-refine",
+        ),
+    )
+    add(
         "arti/exact-bank-local-program-training@1",
         ExactBankLocalProgramTraining,
         lifecycle=stable,
@@ -2826,6 +3115,42 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.bank-local.training.detached-on-policy",),
     )
     add(
+        "arti/formula-program-candidate@1",
+        FormulaProgramCandidate,
+        lifecycle="alpha",
+        variant="single-atom-explicit-ssa-wiring",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=("formula.program-query.candidate",),
+    )
+    add(
+        "arti/formula-program-query@1",
+        FormulaProgramQuery,
+        lifecycle="alpha",
+        variant="bounded-shape-valid-hard-ssa-program-query",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted({component_ref(candidate) for candidate in component.candidates})
+        ),
+        capabilities=(
+            "formula.program-query.hard-one",
+            "formula.program-query.latest-arena-requery",
+            "formula.program-query.shape-valid",
+        ),
+    )
+    add(
+        "arti/exact-formula-program-query-training@1",
+        ExactFormulaProgramQueryTraining,
+        lifecycle="alpha",
+        variant="exact-expected-final-task-loss",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: ("arti/formula-program-query@1",),
+        capabilities=("formula.program-query.training.final-task-loss",),
+    )
+    add(
         "arti/federal-recall@1",
         FederalRecall,
         lifecycle=stable,
@@ -2845,13 +3170,28 @@ def _build_default_registry() -> ComponentRegistry:
         "arti/federal-recall@2",
         FederalRecallV2,
         lifecycle=stable,
-        variant="bank-owned-query-serial-requery",
+        variant="bank-owned-query-fixed-k-requery",
         config_builder=lambda component: component.contract_config(),
         dependency_builder=_federal_recall_v2_dependencies,
         capabilities=(
             "federal.execution.eager-reference",
+            "federal.execution.fixed-k",
+            "federal.execution.hard-one-winner",
             "federal.execution.latest-state-requery",
-            "federal.execution.serial-k1",
+        ),
+    )
+    add(
+        "arti/federal-recall@3",
+        FederalRecallV3,
+        lifecycle="alpha",
+        variant="shape-polymorphic-bank-local-refine-federation",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_federal_recall_v3_dependencies,
+        capabilities=(
+            "federal.fixed-k-wide",
+            "federal.hard-one-winner",
+            "federal.shape-polymorphic-local-refine",
         ),
     )
     add(
@@ -4228,6 +4568,29 @@ def _validate_vnext_dependency_closure(
             )
         return
 
+    if reference == "arti/query-execution-signature@2":
+        from .shape_query import TensorViewQueryExecutionSignature
+
+        try:
+            signature = TensorViewQueryExecutionSignature.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "TensorViewQueryExecutionSignature config is invalid"
+            ) from exc
+        expected = sorted(
+            {
+                "arti/tensor-view-pattern@1",
+                signature.query_ref,
+                signature.observer_ref,
+                signature.matcher_ref,
+            }
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "TensorViewQueryExecutionSignature dependency closure is invalid"
+            )
+        return
+
     if reference == "arti/sealed-bank-query@1":
         from .bank_query import QueryExecutionSignature
 
@@ -4245,6 +4608,28 @@ def _validate_vnext_dependency_closure(
         if dependencies != expected:
             raise ComponentCompatibilityError(
                 "SealedBankQuery dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/sealed-bank-query@2":
+        from .shape_query import TensorViewQueryExecutionSignature
+
+        try:
+            if not isinstance(config, Mapping) or set(config) != {"signature"}:
+                raise ValueError("sealed TensorView Bank Query fields")
+            signature = TensorViewQueryExecutionSignature.from_dict(
+                config["signature"]
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "SealedTensorViewBankQuery config is invalid"
+            ) from exc
+        expected = sorted(
+            {"arti/query-execution-signature@2", signature.query_ref}
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "SealedTensorViewBankQuery dependency closure is invalid"
             )
         return
 
@@ -4282,6 +4667,22 @@ def _validate_vnext_dependency_closure(
         if dependencies != expected:
             raise ComponentCompatibilityError(
                 "BankExecutionSignatureV2 dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/bank-execution-signature@3":
+        from .terminal_abi import BankExecutionSignatureV3
+
+        try:
+            signature = BankExecutionSignatureV3.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "BankExecutionSignatureV3 config is invalid"
+            ) from exc
+        expected = list(_bank_execution_signature_v3_dependencies(signature))
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "BankExecutionSignatureV3 dependency closure is invalid"
             )
         return
 
@@ -4333,8 +4734,7 @@ def _validate_vnext_dependency_closure(
                 or not signatures
                 or any(root not in signatures for root in roots)
                 or not _is_positive_int(config["max_levels"])
-                or config["max_k"] != 1
-                or type(config["max_k"]) is not int
+                or not _is_positive_int(config["max_k"])
                 or config["winner_policy"] != "hard_one_winner"
             ):
                 raise ValueError("FederalRecall@2 contract")
@@ -4363,6 +4763,60 @@ def _validate_vnext_dependency_closure(
             )
         return
 
+    if reference == "arti/federal-recall@3":
+        from .terminal_abi import BankExecutionSignatureV3, TerminalOutputABI
+
+        required = {
+            "terminal_abi",
+            "root_bank_ids",
+            "bank_signatures",
+            "max_levels",
+            "max_k",
+            "winner_policy",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("FederalRecall@3 fields")
+            TerminalOutputABI.from_dict(config["terminal_abi"])
+            roots = config["root_bank_ids"]
+            signatures = config["bank_signatures"]
+            if (
+                not isinstance(roots, list)
+                or not roots
+                or len(roots) != len(set(roots))
+                or any(not isinstance(root, str) or not root for root in roots)
+                or not isinstance(signatures, Mapping)
+                or not signatures
+                or any(root not in signatures for root in roots)
+                or not _is_positive_int(config["max_levels"])
+                or not _is_positive_int(config["max_k"])
+                or config["winner_policy"] != "hard_one_winner"
+            ):
+                raise ValueError("FederalRecall@3 contract")
+            parsed_signatures = []
+            for bank_id, payload in signatures.items():
+                if not isinstance(bank_id, str) or not bank_id:
+                    raise ValueError("FederalRecall@3 Bank id")
+                parsed_signatures.append(BankExecutionSignatureV3.from_dict(payload))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "FederalRecall@3 config is invalid"
+            ) from exc
+        expected_set = {
+            "arti/bank-execution-signature@3",
+            "arti/sealed-bank-query@2",
+            "arti/terminal-output-abi@1",
+        }
+        for signature in parsed_signatures:
+            expected_set.update(
+                _bank_execution_signature_v3_dependencies(signature)
+            )
+        if dependencies != sorted(expected_set):
+            raise ComponentCompatibilityError(
+                "FederalRecall@3 dependency closure is invalid"
+            )
+        return
+
     formula_atom_refs = {
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
@@ -4372,6 +4826,13 @@ def _validate_vnext_dependency_closure(
         "arti/formula-atom-permute@1",
         "arti/formula-atom-gather@1",
         "arti/formula-atom-scatter@1",
+        "arti/formula-atom-scalar-map@1",
+        "arti/formula-atom-broadcast@1",
+        "arti/formula-atom-select@1",
+        "arti/formula-atom-lookup@1",
+        "arti/formula-atom-slice@1",
+        "arti/formula-atom-concat@1",
+        "arti/formula-atom-masked-softmax@1",
     }
     formula_instruction_refs = formula_atom_refs | {
         "arti/fold@2",
@@ -4452,7 +4913,7 @@ def _validate_vnext_dependency_closure(
                 raise ComponentCompatibilityError("FormulaOperandBank operand schema is invalid")
         return
     if reference in {"arti/formula-fabric@2", "arti/formula-execution-plan@1"}:
-        from .formula_v2 import FormulaProgram
+        from .formula_v2 import FormulaProgram, formula_program_dependency_refs
 
         required = {"program", "program_fingerprint"}
         if reference == "arti/formula-execution-plan@1":
@@ -4485,7 +4946,7 @@ def _validate_vnext_dependency_closure(
                 raise ComponentCompatibilityError("Formula execution plan schema is invalid")
             if config["binding_names"] != [binding.name for binding in program.bindings]:
                 raise ComponentCompatibilityError("Formula execution binding order is invalid")
-        expected_dependencies = sorted({item.atom_ref for item in program.instructions})
+        expected_dependencies = list(formula_program_dependency_refs(program))
         if dependencies != expected_dependencies or not set(dependencies).issubset(
             formula_instruction_refs
         ):
@@ -4494,13 +4955,20 @@ def _validate_vnext_dependency_closure(
     if reference in formula_atom_refs:
         from .formula_v2 import (
             AddAtom,
+            BroadcastAtom,
+            ConcatAtom,
             ContractAtom,
             GatherAtom,
+            LookupAtom,
+            MaskedSoftmaxAtom,
             PermuteAtom,
             ReduceAtom,
             ReshapeAtom,
             ScaleAtom,
+            ScalarMapAtom,
             ScatterAtom,
+            SelectAtom,
+            SliceAtom,
             TensorType,
         )
 
@@ -4624,6 +5092,97 @@ def _validate_vnext_dependency_closure(
                 )
                 if atom.output_type.to_dict() != config["output_type"]:
                     raise ValueError("scatter output type")
+            elif reference == "arti/formula-atom-scalar-map@1":
+                required = {"value_type", "output_type", "mode"}
+                if set(config) != required:
+                    raise ValueError("scalar map config fields")
+                atom = ScalarMapAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    mode=config["mode"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("scalar map output type")
+            elif reference == "arti/formula-atom-broadcast@1":
+                required = {"value_type", "output_type", "output_axes", "output_sizes"}
+                if set(config) != required:
+                    raise ValueError("broadcast config fields")
+                atom = BroadcastAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    output_axes=config["output_axes"],
+                    output_sizes=config["output_sizes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("broadcast output type")
+            elif reference == "arti/formula-atom-select@1":
+                required = {"mask_type", "value_type", "output_type"}
+                if set(config) != required:
+                    raise ValueError("select config fields")
+                atom = SelectAtom(
+                    TensorType.from_dict(config["mask_type"]),
+                    TensorType.from_dict(config["value_type"]),
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("select output type")
+            elif reference == "arti/formula-atom-lookup@1":
+                required = {
+                    "table_type",
+                    "index_type",
+                    "output_type",
+                    "table_axis",
+                    "output_axes",
+                }
+                if set(config) != required:
+                    raise ValueError("lookup config fields")
+                atom = LookupAtom(
+                    TensorType.from_dict(config["table_type"]),
+                    TensorType.from_dict(config["index_type"]),
+                    table_axis=config["table_axis"],
+                    output_axes=config["output_axes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("lookup output type")
+            elif reference == "arti/formula-atom-slice@1":
+                required = {"value_type", "output_type", "axis", "start", "stop", "step"}
+                if set(config) != required:
+                    raise ValueError("slice config fields")
+                atom = SliceAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    axis=config["axis"],
+                    start=config["start"],
+                    stop=config["stop"],
+                    step=config["step"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("slice output type")
+            elif reference == "arti/formula-atom-concat@1":
+                required = {"left_type", "right_type", "output_type", "axis"}
+                if set(config) != required:
+                    raise ValueError("concat config fields")
+                atom = ConcatAtom(
+                    TensorType.from_dict(config["left_type"]),
+                    TensorType.from_dict(config["right_type"]),
+                    axis=config["axis"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("concat output type")
+            elif reference == "arti/formula-atom-masked-softmax@1":
+                required = {
+                    "logits_type",
+                    "mask_type",
+                    "output_type",
+                    "axis",
+                    "accumulation_dtype",
+                }
+                if set(config) != required:
+                    raise ValueError("masked softmax config fields")
+                atom = MaskedSoftmaxAtom(
+                    TensorType.from_dict(config["logits_type"]),
+                    TensorType.from_dict(config["mask_type"]),
+                    axis=config["axis"],
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("masked softmax output type")
             else:
                 raise ValueError("unknown Formula atom reference")
         except (TypeError, ValueError, KeyError) as exc:

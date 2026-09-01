@@ -77,6 +77,10 @@ def main() -> None:
             "arti/attachment_layer.py",
             "arti/formula_v2.py",
             "arti/formula_learning.py",
+            "arti/formula_program_query.py",
+            "arti/tensor_view.py",
+            "arti/shape_query.py",
+            "arti/federal_tensor_view.py",
             "arti/batched_refine.py",
             "arti/branch_formula.py",
             "arti/branch_refine.py",
@@ -258,6 +262,12 @@ def main() -> None:
                     "assert callable(arti.alpha.FormulaFabricV2); "
                     "assert callable(arti.alpha.FormulaExecutionPlanV2); "
                     "assert callable(arti.alpha.FormulaOperandBank); "
+                    "assert callable(arti.alpha.FormulaProgramCandidate); "
+                    "assert callable(arti.alpha.FormulaProgramQuery); "
+                    "assert callable(arti.alpha.ExactFormulaProgramQueryTraining); "
+                    "assert callable(arti.alpha.TensorView); "
+                    "assert callable(arti.alpha.TensorViewBankQuery); "
+                    "assert callable(arti.alpha.FederalRecallV3); "
                     "assert callable(arti.alpha.build_lora_program); "
                     "assert callable(arti.alpha.build_routed_lora_program); "
                     "assert callable(arti.alpha.hard_formula_route); "

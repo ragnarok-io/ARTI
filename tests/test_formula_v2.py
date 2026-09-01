@@ -13,6 +13,41 @@ import arti.formula_v2 as formula_v2
 from arti import mechanisms
 
 
+def test_formula_tensor_type_uses_the_shared_symbolic_dimension_contract() -> None:
+    value_type = mechanisms.TensorType.axes(("batch", "feature"), sizes=("B", 4))
+    schema = mechanisms.TensorSchema(
+        dtype="floating",
+        device_class="any",
+        dimensions=("B", 4),
+        semantic_axes=("batch", "feature"),
+        layout="any",
+    )
+
+    assert value_type.sizes == schema.dimensions == ("B", 4)
+    assert value_type.to_dict()["sizes"] == schema.to_dict()["dimensions"]
+    assert mechanisms.TensorType.axes(("B", "D")).sizes == ("B", "D")
+    with pytest.raises(mechanisms.FormulaSchemaError, match="valid symbols"):
+        mechanisms.TensorType.axes(("B", "D"), sizes=(None, 4))
+
+    program = mechanisms.build_routed_lora_program(
+        input_dim=4,
+        output_dim=6,
+        rank=2,
+        candidate_count=3,
+        source_ref="arti/test-symbolic-dimensions@1",
+    )
+    inputs = {
+        binding.name: binding.value_type.sizes
+        for binding in program.bindings
+        if isinstance(binding, mechanisms.InputBinding)
+    }
+    assert inputs == {
+        "x": ("B", "S", 4),
+        "base": ("B", "S", 6),
+        "formula.route": ("B", 3),
+    }
+
+
 def _bind_banks(
     program: mechanisms.FormulaProgram, values: dict[str, torch.Tensor]
 ) -> dict[str, mechanisms.FormulaBankOperand]:
@@ -249,7 +284,7 @@ def test_formula_v2_rejects_mismatched_bank_bundle_member_order() -> None:
 
 
 def test_dot_is_a_canonical_contract_alias() -> None:
-    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 5), dtype="float32")
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=("B", 5), dtype="float32")
     weight = mechanisms.TensorType.axes(("R", "D"), sizes=(3, 5), dtype="float32")
     left = mechanisms.InputBinding("x", vector)
     right = mechanisms.BankBinding("bank.A", "arti/test-bank@1", "A", weight)
@@ -316,7 +351,7 @@ def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
 
 
 def test_formula_v2_components_have_canonical_references_and_dependencies() -> None:
-    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 4))
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=("B", 4))
     matrix = mechanisms.TensorType.axes(("R", "D"), sizes=(2, 4))
     contract_atom = mechanisms.ContractAtom(
         vector, matrix, reduce_axes=(("D", "D"),), output_axes=("B", "R")
@@ -362,13 +397,13 @@ def test_formula_v2_components_have_canonical_references_and_dependencies() -> N
 
 def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
     value_type = mechanisms.TensorType.axes(
-        ("B", "N", "D"), sizes=(None, 6, 4), dtype="float32", domain="workspace"
+        ("B", "N", "D"), sizes=("B", 6, 4), dtype="float32", domain="workspace"
     )
     index_type = mechanisms.TensorType.axes(
-        ("B", "K"), sizes=(None, 3), dtype="int64", domain="topology"
+        ("B", "K"), sizes=("B", 3), dtype="int64", domain="topology"
     )
     active_type = mechanisms.TensorType.axes(
-        ("B", "K", "D"), sizes=(None, 3, 4), dtype="float32", domain="workspace"
+        ("B", "K", "D"), sizes=("B", 3, 4), dtype="float32", domain="workspace"
     )
     value = mechanisms.InputBinding("value", value_type)
     delta = mechanisms.InputBinding("delta", active_type)
@@ -382,7 +417,7 @@ def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
     image = mechanisms.reshape(
         active,
         output_axes=("B", "H", "W", "D"),
-        output_sizes=(None, 1, 3, 4),
+        output_sizes=("B", 1, 3, 4),
     )
     transposed = mechanisms.permute(image, output_axes=("B", "W", "H", "D"))
     restored = mechanisms.scatter(
@@ -440,15 +475,15 @@ def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
     ) == arti.component_provenance(fabric)
 
 
-def test_formula_v2_native_fold_unfold_changes_the_active_compute_surface() -> None:
+def test_formula_v2_index_fold_unfold_changes_the_active_compute_surface() -> None:
     value_type = mechanisms.TensorType.axes(
-        ("B", "N", "D"), sizes=(None, 7, 4), dtype="float32", domain="workspace"
+        ("B", "N", "D"), sizes=("B", 7, 4), dtype="float32", domain="workspace"
     )
     index_type = mechanisms.TensorType.axes(
-        ("B", "K"), sizes=(None, 3), dtype="int64", domain="topology"
+        ("B", "K"), sizes=("B", 3), dtype="int64", domain="topology"
     )
     active_type = mechanisms.TensorType.axes(
-        ("B", "K", "D"), sizes=(None, 3, 4), dtype="float32", domain="workspace"
+        ("B", "K", "D"), sizes=("B", 3, 4), dtype="float32", domain="workspace"
     )
     value = mechanisms.InputBinding("value", value_type)
     delta = mechanisms.InputBinding("delta", active_type)
@@ -459,19 +494,19 @@ def test_formula_v2_native_fold_unfold_changes_the_active_compute_surface() -> N
         index_type,
     )
 
-    folded = mechanisms.fold(value, topology, axis="N", index_axis="K")
-    restored = mechanisms.unfold(folded, mechanisms.add(folded.active, delta))
+    folded = mechanisms.index_fold(value, topology, axis="N", index_axis="K")
+    restored = mechanisms.index_unfold(folded, mechanisms.add(folded.active, delta))
     program = mechanisms.FormulaProgram.build(outputs=(folded.active, restored))
     program = mechanisms.FormulaProgram.from_dict(json.loads(json.dumps(program.to_dict())))
     fabric = mechanisms.FormulaFabricV2(program)
 
-    assert folded.active.value_type.sizes == (None, 3, 4)
+    assert folded.active.value_type.sizes == ("B", 3, 4)
     assert math.prod(size for size in value_type.sizes[1:] if size is not None) == 28
     assert math.prod(size for size in folded.active.value_type.sizes[1:] if size is not None) == 12
     assert tuple(item.atom_ref for item in program.instructions) == (
-        "arti/fold@2",
+        "arti/formula-atom-gather@1",
         "arti/formula-atom-add@1",
-        "arti/unfold@2",
+        "arti/formula-atom-scatter@1",
     )
 
     source = torch.arange(56, dtype=torch.float32).reshape(2, 7, 4).requires_grad_()
@@ -490,22 +525,25 @@ def test_formula_v2_native_fold_unfold_changes_the_active_compute_surface() -> N
     torch.testing.assert_close(result.output(program.outputs[1]), expected)
     assert result.trace is not None
     assert result.trace.atom_refs == (
-        "arti/fold@2",
+        "arti/formula-atom-gather@1",
         "arti/formula-atom-add@1",
-        "arti/unfold@2",
+        "arti/formula-atom-scatter@1",
     )
     result.output(program.outputs[1]).square().mean().backward()
     assert source.grad is not None and torch.isfinite(source.grad).all()
     assert change.grad is not None and torch.isfinite(change.grad).all()
 
     spec = arti.component_spec(fabric)
-    assert {"arti/fold@2", "arti/unfold@2"}.issubset(spec.dependencies)
+    assert {
+        "arti/formula-atom-gather@1",
+        "arti/formula-atom-scatter@1",
+    }.issubset(spec.dependencies)
     assert arti.validate_component_provenance(
         arti.component_provenance(fabric)
     ) == arti.component_provenance(fabric)
 
 
-def test_formula_v2_native_fold_state_carries_boolean_mask_and_rejects_bad_record() -> None:
+def test_formula_v2_index_fold_state_carries_boolean_mask_and_rejects_bad_record() -> None:
     mask_type = mechanisms.TensorType.axes(
         ("B", "N"), sizes=(1, 5), dtype="boolean", domain="validity"
     )
@@ -514,9 +552,9 @@ def test_formula_v2_native_fold_state_carries_boolean_mask_and_rejects_bad_recor
     )
     mask = mechanisms.InputBinding("mask", mask_type)
     topology = mechanisms.InputBinding("indices", index_type)
-    folded = mechanisms.fold(mask, topology, axis="N", index_axis="K")
+    folded = mechanisms.index_fold(mask, topology, axis="N", index_axis="K")
     program = mechanisms.FormulaProgram.build(
-        outputs=(folded.active, mechanisms.unfold(folded, folded.active))
+        outputs=(folded.active, mechanisms.index_unfold(folded, folded.active))
     )
     fabric = mechanisms.FormulaFabricV2(program)
     source = torch.tensor([[True, False, True, True, False]])
@@ -531,6 +569,47 @@ def test_formula_v2_native_fold_state_carries_boolean_mask_and_rejects_bad_recor
             inputs={"mask": source, "indices": torch.tensor([[2, 2]], dtype=torch.int64)},
             banks={},
         )
+
+
+def test_formula_v2_legacy_index_payload_reports_executed_dependencies() -> None:
+    value_type = mechanisms.TensorType.axes(
+        ("B", "N", "D"), sizes=(1, 5, 2), dtype="float32", domain="workspace"
+    )
+    index_type = mechanisms.TensorType.axes(
+        ("B", "K"), sizes=(1, 2), dtype="int64", domain="topology"
+    )
+    value = mechanisms.InputBinding("value", value_type)
+    indices = mechanisms.InputBinding("indices", index_type)
+    state = mechanisms.index_fold(value, indices, axis="N", index_axis="K")
+    modern = mechanisms.FormulaProgram.build(
+        outputs=(mechanisms.index_unfold(state, state.active),)
+    )
+    payload = modern.to_dict()
+    for instruction in payload["instructions"]:
+        if instruction["atom_ref"] == "arti/formula-atom-gather@1":
+            instruction["atom_ref"] = "arti/fold@2"
+            instruction["attributes"].update(
+                {
+                    "record_schema_ref": "arti/fold-record@1",
+                    "state_schema_ref": "arti/fold-state@1",
+                }
+            )
+        elif instruction["atom_ref"] == "arti/formula-atom-scatter@1":
+            instruction["atom_ref"] = "arti/unfold@2"
+            instruction["attributes"]["record_schema_ref"] = "arti/fold-record@1"
+
+    legacy = mechanisms.FormulaProgram.from_dict(payload)
+    fabric = mechanisms.FormulaFabricV2(legacy)
+    source = torch.randn(1, 5, 2)
+    topology = torch.tensor([[4, 1]], dtype=torch.int64)
+
+    result = fabric(inputs={"value": source, "indices": topology}, banks={})
+
+    torch.testing.assert_close(result.values[0], source)
+    assert set(arti.component_spec(fabric).dependencies) == {
+        "arti/formula-atom-gather@1",
+        "arti/formula-atom-scatter@1",
+    }
 
 
 def test_formula_v2_topology_scatter_rejects_duplicate_positions() -> None:
@@ -697,7 +776,7 @@ def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
     ("field", "value"),
     (
         ("axes", ["B", "N", "E"]),
-        ("sizes", [None, None, 4]),
+        ("sizes", ["B", "S", 4]),
         ("dtype", "float64"),
         ("domain", "mismatched-domain"),
     ),
@@ -730,7 +809,7 @@ def test_formula_v2_requires_one_same_named_slot_per_binding() -> None:
 
 
 def test_formula_v2_standalone_atoms_share_runtime_validation() -> None:
-    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 4))
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=("B", 4))
     matrix = mechanisms.TensorType.axes(("R", "D"), sizes=(2, 4))
     contract_atom = mechanisms.ContractAtom(
         vector, matrix, reduce_axes=(("D", "D"),), output_axes=("B", "R")
@@ -740,8 +819,8 @@ def test_formula_v2_standalone_atoms_share_runtime_validation() -> None:
         contract_atom(torch.randn(3, 4, dtype=torch.float32), torch.randn(2, 4, dtype=torch.float64))
 
     scale_atom = mechanisms.ScaleAtom(
-        mechanisms.TensorType.axes(("B", "K", "D"), sizes=(None, None, 4)),
-        mechanisms.TensorType.axes(("K",), sizes=(None,)),
+        mechanisms.TensorType.axes(("B", "K", "D"), sizes=("B", "K", 4)),
+        mechanisms.TensorType.axes(("K",), sizes=("K",)),
     )
     with pytest.raises(mechanisms.FormulaBindingError, match="conflicting extents"):
         scale_atom(torch.randn(2, 3, 4), torch.randn(5))
@@ -958,7 +1037,7 @@ def test_formula_preflight_limits_aggregate_live_working_set() -> None:
 
 def test_formula_v2_rejects_dynamic_output_before_tensor_execution(monkeypatch) -> None:
     value_type = mechanisms.TensorType.axes(
-        ("B", "D"), sizes=(None, 2), dtype="float32"
+        ("B", "D"), sizes=("B", 2), dtype="float32"
     )
     bank_type = mechanisms.TensorType.axes(("R", "D"), sizes=(20, 2), dtype="float32")
     x = mechanisms.InputBinding("x", value_type)
@@ -1046,10 +1125,10 @@ def test_formula_v2_direct_constructors_reject_string_sequences() -> None:
 
 def test_contract_rejects_unequal_dynamic_reduction_extents() -> None:
     left = mechanisms.InputBinding(
-        "left", mechanisms.TensorType.axes(("B", "I"), sizes=(None, None))
+        "left", mechanisms.TensorType.axes(("B", "I"), sizes=("B", "I"))
     )
     right = mechanisms.InputBinding(
-        "right", mechanisms.TensorType.axes(("R", "J"), sizes=(None, None))
+        "right", mechanisms.TensorType.axes(("R", "J"), sizes=("R", "J"))
     )
     program = mechanisms.FormulaProgram.build(
         outputs=(

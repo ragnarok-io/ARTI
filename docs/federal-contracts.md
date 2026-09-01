@@ -84,7 +84,7 @@ implicit tensor adapter.
 dispatches each autonomous Bank independently, validates every explicit child
 tensor against the child input schema, keeps at most one global `K` paths, and
 selects one valid terminal record. Runtime paths are returned only through
-`FederalTrace@1`; they are not Bank state or persisted artifacts.
+`FederalTrace@2`; they are not Bank state or persisted artifacts.
 
 The first reference batches terminal fields only when their declared tensors
 can be explicitly concatenated on the batch axis. Ragged terminal ABIs require
@@ -97,8 +97,8 @@ are backend work after terminal parity, not part of the vFederal definition.
 
 ## Bank-owned Query assets
 
-`FederalRecall@2` is the first serial reference path for a Bank that owns its
-Query. A Query may be trained with its Bank, selected on validation data, then
+`FederalRecall@2` is the fixed-K reference path for a Bank that owns its Query.
+A Query may be trained with its Bank, selected on validation data, then
 sealed and saved as a Bank asset. Sealing fixes the registered implementation,
 configuration, parameter/buffer roles, tensor values, schemas, retrieval
 contract, normalization contract, and gradient contract. Query parameters no
@@ -164,28 +164,49 @@ class MyBank(mechanisms.BankOwnedQueryProgram):
 ```
 
 The Bank program and terminal adapter references must also be registered for a
-portable Federation artifact. `FederalRecall@2` currently enforces serial
-`K=1` execution. Every self-transition or child transition invokes the
-destination Bank's sealed Query on the latest value. The coordinator never
-applies a Federation-wide softmax. The declared normalization remains the
-responsibility of the Bank-local program; with `K=1`, no cross-Bank probability
-mass is introduced by the coordinator.
+portable Federation artifact. `FederalRecall@2` defaults to a configurable
+fixed width of `K=8`. Each retained candidate owns an independent Bank-local
+Refine trajectory: after a Formula changes its tensor, the next step re-runs
+that Bank's sealed Query on the candidate's latest tensor. Expansion is pruned
+back to at most `K` after every local and Federation step, so width remains `K`
+rather than growing as `K ** refine_steps`. `K=1` is the exact serial degenerate
+case.
 
-The v2 implementation is still an eager reference. It makes no batching,
-compiled-routing, mixed-precision, hot-mount, or throughput claim.
+The coordinator never averages candidate values and never applies a
+Federation-wide softmax. Bank-local normalization remains owned by each Bank;
+the terminal ABI supplies the final score and `hard_one_winner` selects exactly
+one result. Candidate-weighted merging is a separate, explicitly requested
+mode elsewhere in ARTI and is not the Federation default.
 
-## Acceptance experiment
+The v2 implementation remains an eager semantic reference. K candidates are
+logically independent paths; this contract does not claim fused batching,
+compiled routing, hot mounting, or a physical throughput improvement.
 
-The deterministic traversal benchmark creates eight autonomous Banks with
-different ranks, input dimensions, value dimensions, and local layouts. A
-correct terminal value may require 1, 2, 4, or 8 child transitions:
+## Shape-polymorphic Bank-local refine
+
+`FederalRecall@3` is an alpha extension in which a Bank admits a `TensorView`
+rather than one fixed-rank tensor schema. A view carries named logical axes,
+axis roles, and an optional explicit index map. Its Bank-owned Query observes
+the current view and may be pretrained with that Bank, then sealed for runtime
+use.
+
+Each Bank-local refine step follows the same order:
 
 ```text
-uv run --extra dev python benchmarks/federal_path_traversal.py
+query the current TensorView
+-> select one Formula action
+-> execute that action
+-> obtain a new TensorView
+-> query again
 ```
 
-It compares full fixed-K re-query with K=1, one-shot, frozen-query, shuffled
-child links, and a homogeneous-layout control. The benchmark also trains only
-the explicit terminal adapters and checks that fixed Query tensors receive no
-gradient. Results and runtime-only traces are written under
-`.artifacts/federal-path-traversal-v1/`.
+Formula actions are the only payload transformations. The coordinator does not
+insert an MLP, projection, padding, reshape, or terminal cleanup layer. Reshape,
+permutation, lookup, Fold/UnFold transport, and other changes must be explicit
+Formula programs. A Bank exits only when its current view satisfies the declared
+terminal ABI and its exit action is selected after the minimum local refine
+depth.
+
+`TensorViewPattern`, `TensorViewBankQuery`, `BankExecutionSignatureV3`, and
+`FederalRecallV3` currently report lifecycle `alpha`. Their contracts may evolve
+independently from the stable `FederalRecall@1` and `FederalRecall@2` components.

@@ -1,6 +1,8 @@
 # Stable Release Surface
 
-ARTI 3.0.11 makes the composable mechanism runtime the stable default.
+ARTI 3.0.12 keeps the composable mechanism runtime as the stable default and
+adds a wider Formula atom basis plus optional alpha program-search and
+shape-polymorphic Federal Bank components.
 
 ## Default Layer
 
@@ -48,6 +50,12 @@ Half, Fold, UnFold, Recall, Refine, Formula Fabric, adaptive observation,
 operable tensors, Federal Bank programs, Batched Refine, Target Bank updates,
 and their typed runtime contracts now report lifecycle `stable` in the
 component registry.
+
+The new Formula atoms for scalar maps, explicit broadcast, selection, lookup,
+slicing, concatenation, and masked softmax are stable typed primitives.
+`FormulaProgramQuery@1`, `FederalRecall@3`, and the TensorView query family are
+alpha components; inspect each component lifecycle instead of inferring it
+from the containing Python namespace.
 
 Stable means their versioned identity and declared contract are release APIs.
 It does not turn a benchmark result into a universal quality or performance

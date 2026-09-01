@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.11 is the stable public mechanism release. Stability covers documented
+ARTI 3.0.12 is the stable public mechanism release. Stability covers documented
 component identities, tensor contracts, artifact schemas, and composition
 semantics. It does not imply a production service SLA or universal model-quality
 and performance claims.
@@ -13,7 +13,7 @@ and performance claims.
   `Pulse`, `Recall`, and `RecallRefiner`.
 - `arti.mechanisms`: versioned Observation, topology, Formula Fabric,
   Batched Refine, Bank update, Federal Bank, runtime state, and tensor-operation
-  contracts promoted from the 3.0.7-3.0.11 development line.
+  contracts promoted from the 3.0.7-3.0.12 development line.
 - `ARTI.attach`, attachment configuration, incremental SafeTensors state,
   fresh reload, and reversible detach.
 - `arti.st` format version 1 and the documented Recall Bank artifact format.
@@ -36,6 +36,10 @@ but they do not receive new mechanism features.
 The Python-first browser exporter remains under `arti.experimental.web`, and
 the TypeScript runtime remains an alpha npm package. Web artifacts are
 deployment products, not portable training checkpoints.
+
+`FormulaProgramQuery@1`, `FederalRecall@3`, and the shape-polymorphic TensorView
+query contracts ship for composition experiments with lifecycle `alpha`.
+Their presence in the stable package does not freeze those component contracts.
 
 Experimental integrations may change without the stable mechanism deprecation
 window. A stable mechanism used by an experimental integration does not make

@@ -170,21 +170,10 @@ current_output = result.output
 next_backing = result.operation
 ```
 
-The repository includes a bounded synthetic probe that trains only the
-operation Bank and checks hard decoded edits against the deterministic Formula
-interpreter:
-
-```text
-python benchmarks/train_tensor_operation.py --device auto
-```
-
-The multi-step gate supplies only a final next-call task loss. Tensor
+Training should supply only a final next-call task loss. Tensor
 differences between internal steps are not treated as a stream or as labels;
-the gate does not provide action, route, or intermediate-state supervision:
-
-```text
-python benchmarks/train_tensor_operation_final_loss.py --device auto
-```
+the operation path does not require action, route, or intermediate-state
+supervision.
 
 An external backing can be selected at call boundaries:
 
@@ -225,13 +214,6 @@ different events, with committed checkpoints and matched `frozen`, `reset`,
 shuffled-state, and event-order controls. Reload and fork checks must begin
 from a committed root; an uncommitted proposal is not persistent state.
 
-The repository includes a no-training lifecycle harness that exercises 64
-calls, checkpoint/reload, fork isolation, reset, matched controls, and bounded
-state storage:
-
-```text
-python benchmarks/run_tensor_operation_lifecycle.py --device auto
-```
-
-This harness validates mechanism and lifecycle causality. It does not use a
-single generated image as evidence of downstream quality.
+Lifecycle checks should cover repeated calls, checkpoint/reload, fork isolation,
+reset, bounded state storage, and matched frozen-state controls. A single output
+does not establish the value of a long-lived tensor workspace.

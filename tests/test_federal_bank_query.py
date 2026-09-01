@@ -99,9 +99,9 @@ def bank_signature(
         terminal_adapter_ref="arti/test-terminal-adapter@1",
         terminal_abi_ref="arti/terminal-output-abi@1",
         terminal_abi_fingerprint=abi.fingerprint,
-        score_contract="one serial Bank-local path score",
+        score_contract="one score per retained Bank-local path",
         gradient_contract=mechanisms.GradientContract.autograd(),
-        execution_capabilities=("eager", "latest-state-requery", "serial-k1"),
+        execution_capabilities=("eager", "fixed-k-wide", "latest-state-requery"),
     )
 
 
@@ -213,6 +213,79 @@ class EmptyOwnedQueryBank(mechanisms.BankOwnedQueryProgram):
         raise AssertionError("invalid mounted assets must fail before execution")
 
 
+class WideRequeryBank(mechanisms.BankOwnedQueryProgram):
+    def __init__(
+        self,
+        abi: mechanisms.TerminalOutputABI,
+        *,
+        reverse_candidates: bool = False,
+    ) -> None:
+        query = make_query()
+        local_refine = mechanisms.BankLocalRefinePolicy(min_steps=3, max_steps=3)
+        super().__init__(
+            bank_id="memory",
+            query=query,
+            local_refine=local_refine,
+        )
+        self.reverse_candidates = reverse_candidates
+        self.observed_queries: list[float] = []
+        self.bind_signature(
+            bank_signature(
+                self,
+                query,
+                abi,
+                local_refine_ref=arti.component_ref(local_refine),
+            )
+        )
+
+    def execute(
+        self,
+        value: Tensor,
+        *,
+        query_result: mechanisms.BankQueryResult,
+        max_candidates: int,
+    ) -> mechanisms.FederalBankStep:
+        state = int(round(float(query_result.value.detach().reshape(()).cpu())))
+        self.observed_queries.append(float(state))
+        if state < 0:
+            candidates = [
+                mechanisms.FederalCandidate.local(
+                    "left",
+                    local_log_score=value.new_tensor(-0.1),
+                    next_value=torch.stack((value[:, 0].new_ones(1), value[:, 1]), dim=-1),
+                ),
+                mechanisms.FederalCandidate.local(
+                    "right",
+                    local_log_score=value.new_tensor(-0.2),
+                    next_value=torch.stack((value[:, 0].new_full((1,), 2.0), value[:, 1]), dim=-1),
+                ),
+            ]
+            if self.reverse_candidates:
+                candidates.reverse()
+            return mechanisms.FederalBankStep(tuple(candidates[:max_candidates]))
+        if state in {1, 2}:
+            candidate = mechanisms.FederalCandidate.local(
+                f"advance-{state}",
+                local_log_score=value.new_tensor(-0.1),
+                next_value=torch.stack(
+                    (value[:, 0].new_full((1,), state + 2.0), value[:, 1]),
+                    dim=-1,
+                ),
+            )
+            return mechanisms.FederalBankStep((candidate,))
+        outputs = terminal_outputs(value)
+        outputs["score"] = value.new_full((1,), float(state))
+        return mechanisms.FederalBankStep(
+            (
+                mechanisms.FederalCandidate.terminal(
+                    f"exit-{state}",
+                    local_log_score=value.new_zeros(()),
+                    outputs=outputs,
+                ),
+            )
+        )
+
+
 class TestTerminalAdapter:
     pass
 
@@ -248,6 +321,23 @@ arti.register_component(
     config_builder=lambda component: {
         "bank_id": component.bank_id,
         "behavior": "unreachable-test-bank",
+    },
+    dependency_builder=lambda _component: (
+        "arti/formula-fabric@2",
+        "arti/refine-policy@2",
+        "arti/sealed-bank-query@1",
+        "arti/test-terminal-adapter@1",
+    ),
+)
+arti.register_component(
+    "arti/test-wide-requery-bank@1",
+    component_type=WideRequeryBank,
+    lifecycle="alpha",
+    constructible=False,
+    config_builder=lambda component: {
+        "bank_id": component.bank_id,
+        "reverse_candidates": component.reverse_candidates,
+        "behavior": "bounded-wide-latest-state-requery",
     },
     dependency_builder=lambda _component: (
         "arti/formula-fabric@2",
@@ -492,7 +582,7 @@ def test_federal_v2_arti_st_round_trip_and_provenance(tmp_path) -> None:
     assert root["ref"] == "arti/federal-recall@2"
 
 
-def test_federal_v2_has_independent_identity_and_rejects_wide_k() -> None:
+def test_federal_v2_has_independent_identity_and_configurable_wide_k() -> None:
     federal = make_federal()
 
     assert arti.component_ref(federal) == "arti/federal-recall@2"
@@ -510,13 +600,99 @@ def test_federal_v2_has_independent_identity_and_rejects_wide_k() -> None:
         "arti/test-requery-bank@1",
         "arti/test-terminal-adapter@1",
     )
-    with pytest.raises(mechanisms.FederalRecallError, match="serial K=1"):
-        mechanisms.FederalRecallV2(
-            {"memory": RequeryBank(terminal_abi())},
-            terminal_abi=terminal_abi(),
-            root_bank_ids=("memory",),
-            max_k=2,
-        )
+    wide = mechanisms.FederalRecallV2(
+        {"memory": RequeryBank(terminal_abi())},
+        terminal_abi=terminal_abi(),
+        root_bank_ids=("memory",),
+        max_k=2,
+    )
+    default = mechanisms.FederalRecallV2(
+        {"memory": RequeryBank(terminal_abi())},
+        terminal_abi=terminal_abi(),
+        root_bank_ids=("memory",),
+    )
+    assert wide.max_k == 2
+    assert default.max_k == default.recommended_breadth == 8
+
+
+def test_wide_bank_local_refine_requeries_each_candidate_and_keeps_exact_k() -> None:
+    abi = terminal_abi()
+    bank = WideRequeryBank(abi)
+    runtime = mechanisms.FederalRecallV2(
+        {"memory": bank},
+        terminal_abi=abi,
+        root_bank_ids=("memory",),
+        max_levels=1,
+        max_k=2,
+    )
+
+    output, trace = runtime(torch.tensor([[-1.0, 0.5]]), return_trace=True)
+
+    torch.testing.assert_close(output["value"], torch.tensor([[4.0, 0.5]]))
+    assert bank.observed_queries == [-1.0, 1.0, 2.0, 3.0, 4.0]
+    local = trace.steps[0].local_refine
+    assert [item.local_step for item in local] == [1, 1, 2, 2, 3, 3]
+    assert [item.action for item in local] == [
+        "continue-local",
+        "continue-local",
+        "continue-local",
+        "continue-local",
+        "terminal",
+        "terminal",
+    ]
+    assert all(
+        sum(item.local_step == step for item in local) <= 2
+        for step in {1, 2, 3}
+    )
+    assert trace.maximum_kept_paths == 2
+
+
+def test_wide_bank_local_refine_is_candidate_permutation_invariant() -> None:
+    abi = terminal_abi()
+    source = mechanisms.FederalRecallV2(
+        {"memory": WideRequeryBank(abi)},
+        terminal_abi=abi,
+        root_bank_ids=("memory",),
+        max_levels=1,
+        max_k=2,
+    )
+    reordered = mechanisms.FederalRecallV2(
+        {"memory": WideRequeryBank(abi, reverse_candidates=True)},
+        terminal_abi=abi,
+        root_bank_ids=("memory",),
+        max_levels=1,
+        max_k=2,
+    )
+    value = torch.tensor([[-1.0, 0.5]])
+
+    expected, expected_trace = source(value, return_trace=True)
+    actual, actual_trace = reordered(value, return_trace=True)
+
+    torch.testing.assert_close(actual["value"], expected["value"])
+    assert actual_trace.winner_paths == expected_trace.winner_paths
+
+
+def test_wide_bank_local_refine_k1_is_the_serial_degenerate_case() -> None:
+    abi = terminal_abi()
+    bank = WideRequeryBank(abi)
+    runtime = mechanisms.FederalRecallV2(
+        {"memory": bank},
+        terminal_abi=abi,
+        root_bank_ids=("memory",),
+        max_levels=1,
+        max_k=2,
+    )
+
+    output, trace = runtime(
+        torch.tensor([[-1.0, 0.5]]),
+        max_k=1,
+        return_trace=True,
+    )
+
+    torch.testing.assert_close(output["value"], torch.tensor([[3.0, 0.5]]))
+    assert bank.observed_queries == [-1.0, 1.0, 3.0]
+    assert trace.max_k == 1
+    assert trace.maximum_kept_paths == 1
 
 
 def test_bank_rejects_a_query_asset_from_another_signature() -> None:

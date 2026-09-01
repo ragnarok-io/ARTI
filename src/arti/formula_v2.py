@@ -12,6 +12,12 @@ from typing import ClassVar, Literal, Mapping, NamedTuple, Sequence
 import torch
 from torch import Tensor, nn
 
+from .tensor_schema import (
+    ShapeDimension,
+    TensorSchemaError,
+    normalize_shape_dimensions,
+)
+
 
 FORMULA_PROGRAM_V2_SCHEMA_VERSION = 2
 FORMULA_TRACE_V1_SCHEMA_VERSION = 1
@@ -32,6 +38,7 @@ _DTYPES = frozenset(
     {"floating", "float16", "bfloat16", "float32", "float64", "int64", "boolean"}
 )
 _ACCUMULATION_DTYPES = frozenset({"activation", "float32"})
+_SCALAR_MAP_MODES = frozenset({"gelu", "relu", "rsqrt", "sigmoid", "silu", "tanh"})
 _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     "arti/formula-atom-contract@1": (
         2,
@@ -62,6 +69,27 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
         3,
         frozenset({"axis", "index_axis", "mode"}),
     ),
+    "arti/formula-atom-scalar-map@1": (1, frozenset({"mode"})),
+    "arti/formula-atom-broadcast@1": (
+        1,
+        frozenset({"output_axes", "output_sizes"}),
+    ),
+    "arti/formula-atom-select@1": (3, frozenset()),
+    "arti/formula-atom-lookup@1": (
+        2,
+        frozenset({"table_axis", "output_axes"}),
+    ),
+    "arti/formula-atom-slice@1": (
+        1,
+        frozenset({"axis", "start", "stop", "step"}),
+    ),
+    "arti/formula-atom-concat@1": (2, frozenset({"axis"})),
+    "arti/formula-atom-masked-softmax@1": (
+        2,
+        frozenset({"axis", "accumulation_dtype"}),
+    ),
+    # Parse-only compatibility for FormulaProgram@2 payloads emitted before
+    # index worksets stopped borrowing the canonical topology identities.
     "arti/fold@2": (
         2,
         frozenset({"axis", "index_axis", "record_schema_ref", "state_schema_ref"}),
@@ -178,10 +206,10 @@ DEFAULT_FORMULA_LIMITS = FormulaLimits()
 
 @dataclass(frozen=True)
 class TensorType:
-    """A named-axis tensor type with optional static extents."""
+    """A named-axis tensor type with concrete or symbolic extents."""
 
     axis_names: tuple[str, ...]
-    sizes: tuple[int | None, ...]
+    sizes: tuple[ShapeDimension, ...]
     dtype: str = "floating"
     domain: str = "anonymous"
 
@@ -193,7 +221,14 @@ class TensorType:
                 path="$.type",
             )
         axes = tuple(self.axis_names)
-        sizes = tuple(self.sizes)
+        try:
+            sizes = normalize_shape_dimensions(self.sizes, allow_zero=False)
+        except TensorSchemaError as exc:
+            raise FormulaSchemaError(
+                "FF2_INVALID_EXTENT",
+                "TensorType sizes must be positive integers or valid symbols",
+                path="$.type.sizes",
+            ) from exc
         object.__setattr__(self, "axis_names", axes)
         object.__setattr__(self, "sizes", sizes)
         if len(axes) != len(sizes):
@@ -210,16 +245,6 @@ class TensorType:
             raise FormulaSchemaError(
                 "FF2_INVALID_AXIS", "TensorType axes must be valid identifiers", path="$.type.axes"
             )
-        if any(
-            size is not None
-            and (isinstance(size, bool) or not isinstance(size, int) or size <= 0)
-            for size in sizes
-        ):
-            raise FormulaSchemaError(
-                "FF2_INVALID_EXTENT",
-                "TensorType sizes must be positive integers or None",
-                path="$.type.sizes",
-            )
         if self.dtype not in _DTYPES:
             raise FormulaSchemaError(
                 "FF2_INVALID_DTYPE", f"unsupported dtype contract {self.dtype!r}", path="$.type.dtype"
@@ -234,14 +259,14 @@ class TensorType:
         cls,
         names: Sequence[str],
         *,
-        sizes: Sequence[int | None] | None = None,
+        sizes: Sequence[ShapeDimension] | None = None,
         dtype: str = "floating",
         domain: str = "anonymous",
     ) -> TensorType:
         names_tuple = tuple(names)
         return cls(
             names_tuple,
-            (None,) * len(names_tuple) if sizes is None else tuple(sizes),
+            names_tuple if sizes is None else tuple(sizes),
             dtype=dtype,
             domain=domain,
         )
@@ -252,7 +277,7 @@ class TensorType:
     ) -> TensorType:
         return cls((), (), dtype=dtype, domain=domain)
 
-    def size_for(self, axis: str) -> int | None:
+    def size_for(self, axis: str) -> ShapeDimension:
         try:
             return self.sizes[self.axis_names.index(axis)]
         except ValueError as exc:
@@ -365,7 +390,7 @@ class BankBinding:
             expected_members = (
                 self.value_type.size_for("K") if "K" in self.value_type.axis_names else 1
             )
-            if expected_members is not None and len(self.member_ids) != expected_members:
+            if isinstance(expected_members, int) and len(self.member_ids) != expected_members:
                 raise FormulaSchemaError(
                     "FF2_INVALID_BANK_BUNDLE",
                     "Bank bundle member_ids must match the declared member axis",
@@ -495,26 +520,14 @@ FormulaOperand = _FormulaExpr | FormulaBinding
 
 
 @dataclass(frozen=True)
-class FabricFoldState:
-    """Explicit tensor-only Fold@2 state carried through a Formula program."""
+class FabricIndexFoldState:
+    """A gather workset plus the tensors required to scatter it back."""
 
     base: FormulaOperand
     indices: FormulaOperand
     active: _FormulaExpr
     axis: str
     index_axis: str
-    record_schema_ref: str = "arti/fold-record@1"
-    state_schema_ref: str = "arti/fold-state@1"
-
-    def __post_init__(self) -> None:
-        if self.record_schema_ref != "arti/fold-record@1":
-            raise FormulaSchemaError(
-                "FF2_FOLD_RECORD_SCHEMA", "Fabric Fold requires arti/fold-record@1"
-            )
-        if self.state_schema_ref != "arti/fold-state@1":
-            raise FormulaSchemaError(
-                "FF2_FOLD_STATE_SCHEMA", "Fabric Fold requires arti/fold-state@1"
-            )
 
 
 @dataclass(frozen=True)
@@ -687,12 +700,12 @@ class FormulaProgram:
             if len(slot.value_type.axis_names) > self.limits.max_axes:
                 raise FormulaProgramError("FF2_LIMIT_EXCEEDED", "axis count exceeds Formula limits")
             if any(
-                size is not None and size > self.limits.max_axis_extent
+                isinstance(size, int) and size > self.limits.max_axis_extent
                 for size in slot.value_type.sizes
             ):
                 raise FormulaProgramError("FF2_LIMIT_EXCEEDED", "axis extent exceeds Formula limits")
-            if all(size is not None for size in slot.value_type.sizes) and math.prod(
-                size for size in slot.value_type.sizes if size is not None
+            if all(isinstance(size, int) for size in slot.value_type.sizes) and math.prod(
+                size for size in slot.value_type.sizes if isinstance(size, int)
             ) > self.limits.max_tensor_elements:
                 raise FormulaProgramError(
                     "FF2_LIMIT_EXCEEDED", "static tensor size exceeds Formula limits"
@@ -1024,6 +1037,32 @@ class FormulaProgram:
         return hashlib.sha256(payload).hexdigest()
 
 
+_LEGACY_INDEX_ATOM_DEPENDENCIES = {
+    "arti/fold@2": "arti/formula-atom-gather@1",
+    "arti/unfold@2": "arti/formula-atom-scatter@1",
+}
+
+
+def formula_program_dependency_refs(program: FormulaProgram) -> tuple[str, ...]:
+    """Return the atom references that a Formula program actually executes.
+
+    Early FormulaProgram@2 payloads used the reversible-topology references for
+    index gather/scatter operations. They remain readable, but their component
+    graph reports the operations that execute them.
+    """
+
+    if not isinstance(program, FormulaProgram):
+        raise TypeError("program must be FormulaProgram")
+    return tuple(
+        sorted(
+            {
+                _LEGACY_INDEX_ATOM_DEPENDENCIES.get(item.atom_ref, item.atom_ref)
+                for item in program.instructions
+            }
+        )
+    )
+
+
 def contract(
     left: FormulaOperand,
     right: FormulaOperand,
@@ -1183,7 +1222,7 @@ def reshape(
     value: FormulaOperand,
     *,
     output_axes: Sequence[str],
-    output_sizes: Sequence[int | None],
+    output_sizes: Sequence[ShapeDimension],
 ) -> _FormulaExpr:
     """Repartition elements without adding learned values or reducing information."""
 
@@ -1196,8 +1235,8 @@ def reshape(
         dtype=value_expr.value_type.dtype,
         domain=value_expr.value_type.domain,
     )
-    source_static = all(size is not None for size in value_expr.value_type.sizes)
-    output_static = all(size is not None for size in sizes)
+    source_static = all(isinstance(size, int) for size in value_expr.value_type.sizes)
+    output_static = all(isinstance(size, int) for size in sizes)
     if source_static and output_static and math.prod(value_expr.value_type.sizes) != math.prod(sizes):
         raise FormulaTypeError(
             "FF2_RESHAPE_SIZE",
@@ -1261,14 +1300,14 @@ def gather(
     )
 
 
-def fold(
+def index_fold(
     value: FormulaOperand,
     indices: FormulaOperand,
     *,
     axis: str,
     index_axis: str,
-) -> FabricFoldState:
-    """Create a smaller Fold@2 workset while retaining an explicit inverse record."""
+) -> FabricIndexFoldState:
+    """Gather a smaller workset while retaining its explicit scatter operands."""
 
     value_expr = _as_expr(value)
     index_expr = _as_expr(indices)
@@ -1279,37 +1318,28 @@ def fold(
         index_type,
         axis=axis,
         index_axis=index_axis,
-        allow_boolean=True,
     )
     output_axes = tuple(index_axis if item == axis else item for item in value_type.axis_names)
     output_sizes = tuple(
         index_type.size_for(index_axis) if item == axis else value_type.size_for(item)
         for item in value_type.axis_names
     )
-    active = _FormulaExpr(
-        TensorType(
-            output_axes,
-            output_sizes,
-            dtype=value_type.dtype,
-            domain=value_type.domain,
-        ),
-        "arti/fold@2",
-        (value_expr, index_expr),
-        (
-            ("axis", axis),
-            ("index_axis", index_axis),
-            ("record_schema_ref", "arti/fold-record@1"),
-            ("state_schema_ref", "arti/fold-state@1"),
-        ),
+    active = gather(
+        value_expr,
+        index_expr,
+        axis=axis,
+        index_axis=index_axis,
     )
-    return FabricFoldState(value_expr, index_expr, active, axis, index_axis)
+    if active.value_type.axis_names != output_axes or active.value_type.sizes != output_sizes:
+        raise AssertionError("index_fold gather inference is inconsistent")
+    return FabricIndexFoldState(value_expr, index_expr, active, axis, index_axis)
 
 
-def unfold(state: FabricFoldState, active: FormulaOperand) -> _FormulaExpr:
-    """Apply UnFold@2 using the exact base and topology record from ``fold``."""
+def index_unfold(state: FabricIndexFoldState, active: FormulaOperand) -> _FormulaExpr:
+    """Scatter a workset back into the base retained by :func:`index_fold`."""
 
-    if not isinstance(state, FabricFoldState):
-        raise TypeError("unfold state must be FabricFoldState")
+    if not isinstance(state, FabricIndexFoldState):
+        raise TypeError("index_unfold state must be FabricIndexFoldState")
     base_expr = _as_expr(state.base)
     index_expr = _as_expr(state.indices)
     active_expr = _as_expr(active)
@@ -1318,25 +1348,20 @@ def unfold(state: FabricFoldState, active: FormulaOperand) -> _FormulaExpr:
         index_expr.value_type,
         axis=state.axis,
         index_axis=state.index_axis,
-        allow_boolean=True,
     )
-    expected_active = fold(
+    expected_active = index_fold(
         InputBinding("base", base_expr.value_type),
         InputBinding("indices", index_expr.value_type),
         axis=state.axis,
         index_axis=state.index_axis,
     ).active.value_type
     _require_exact_type(expected_active, active_expr.value_type)
-    return _FormulaExpr(
-        base_expr.value_type,
-        "arti/unfold@2",
-        (base_expr, index_expr, active_expr),
-        (
-            ("axis", state.axis),
-            ("index_axis", state.index_axis),
-            ("mode", "replace"),
-            ("record_schema_ref", state.record_schema_ref),
-        ),
+    return scatter(
+        base_expr,
+        index_expr,
+        active_expr,
+        axis=state.axis,
+        index_axis=state.index_axis,
     )
 
 
@@ -1365,6 +1390,233 @@ def scatter(
         "arti/formula-atom-scatter@1",
         (base_expr, index_expr, update_expr),
         (("axis", axis), ("index_axis", index_axis), ("mode", "replace")),
+    )
+
+
+def scalar_map(value: FormulaOperand, *, mode: str) -> _FormulaExpr:
+    """Apply one declared scalar function independently to every element."""
+
+    value_expr = _as_expr(value)
+    if value_expr.value_type.dtype in {"int64", "boolean"}:
+        raise FormulaTypeError("FF2_VALUE_DTYPE", "ScalarMap requires floating values")
+    if mode not in _SCALAR_MAP_MODES:
+        raise FormulaTypeError("FF2_SCALAR_MAP_MODE", f"unsupported ScalarMap mode {mode!r}")
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-scalar-map@1",
+        (value_expr,),
+        (("mode", mode),),
+    )
+
+
+def broadcast(
+    value: FormulaOperand,
+    *,
+    output_axes: Sequence[str],
+    output_sizes: Sequence[ShapeDimension],
+) -> _FormulaExpr:
+    """Explicitly broadcast a tensor into a declared named-axis shape."""
+
+    value_expr = _as_expr(value)
+    output_type = TensorType(
+        tuple(output_axes),
+        tuple(output_sizes),
+        dtype=value_expr.value_type.dtype,
+        domain=value_expr.value_type.domain,
+    )
+    _validate_broadcast_contract(value_expr.value_type, output_type)
+    return _FormulaExpr(
+        output_type,
+        "arti/formula-atom-broadcast@1",
+        (value_expr,),
+        (("output_axes", output_type.axis_names), ("output_sizes", output_type.sizes)),
+    )
+
+
+def select(mask: FormulaOperand, when_true: FormulaOperand, when_false: FormulaOperand) -> _FormulaExpr:
+    """Choose values with an explicit broadcastable boolean mask."""
+
+    mask_expr = _as_expr(mask)
+    true_expr = _as_expr(when_true)
+    false_expr = _as_expr(when_false)
+    _require_exact_type(true_expr.value_type, false_expr.value_type)
+    _validate_mask_contract(mask_expr.value_type, true_expr.value_type)
+    return _FormulaExpr(
+        true_expr.value_type,
+        "arti/formula-atom-select@1",
+        (mask_expr, true_expr, false_expr),
+    )
+
+
+def lookup(
+    table: FormulaOperand,
+    indices: FormulaOperand,
+    *,
+    table_axis: str,
+    output_axes: Sequence[str] | None = None,
+) -> _FormulaExpr:
+    """Look up rows from a typed table with arbitrary-rank integer indices."""
+
+    table_expr = _as_expr(table)
+    index_expr = _as_expr(indices)
+    table_type = table_expr.value_type
+    index_type = index_expr.value_type
+    if table_type.dtype in {"int64", "boolean"}:
+        raise FormulaTypeError("FF2_VALUE_DTYPE", "Lookup table values must be floating")
+    if index_type.dtype != "int64":
+        raise FormulaTypeError("FF2_INDEX_DTYPE", "Lookup indices must use dtype='int64'")
+    if table_axis not in table_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"table axis {table_axis!r} is absent")
+    value_axes = tuple(axis for axis in table_type.axis_names if axis != table_axis)
+    if set(index_type.axis_names) & set(value_axes):
+        raise FormulaTypeError(
+            "FF2_LOOKUP_AXIS",
+            "Lookup index axes and table value axes must be distinct",
+        )
+    inferred_axes = (*index_type.axis_names, *value_axes)
+    axes = inferred_axes if output_axes is None else tuple(output_axes)
+    if len(axes) != len(set(axes)) or set(axes) != set(inferred_axes):
+        raise FormulaTypeError(
+            "FF2_OUTPUT_AXES", f"output_axes must be a permutation of {inferred_axes}"
+        )
+    size_by_axis = {
+        **dict(zip(index_type.axis_names, index_type.sizes, strict=True)),
+        **{
+            axis: table_type.size_for(axis)
+            for axis in value_axes
+        },
+    }
+    output_type = TensorType(
+        tuple(axes),
+        tuple(size_by_axis[axis] for axis in axes),
+        dtype=table_type.dtype,
+        domain=table_type.domain,
+    )
+    return _FormulaExpr(
+        output_type,
+        "arti/formula-atom-lookup@1",
+        (table_expr, index_expr),
+        (("table_axis", table_axis), ("output_axes", output_type.axis_names)),
+    )
+
+
+def slice_tensor(
+    value: FormulaOperand,
+    *,
+    axis: str,
+    start: int = 0,
+    stop: int | None = None,
+    step: int = 1,
+) -> _FormulaExpr:
+    """Take a bounded positive-step slice from one named axis."""
+
+    value_expr = _as_expr(value)
+    if axis not in value_expr.value_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"slice axis {axis!r} is absent")
+    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+        raise FormulaTypeError("FF2_SLICE_RANGE", "Slice start must be a non-negative integer")
+    if stop is not None and (isinstance(stop, bool) or not isinstance(stop, int) or stop < 0):
+        raise FormulaTypeError("FF2_SLICE_RANGE", "Slice stop must be None or non-negative")
+    if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
+        raise FormulaTypeError("FF2_SLICE_RANGE", "Slice step must be a positive integer")
+    source_size = value_expr.value_type.size_for(axis)
+    if isinstance(source_size, int):
+        start_value, stop_value, step_value = slice(start, stop, step).indices(source_size)
+        output_size: ShapeDimension = len(range(start_value, stop_value, step_value))
+        if output_size <= 0:
+            raise FormulaTypeError("FF2_SLICE_RANGE", "Slice output must be non-empty")
+    elif start == 0 and stop is None and step == 1:
+        output_size = source_size
+    else:
+        raise FormulaTypeError(
+            "FF2_SLICE_DYNAMIC",
+            "a symbolic axis only supports the full [0:None:1] slice",
+        )
+    sizes = tuple(
+        output_size if item == axis else size
+        for item, size in zip(
+            value_expr.value_type.axis_names,
+            value_expr.value_type.sizes,
+            strict=True,
+        )
+    )
+    output_type = TensorType(
+        value_expr.value_type.axis_names,
+        sizes,
+        dtype=value_expr.value_type.dtype,
+        domain=value_expr.value_type.domain,
+    )
+    return _FormulaExpr(
+        output_type,
+        "arti/formula-atom-slice@1",
+        (value_expr,),
+        (("axis", axis), ("start", start), ("stop", stop), ("step", step)),
+    )
+
+
+def concat(left: FormulaOperand, right: FormulaOperand, *, axis: str) -> _FormulaExpr:
+    """Concatenate two typed tensors along one statically sized named axis."""
+
+    left_expr = _as_expr(left)
+    right_expr = _as_expr(right)
+    _require_compatible_domains(left_expr.value_type, right_expr.value_type)
+    _require_compatible_dtypes(left_expr.value_type, right_expr.value_type)
+    if left_expr.value_type.axis_names != right_expr.value_type.axis_names:
+        raise FormulaTypeError("FF2_CONCAT_TYPE", "Concat operands must use identical axes")
+    if axis not in left_expr.value_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"concat axis {axis!r} is absent")
+    sizes: list[ShapeDimension] = []
+    for item in left_expr.value_type.axis_names:
+        left_size = left_expr.value_type.size_for(item)
+        right_size = right_expr.value_type.size_for(item)
+        if item == axis:
+            if not isinstance(left_size, int) or not isinstance(right_size, int):
+                raise FormulaTypeError(
+                    "FF2_CONCAT_DYNAMIC", "Concat axis extents must be static"
+                )
+            sizes.append(left_size + right_size)
+        else:
+            _require_axis_extent_equal(left_expr.value_type, item, right_expr.value_type, item)
+            if left_size != right_size:
+                raise FormulaTypeError("FF2_CONCAT_TYPE", "Concat non-axis extents must match")
+            sizes.append(left_size)
+    output_type = TensorType(
+        left_expr.value_type.axis_names,
+        tuple(sizes),
+        dtype=left_expr.value_type.dtype,
+        domain=left_expr.value_type.domain,
+    )
+    return _FormulaExpr(
+        output_type,
+        "arti/formula-atom-concat@1",
+        (left_expr, right_expr),
+        (("axis", axis),),
+    )
+
+
+def masked_softmax(
+    logits: FormulaOperand,
+    mask: FormulaOperand,
+    *,
+    axis: str,
+    accumulation_dtype: str = "float32",
+) -> _FormulaExpr:
+    """Normalize visible logits and return zero for fully masked rows."""
+
+    logits_expr = _as_expr(logits)
+    mask_expr = _as_expr(mask)
+    if logits_expr.value_type.dtype in {"int64", "boolean"}:
+        raise FormulaTypeError("FF2_VALUE_DTYPE", "MaskedSoftmax logits must be floating")
+    if accumulation_dtype not in _ACCUMULATION_DTYPES:
+        raise FormulaTypeError("FF2_INVALID_ACCUMULATION", "unsupported accumulation dtype")
+    if axis not in logits_expr.value_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"softmax axis {axis!r} is absent")
+    _validate_mask_contract(mask_expr.value_type, logits_expr.value_type)
+    return _FormulaExpr(
+        logits_expr.value_type,
+        "arti/formula-atom-masked-softmax@1",
+        (logits_expr, mask_expr),
+        (("axis", axis), ("accumulation_dtype", accumulation_dtype)),
     )
 
 
@@ -1625,7 +1877,7 @@ class ReshapeAtom(nn.Module):
         value_type: TensorType,
         *,
         output_axes: Sequence[str],
-        output_sizes: Sequence[int | None],
+        output_sizes: Sequence[ShapeDimension],
     ) -> None:
         super().__init__()
         expression = reshape(
@@ -1640,7 +1892,14 @@ class ReshapeAtom(nn.Module):
 
     def forward(self, value: Tensor) -> Tensor:
         _validate_atom_operands((value,), (self.value_type,))
-        result = _typed_reshape(value, self.output_type)
+        dimension_extents: dict[str, int] = {}
+        _bind_axis_extents(
+            dimension_extents,
+            value,
+            self.value_type,
+            name="value",
+        )
+        result = _typed_reshape(value, self.output_type, dimension_extents)
         _validate_tensor_against_type(result, self.output_type, name="output")
         return result
 
@@ -1760,6 +2019,239 @@ class ScatterAtom(nn.Module):
         return result
 
 
+class ScalarMapAtom(nn.Module):
+    """Apply one declared scalar function elementwise."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-scalar-map@1"
+
+    def __init__(self, value_type: TensorType, *, mode: str) -> None:
+        super().__init__()
+        expression = scalar_map(InputBinding("value", value_type), mode=mode)
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.mode = mode
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _execute_scalar_map(value, self.mode)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class BroadcastAtom(nn.Module):
+    """Expand a tensor into one explicit named-axis shape."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-broadcast@1"
+
+    def __init__(
+        self,
+        value_type: TensorType,
+        *,
+        output_axes: Sequence[str],
+        output_sizes: Sequence[ShapeDimension],
+    ) -> None:
+        super().__init__()
+        expression = broadcast(
+            InputBinding("value", value_type),
+            output_axes=output_axes,
+            output_sizes=output_sizes,
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.output_axes = tuple(output_axes)
+        self.output_sizes = tuple(output_sizes)
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        extents: dict[str, int] = {}
+        _bind_axis_extents(extents, value, self.value_type, name="value")
+        result = _named_broadcast(value, self.value_type, self.output_type, extents)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class SelectAtom(nn.Module):
+    """Choose between two tensors with a broadcastable boolean mask."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-select@1"
+
+    def __init__(self, mask_type: TensorType, value_type: TensorType) -> None:
+        super().__init__()
+        expression = select(
+            InputBinding("mask", mask_type),
+            InputBinding("when_true", value_type),
+            InputBinding("when_false", value_type),
+        )
+        self.mask_type = mask_type
+        self.value_type = value_type
+        self.output_type = expression.value_type
+
+    def forward(self, mask: Tensor, when_true: Tensor, when_false: Tensor) -> Tensor:
+        _validate_atom_operands(
+            (mask, when_true, when_false),
+            (self.mask_type, self.value_type, self.value_type),
+            require_same_dtype=False,
+        )
+        result = _named_select(mask, when_true, when_false, self.mask_type, self.value_type)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class LookupAtom(nn.Module):
+    """Look up typed rows with arbitrary-rank integer indices."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-lookup@1"
+
+    def __init__(
+        self,
+        table_type: TensorType,
+        index_type: TensorType,
+        *,
+        table_axis: str,
+        output_axes: Sequence[str] | None = None,
+    ) -> None:
+        super().__init__()
+        expression = lookup(
+            InputBinding("table", table_type),
+            InputBinding("indices", index_type),
+            table_axis=table_axis,
+            output_axes=output_axes,
+        )
+        self.table_type = table_type
+        self.index_type = index_type
+        self.output_type = expression.value_type
+        self.table_axis = table_axis
+        self.output_axes = expression.value_type.axis_names
+
+    def forward(self, table: Tensor, indices: Tensor) -> Tensor:
+        _validate_atom_operands(
+            (table, indices),
+            (self.table_type, self.index_type),
+            require_same_dtype=False,
+        )
+        result = _named_lookup(
+            table,
+            indices,
+            self.table_type,
+            self.index_type,
+            table_axis=self.table_axis,
+            output_axes=self.output_axes,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class SliceAtom(nn.Module):
+    """Take a bounded positive-step slice from one named axis."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-slice@1"
+
+    def __init__(
+        self,
+        value_type: TensorType,
+        *,
+        axis: str,
+        start: int = 0,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> None:
+        super().__init__()
+        expression = slice_tensor(
+            InputBinding("value", value_type),
+            axis=axis,
+            start=start,
+            stop=stop,
+            step=step,
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.axis = axis
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _named_slice(
+            value,
+            self.value_type,
+            axis=self.axis,
+            start=self.start,
+            stop=self.stop,
+            step=self.step,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class ConcatAtom(nn.Module):
+    """Concatenate two tensors along one statically sized named axis."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-concat@1"
+
+    def __init__(self, left_type: TensorType, right_type: TensorType, *, axis: str) -> None:
+        super().__init__()
+        expression = concat(
+            InputBinding("left", left_type),
+            InputBinding("right", right_type),
+            axis=axis,
+        )
+        self.left_type = left_type
+        self.right_type = right_type
+        self.output_type = expression.value_type
+        self.axis = axis
+
+    def forward(self, left: Tensor, right: Tensor) -> Tensor:
+        _validate_atom_operands((left, right), (self.left_type, self.right_type))
+        result = _named_concat(left, right, self.left_type, axis=self.axis)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class MaskedSoftmaxAtom(nn.Module):
+    """Stable softmax over visible entries of one named axis."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-masked-softmax@1"
+
+    def __init__(
+        self,
+        logits_type: TensorType,
+        mask_type: TensorType,
+        *,
+        axis: str,
+        accumulation_dtype: str = "float32",
+    ) -> None:
+        super().__init__()
+        expression = masked_softmax(
+            InputBinding("logits", logits_type),
+            InputBinding("mask", mask_type),
+            axis=axis,
+            accumulation_dtype=accumulation_dtype,
+        )
+        self.logits_type = logits_type
+        self.mask_type = mask_type
+        self.output_type = expression.value_type
+        self.axis = axis
+        self.accumulation_dtype = accumulation_dtype
+
+    def forward(self, logits: Tensor, mask: Tensor) -> Tensor:
+        _validate_atom_operands(
+            (logits, mask),
+            (self.logits_type, self.mask_type),
+            require_same_dtype=False,
+        )
+        result = _named_masked_softmax(
+            logits,
+            mask,
+            self.logits_type,
+            self.mask_type,
+            axis=self.axis,
+            accumulation_dtype=self.accumulation_dtype,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
 class PreparedFormulaBindings(NamedTuple):
     """Host-admitted positional bindings for one exact Formula program."""
 
@@ -1811,6 +2303,7 @@ class FormulaExecutionPlanV2(nn.Module):
                 )
             )
         self.binding_names = tuple(binding.name for binding in program.bindings)
+        self._binding_types = tuple(binding.value_type for binding in program.bindings)
         self._operations = tuple(operations)
         self._output_indices = tuple(slot_indices[name] for name in program.outputs)
 
@@ -1820,9 +2313,34 @@ class FormulaExecutionPlanV2(nn.Module):
         prepared.verify(self.program_fingerprint, self.binding_names)
         bindings = prepared.values
         slots = list(bindings)
+        dimension_extents: dict[str, int] = {}
+        for name, value, value_type in zip(
+            self.binding_names,
+            bindings,
+            self._binding_types,
+            strict=True,
+        ):
+            _bind_axis_extents(
+                dimension_extents,
+                value,
+                value_type,
+                name=name,
+            )
         for instruction, input_indices, input_types in self._operations:
             operands = tuple(slots[index] for index in input_indices)
-            slots.append(_execute_instruction(instruction, operands, input_types))
+            candidate = _execute_instruction(
+                instruction,
+                operands,
+                input_types,
+                dimension_extents,
+            )
+            _bind_axis_extents(
+                dimension_extents,
+                candidate,
+                self.program.slot_types[instruction.output_slot],
+                name=instruction.output_slot,
+            )
+            slots.append(candidate)
         return tuple(slots[index] for index in self._output_indices)
 
 
@@ -1884,7 +2402,12 @@ class FormulaFabricV2(nn.Module):
                     self.program.limits,
                     name=instruction.output_slot,
                 )
-                candidate = _execute_instruction(instruction, operands, input_types)
+                candidate = _execute_instruction(
+                    instruction,
+                    operands,
+                    input_types,
+                    axis_extents,
+                )
                 _validate_tensor_against_type(
                     candidate,
                     output_type,
@@ -1956,11 +2479,11 @@ def build_lora_program(
 
     x = InputBinding(
         "x",
-        TensorType.axes(("B", "S", "Din"), sizes=(None, None, input_dim), dtype=dtype, domain=domain),
+        TensorType.axes(("B", "S", "Din"), sizes=("B", "S", input_dim), dtype=dtype, domain=domain),
     )
     base = InputBinding(
         "base",
-        TensorType.axes(("B", "S", "Dout"), sizes=(None, None, output_dim), dtype=dtype, domain=domain),
+        TensorType.axes(("B", "S", "Dout"), sizes=("B", "S", output_dim), dtype=dtype, domain=domain),
     )
     if member_count is None:
         a_type = TensorType.axes(("R", "Din"), sizes=(rank, input_dim), dtype=dtype, domain=domain)
@@ -2107,6 +2630,50 @@ def _infer_instruction_output_type(
             axis=attributes["axis"],
             index_axis=attributes["index_axis"],
         ).value_type
+    if instruction.atom_ref == "arti/formula-atom-scalar-map@1" and len(operand_types) == 1:
+        return scalar_map(
+            InputBinding("value", operand_types[0]), mode=attributes["mode"]
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-broadcast@1" and len(operand_types) == 1:
+        return broadcast(
+            InputBinding("value", operand_types[0]),
+            output_axes=tuple(attributes["output_axes"]),
+            output_sizes=tuple(attributes["output_sizes"]),
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-select@1" and len(operand_types) == 3:
+        return select(
+            InputBinding("mask", operand_types[0]),
+            InputBinding("when_true", operand_types[1]),
+            InputBinding("when_false", operand_types[2]),
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-lookup@1" and len(operand_types) == 2:
+        return lookup(
+            InputBinding("table", operand_types[0]),
+            InputBinding("indices", operand_types[1]),
+            table_axis=attributes["table_axis"],
+            output_axes=tuple(attributes["output_axes"]),
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-slice@1" and len(operand_types) == 1:
+        return slice_tensor(
+            InputBinding("value", operand_types[0]),
+            axis=attributes["axis"],
+            start=attributes["start"],
+            stop=attributes["stop"],
+            step=attributes["step"],
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-concat@1" and len(operand_types) == 2:
+        return concat(
+            InputBinding("left", operand_types[0]),
+            InputBinding("right", operand_types[1]),
+            axis=attributes["axis"],
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-masked-softmax@1" and len(operand_types) == 2:
+        return masked_softmax(
+            InputBinding("logits", operand_types[0]),
+            InputBinding("mask", operand_types[1]),
+            axis=attributes["axis"],
+            accumulation_dtype=attributes["accumulation_dtype"],
+        ).value_type
     if instruction.atom_ref == "arti/fold@2" and len(operand_types) == 2:
         if (
             attributes["record_schema_ref"] != "arti/fold-record@1"
@@ -2115,7 +2682,7 @@ def _infer_instruction_output_type(
             raise FormulaProgramError(
                 "FF2_ATOM_ATTRIBUTES", "Fold@2 runtime state schema is invalid"
             )
-        return fold(
+        return index_fold(
             InputBinding("value", operand_types[0]),
             InputBinding("indices", operand_types[1]),
             axis=attributes["axis"],
@@ -2129,13 +2696,13 @@ def _infer_instruction_output_type(
             raise FormulaProgramError(
                 "FF2_ATOM_ATTRIBUTES", "UnFold@2 runtime record attributes are invalid"
             )
-        state = fold(
+        state = index_fold(
             InputBinding("base", operand_types[0]),
             InputBinding("indices", operand_types[1]),
             axis=attributes["axis"],
             index_axis=attributes["index_axis"],
         )
-        return unfold(state, InputBinding("active", operand_types[2])).value_type
+        return index_unfold(state, InputBinding("active", operand_types[2])).value_type
     raise FormulaProgramError(
         "FF2_UNKNOWN_ATOM",
         f"atom {instruction.atom_ref!r} has an unknown signature or invalid arity",
@@ -2146,6 +2713,7 @@ def _execute_instruction(
     instruction: FormulaInstructionV2,
     operands: tuple[Tensor, ...],
     operand_types: tuple[TensorType, ...],
+    dimension_extents: Mapping[str, int],
 ) -> Tensor:
     attributes = dict(instruction.attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1":
@@ -2184,7 +2752,7 @@ def _execute_instruction(
             dtype=operand_types[0].dtype,
             domain=operand_types[0].domain,
         )
-        return _typed_reshape(operands[0], output_type)
+        return _typed_reshape(operands[0], output_type, dimension_extents)
     if instruction.atom_ref == "arti/formula-atom-permute@1":
         return _named_permute(
             operands[0], operand_types[0], tuple(attributes["output_axes"])
@@ -2211,6 +2779,60 @@ def _execute_instruction(
             operand_types[1],
             axis=attributes["axis"],
             index_axis=attributes["index_axis"],
+        )
+    if instruction.atom_ref == "arti/formula-atom-scalar-map@1":
+        return _execute_scalar_map(operands[0], attributes["mode"])
+    if instruction.atom_ref == "arti/formula-atom-broadcast@1":
+        output_type = TensorType(
+            tuple(attributes["output_axes"]),
+            tuple(attributes["output_sizes"]),
+            dtype=operand_types[0].dtype,
+            domain=operand_types[0].domain,
+        )
+        return _named_broadcast(
+            operands[0], operand_types[0], output_type, dimension_extents
+        )
+    if instruction.atom_ref == "arti/formula-atom-select@1":
+        return _named_select(
+            operands[0],
+            operands[1],
+            operands[2],
+            operand_types[0],
+            operand_types[1],
+        )
+    if instruction.atom_ref == "arti/formula-atom-lookup@1":
+        return _named_lookup(
+            operands[0],
+            operands[1],
+            operand_types[0],
+            operand_types[1],
+            table_axis=attributes["table_axis"],
+            output_axes=tuple(attributes["output_axes"]),
+        )
+    if instruction.atom_ref == "arti/formula-atom-slice@1":
+        return _named_slice(
+            operands[0],
+            operand_types[0],
+            axis=attributes["axis"],
+            start=attributes["start"],
+            stop=attributes["stop"],
+            step=attributes["step"],
+        )
+    if instruction.atom_ref == "arti/formula-atom-concat@1":
+        return _named_concat(
+            operands[0],
+            operands[1],
+            operand_types[0],
+            axis=attributes["axis"],
+        )
+    if instruction.atom_ref == "arti/formula-atom-masked-softmax@1":
+        return _named_masked_softmax(
+            operands[0],
+            operands[1],
+            operand_types[0],
+            operand_types[1],
+            axis=attributes["axis"],
+            accumulation_dtype=attributes["accumulation_dtype"],
         )
     if instruction.atom_ref == "arti/fold@2":
         return _named_gather(
@@ -2295,15 +2917,22 @@ def _ordered_sum(value: Tensor, axis: int, accumulation_dtype: str) -> Tensor:
     return result.to(original_dtype)
 
 
-def _typed_reshape(value: Tensor, output_type: TensorType) -> Tensor:
+def _typed_reshape(
+    value: Tensor,
+    output_type: TensorType,
+    dimension_extents: Mapping[str, int] | None = None,
+) -> Tensor:
     shape: list[int] = []
     unresolved: list[int] = []
+    extents = dimension_extents or {}
     for index, (axis, size) in enumerate(
         zip(output_type.axis_names, output_type.sizes, strict=True)
     ):
-        if size is None:
+        if isinstance(size, str) and size not in extents:
             unresolved.append(index)
             shape.append(-1)
+        elif isinstance(size, str):
+            shape.append(extents[size])
         else:
             shape.append(size)
     if len(unresolved) > 1:
@@ -2327,6 +2956,18 @@ def _named_permute(
 ) -> Tensor:
     permutation = tuple(value_type.axis_names.index(axis) for axis in output_axes)
     return value.permute(permutation)
+
+
+def _require_runtime_condition(
+    condition: Tensor,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    if torch.compiler.is_compiling() or condition.device.type != "cpu":
+        torch._assert_async(condition, message)
+    elif not bool(condition):
+        raise FormulaBindingError(code, message)
 
 
 def _expanded_gather_indices(
@@ -2355,8 +2996,11 @@ def _expanded_gather_indices(
         raise FormulaBindingError(
             "FF2_INDEX_SHAPE", "indices cannot broadcast across the gathered value"
         ) from exc
-    if bool((indices < 0).any()) or bool((indices >= value.shape[gather_dimension]).any()):
-        raise FormulaBindingError("FF2_INDEX_RANGE", "indices are outside the gathered axis")
+    _require_runtime_condition(
+        ((indices >= 0) & (indices < value.shape[gather_dimension])).all(),
+        code="FF2_INDEX_RANGE",
+        message="indices are outside the gathered axis",
+    )
     return expanded, gather_dimension
 
 
@@ -2396,11 +3040,11 @@ def _named_scatter(
     if ordered.shape[index_dimension] > 1:
         left = ordered.narrow(index_dimension, 0, ordered.shape[index_dimension] - 1)
         right = ordered.narrow(index_dimension, 1, ordered.shape[index_dimension] - 1)
-        if bool((left == right).any()):
-            raise FormulaBindingError(
-                "FF2_DUPLICATE_INDEX",
-                f"{operation} replace mode requires unique indices per workset",
-            )
+        _require_runtime_condition(
+            (left != right).all(),
+            code="FF2_DUPLICATE_INDEX",
+            message=f"{operation} replace mode requires unique indices per workset",
+        )
     expanded, scatter_dimension = _expanded_gather_indices(
         base,
         indices,
@@ -2414,6 +3058,139 @@ def _named_scatter(
             "FF2_UPDATE_SHAPE", "Scatter updates do not match the indexed workset"
         )
     return torch.scatter(base, scatter_dimension, expanded, updates)
+
+
+def _execute_scalar_map(value: Tensor, mode: str) -> Tensor:
+    if mode == "gelu":
+        return torch.nn.functional.gelu(value)
+    if mode == "relu":
+        return torch.relu(value)
+    if mode == "rsqrt":
+        return torch.rsqrt(value)
+    if mode == "sigmoid":
+        return torch.sigmoid(value)
+    if mode == "silu":
+        return torch.nn.functional.silu(value)
+    if mode == "tanh":
+        return torch.tanh(value)
+    raise FormulaProgramError("FF2_SCALAR_MAP_MODE", f"unsupported ScalarMap mode {mode!r}")
+
+
+def _named_broadcast(
+    value: Tensor,
+    value_type: TensorType,
+    output_type: TensorType,
+    dimension_extents: Mapping[str, int],
+) -> Tensor:
+    aligned = _align_tensor(value, value_type.axis_names, output_type.axis_names)
+    try:
+        return aligned.expand(
+            _resolved_type_shape(output_type, dimension_extents, name="broadcast")
+        )
+    except RuntimeError as exc:
+        raise FormulaBindingError(
+            "FF2_BROADCAST_SIZE", "value cannot expand into the declared output shape"
+        ) from exc
+
+
+def _named_select(
+    mask: Tensor,
+    when_true: Tensor,
+    when_false: Tensor,
+    mask_type: TensorType,
+    value_type: TensorType,
+) -> Tensor:
+    aligned = _align_tensor(mask, mask_type.axis_names, value_type.axis_names)
+    try:
+        expanded = aligned.expand_as(when_true)
+    except RuntimeError as exc:
+        raise FormulaBindingError(
+            "FF2_MASK_SIZE", "mask cannot broadcast to Select values"
+        ) from exc
+    return torch.where(expanded, when_true, when_false)
+
+
+def _named_lookup(
+    table: Tensor,
+    indices: Tensor,
+    table_type: TensorType,
+    index_type: TensorType,
+    *,
+    table_axis: str,
+    output_axes: tuple[str, ...],
+) -> Tensor:
+    if indices.dtype != torch.int64:
+        raise FormulaBindingError("FF2_INDEX_DTYPE", "Lookup indices must use torch.int64")
+    table_dimension = table_type.axis_names.index(table_axis)
+    value_axes = tuple(axis for axis in table_type.axis_names if axis != table_axis)
+    permutation = (table_dimension,) + tuple(
+        table_type.axis_names.index(axis) for axis in value_axes
+    )
+    ordered = table.permute(permutation)
+    _require_runtime_condition(
+        ((indices >= 0) & (indices < ordered.shape[0])).all(),
+        code="FF2_INDEX_RANGE",
+        message="Lookup indices are outside the table",
+    )
+    flattened = ordered.reshape(ordered.shape[0], -1)
+    selected = flattened.index_select(0, indices.reshape(-1))
+    result = selected.reshape(*indices.shape, *ordered.shape[1:])
+    inferred_axes = (*index_type.axis_names, *value_axes)
+    if tuple(output_axes) != inferred_axes:
+        result = result.permute(tuple(inferred_axes.index(axis) for axis in output_axes))
+    return result
+
+
+def _named_slice(
+    value: Tensor,
+    value_type: TensorType,
+    *,
+    axis: str,
+    start: int,
+    stop: int | None,
+    step: int,
+) -> Tensor:
+    slices = [slice(None)] * value.ndim
+    slices[value_type.axis_names.index(axis)] = slice(start, stop, step)
+    return value[tuple(slices)]
+
+
+def _named_concat(
+    left: Tensor,
+    right: Tensor,
+    value_type: TensorType,
+    *,
+    axis: str,
+) -> Tensor:
+    return torch.cat((left, right), dim=value_type.axis_names.index(axis))
+
+
+def _named_masked_softmax(
+    logits: Tensor,
+    mask: Tensor,
+    logits_type: TensorType,
+    mask_type: TensorType,
+    *,
+    axis: str,
+    accumulation_dtype: str,
+) -> Tensor:
+    aligned = _align_tensor(mask, mask_type.axis_names, logits_type.axis_names)
+    try:
+        visible = aligned.expand_as(logits)
+    except RuntimeError as exc:
+        raise FormulaBindingError(
+            "FF2_MASK_SIZE", "mask cannot broadcast to MaskedSoftmax logits"
+        ) from exc
+    original_dtype = logits.dtype
+    compute = logits.to(_accumulation_dtype(original_dtype, accumulation_dtype))
+    masked = torch.where(visible, compute, torch.full_like(compute, -torch.inf))
+    dimension = logits_type.axis_names.index(axis)
+    maximum = masked.amax(dim=dimension, keepdim=True)
+    maximum = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
+    exponent = torch.where(visible, torch.exp(compute - maximum), torch.zeros_like(compute))
+    denominator = exponent.sum(dim=dimension, keepdim=True)
+    result = torch.where(denominator > 0, exponent / denominator.clamp_min(1e-30), exponent)
+    return result.to(original_dtype)
 
 
 def _align_tensor(value: Tensor, source_axes: tuple[str, ...], target_axes: tuple[str, ...]) -> Tensor:
@@ -2467,12 +3244,49 @@ def _require_exact_type(left: TensorType, right: TensorType) -> None:
         raise FormulaTypeError("FF2_SLOT_TYPE_MISMATCH", "Add operands must have identical types")
 
 
+def _validate_broadcast_contract(source: TensorType, output: TensorType) -> None:
+    _require_compatible_domains(source, output)
+    _require_compatible_dtypes(source, output)
+    if any(axis not in output.axis_names for axis in source.axis_names):
+        raise FormulaTypeError(
+            "FF2_BROADCAST_AXIS", "Broadcast output must preserve every input axis"
+        )
+    for axis in source.axis_names:
+        source_size = source.size_for(axis)
+        output_size = output.size_for(axis)
+        if source_size == 1:
+            continue
+        if source_size != output_size:
+            raise FormulaTypeError(
+                "FF2_BROADCAST_SIZE",
+                f"Broadcast axis {axis!r} must preserve its extent or expand a singleton",
+            )
+
+
+def _validate_mask_contract(mask: TensorType, value: TensorType) -> None:
+    if mask.dtype != "boolean":
+        raise FormulaTypeError("FF2_MASK_DTYPE", "mask must use dtype='boolean'")
+    if any(axis not in value.axis_names for axis in mask.axis_names):
+        raise FormulaTypeError("FF2_MASK_AXIS", "mask axes must be a subset of value axes")
+    for axis in mask.axis_names:
+        mask_size = mask.size_for(axis)
+        value_size = value.size_for(axis)
+        if mask_size != 1 and mask_size != value_size:
+            raise FormulaTypeError(
+                "FF2_MASK_SIZE", f"mask axis {axis!r} cannot broadcast to the value"
+            )
+
+
 def _require_axis_extent_equal(
     left: TensorType, left_axis: str, right: TensorType, right_axis: str
 ) -> None:
     left_size = left.size_for(left_axis)
     right_size = right.size_for(right_axis)
-    if left_size is not None and right_size is not None and left_size != right_size:
+    if (
+        isinstance(left_size, int)
+        and isinstance(right_size, int)
+        and left_size != right_size
+    ):
         raise FormulaTypeError(
             "FF2_AXIS_MISMATCH",
             f"axis extents differ: {left_axis}={left_size}, {right_axis}={right_size}",
@@ -2485,12 +3299,11 @@ def _validate_index_contract(
     *,
     axis: str,
     index_axis: str,
-    allow_boolean: bool = False,
 ) -> None:
-    if value_type.dtype == "int64" or (value_type.dtype == "boolean" and not allow_boolean):
+    if value_type.dtype == "int64":
         raise FormulaTypeError(
             "FF2_VALUE_DTYPE",
-            "Gather and Scatter values must use a floating-point tensor type",
+            "Gather and Scatter values cannot use the int64 index dtype",
         )
     if index_type.dtype != "int64":
         raise FormulaTypeError("FF2_INDEX_DTYPE", "indices must use dtype='int64'")
@@ -2545,6 +3358,9 @@ def _validate_instruction_dtype_contract(
     if atom_ref in {
         "arti/formula-atom-reshape@1",
         "arti/formula-atom-permute@1",
+        "arti/formula-atom-scalar-map@1",
+        "arti/formula-atom-broadcast@1",
+        "arti/formula-atom-slice@1",
     }:
         return
     if atom_ref == "arti/formula-atom-gather@1":
@@ -2563,6 +3379,32 @@ def _validate_instruction_dtype_contract(
             raise FormulaBindingError(
                 "FF2_RUNTIME_DTYPE_MISMATCH",
                 "Scatter requires matching base/update dtypes and int64 indices",
+            )
+        return
+    if atom_ref == "arti/formula-atom-select@1":
+        if len(dtypes) != 3 or dtypes[0] != torch.bool or dtypes[1] != dtypes[2]:
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH",
+                "Select requires a boolean mask and matching branch dtypes",
+            )
+        return
+    if atom_ref == "arti/formula-atom-lookup@1":
+        if len(dtypes) != 2 or dtypes[1] != torch.int64:
+            raise FormulaBindingError(
+                "FF2_INDEX_DTYPE", "Lookup indices must use torch.int64"
+            )
+        return
+    if atom_ref == "arti/formula-atom-concat@1":
+        if len(dtypes) != 2 or dtypes[0] != dtypes[1]:
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH", "Concat operand dtypes must match"
+            )
+        return
+    if atom_ref == "arti/formula-atom-masked-softmax@1":
+        if len(dtypes) != 2 or dtypes[1] != torch.bool:
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH",
+                "MaskedSoftmax requires floating logits and a boolean mask",
             )
         return
     if atom_ref == "arti/fold@2":
@@ -2608,7 +3450,7 @@ def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name
     for size, expected, axis in zip(value.shape, value_type.sizes, value_type.axis_names):
         if size <= 0:
             raise FormulaBindingError("FF2_EMPTY_AXIS", f"{name!r} axis {axis!r} is empty")
-        if expected is not None and size != expected:
+        if isinstance(expected, int) and size != expected:
             raise FormulaBindingError(
                 "FF2_BINDING_SHAPE",
                 f"{name!r} axis {axis!r} expected {expected}, received {size}",
@@ -2849,7 +3691,7 @@ def _resolved_type_shape(
 ) -> tuple[int, ...]:
     shape: list[int] = []
     for axis, declared in zip(value_type.axis_names, value_type.sizes):
-        resolved = declared if declared is not None else axis_extents.get(axis)
+        resolved = declared if isinstance(declared, int) else axis_extents.get(declared)
         if resolved is None:
             raise FormulaBindingError(
                 "FF2_SYMBOL_UNBOUND",
@@ -2890,12 +3732,20 @@ def _validate_atom_operands(
 def _bind_axis_extents(
     extents: dict[str, int], value: Tensor, value_type: TensorType, *, name: str
 ) -> None:
-    for axis, size in zip(value_type.axis_names, value.shape):
-        previous = extents.setdefault(axis, int(size))
+    for axis, declared, size in zip(
+        value_type.axis_names,
+        value_type.sizes,
+        value.shape,
+        strict=True,
+    ):
+        if isinstance(declared, int):
+            continue
+        previous = extents.setdefault(declared, int(size))
         if previous != size:
             raise FormulaBindingError(
                 "FF2_SYMBOL_UNBOUND",
-                f"axis {axis!r} has conflicting extents {previous} and {size} at {name!r}",
+                f"dimension {declared!r} for axis {axis!r} has conflicting extents "
+                f"{previous} and {size} at {name!r}",
             )
 
 
@@ -2986,6 +3836,8 @@ def _thaw_json(value: object) -> object:
 __all__ = [
     "AddAtom",
     "BankBinding",
+    "BroadcastAtom",
+    "ConcatAtom",
     "ContractAtom",
     "DEFAULT_FORMULA_LIMITS",
     "FORMULA_LIMITS_V1_SCHEMA_VERSION",
@@ -2997,7 +3849,7 @@ __all__ = [
     "FORMULA_TENSOR_TYPE_V1_SCHEMA_REF",
     "FORMULA_TRACE_V1_SCHEMA_VERSION",
     "FORMULA_TRACE_V1_SCHEMA_REF",
-    "FabricFoldState",
+    "FabricIndexFoldState",
     "FormulaBindingError",
     "FormulaBankOperand",
     "FormulaExecutionPlanV2",
@@ -3014,23 +3866,36 @@ __all__ = [
     "FormulaV2Error",
     "GatherAtom",
     "InputBinding",
+    "LookupAtom",
+    "MaskedSoftmaxAtom",
     "PermuteAtom",
     "PreparedFormulaBindings",
     "ReduceAtom",
     "ReshapeAtom",
     "ScaleAtom",
+    "ScalarMapAtom",
     "ScatterAtom",
+    "SelectAtom",
+    "SliceAtom",
     "TensorType",
     "add",
     "build_lora_program",
+    "broadcast",
+    "concat",
     "contract",
     "dot",
-    "fold",
+    "formula_program_dependency_refs",
     "gather",
+    "index_fold",
+    "index_unfold",
+    "lookup",
+    "masked_softmax",
     "permute",
     "reduce_sum",
     "reshape",
     "scale",
+    "scalar_map",
     "scatter",
-    "unfold",
+    "select",
+    "slice_tensor",
 ]

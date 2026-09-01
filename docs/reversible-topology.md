@@ -157,28 +157,17 @@ actually executed. Exact trained tensor hashes belong to the saved `arti.st`
 component state contract. Fold does not hash an entire mutable Bank during each
 training forward.
 
-## Selective Compute Evidence
+## Selective Compute Boundary
 
-A controlled private Phase C benchmark connected the complete value path:
+The intended complete value path is:
 
 ```text
 Fold@2 -> frozen standard PyTorch block on K instances -> UnFold@2
 ```
 
-With `N=16` and `K=4`, three independent runs trained only topology Bank
-values from the final restored tensor target. Correct Banks separated from
-random, reset, shuffled, matched-wrong, cue-only, and utility-shuffled
-controls. Two independently trained Banks also improved a joint-cue target
-without joint fine-tuning, although composition did not preserve either
-Bank's isolated single-task behavior. In every run, the hard forward and
-inference block physically received only K instances, bypassed values were
-unchanged, and UnFold restored host order.
-
-Because hard lineage selection is discrete, that benchmark used a private
-counterfactual final-output gradient estimator during training. Each training
-step therefore performed the K-instance hard block call plus an N-candidate
-counterfactual block evaluation. The reported loss and real forward remained
-the hard final tensor path. This is evidence for the mechanism, not a claim of
-training-time compute savings or compatibility with cross-instance blocks.
-The full methods, controls, numbers, and limitations are recorded in
-`benchmarks/results/reversible_topology_phase_c.md`.
+The operated block physically receives only K instances, bypassed values remain
+unchanged, and UnFold restores host order. Hard lineage selection is discrete;
+an application that uses a surrogate gradient must account for any additional
+counterfactual work separately. The contract does not imply training-time
+compute savings or compatibility with blocks that mix operated and bypassed
+instances.

@@ -407,7 +407,7 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
             terminal_abi_fingerprint=terminal_abi.fingerprint,
             score_contract="sum of Bank-local action log probabilities",
             gradient_contract=GradientContract.autograd(),
-            execution_capabilities=("eager", "latest-state-requery", "serial-k1"),
+            execution_capabilities=("eager", "fixed-k-wide", "latest-state-requery"),
         )
         self.bind_signature(signature)
 
@@ -434,17 +434,26 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
         query_result: BankQueryResult,
         max_candidates: int,
     ) -> FederalBankStep:
-        if max_candidates != 1 or value.shape[0] != 1:
+        if value.shape[0] != 1:
             raise FederalRecallError(
-                "BankLocalFormulaProgram@1 requires serial K=1 sample execution"
+                "BankLocalFormulaProgram@1 requires one sample per Bank invocation"
             )
+        if (
+            isinstance(max_candidates, bool)
+            or not isinstance(max_candidates, int)
+            or max_candidates <= 0
+        ):
+            raise FederalRecallError("max_candidates must be a positive integer")
         logits = query_result.value
         if logits.shape != (1, len(self.action_ids)):
             raise FederalRecallError("Bank-local Query returned the wrong action shape")
         log_probability = logits.log_softmax(dim=-1)
         formula_logits = logits[:, : len(self.actions)]
         exit_logit = logits[:, len(self.actions)]
-        if self.terminal_action.requested(exit_logit, formula_logits, value):
+        exit_requested = self.terminal_action.requested(
+            exit_logit, formula_logits, value
+        )
+        if max_candidates == 1 and exit_requested:
             score = log_probability[0, len(self.actions)]
             candidate = FederalCandidate.terminal(
                 self.terminal_action.action_id,
@@ -453,25 +462,59 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
             )
             return FederalBankStep((candidate,))
 
-        action_index = int(formula_logits.argmax(dim=-1).item())
-        action = self.actions[action_index]
-        score = log_probability[0, action_index]
-        next_value = action(value)
-        if action.result_kind == "continue":
-            candidate = FederalCandidate.local(
-                action.action_id,
-                local_log_score=score,
-                next_value=next_value,
+        eligible = [
+            index
+            for index, action in enumerate(self.actions)
+            if action.accepts(value)
+        ]
+        if (
+            (max_candidates > 1 or exit_requested)
+            and self.terminal_action.accepts(value)
+        ):
+            eligible.append(len(self.actions))
+        if not eligible:
+            raise FederalRecallError(
+                "no Bank-local Formula or terminal action accepts the current tensor"
             )
-        else:
-            assert action.next_bank_id is not None
-            candidate = FederalCandidate.child(
-                action.action_id,
-                local_log_score=score,
-                next_bank_id=action.next_bank_id,
-                next_value=next_value,
+        eligible.sort(
+            key=lambda index: (
+                -float(log_probability[0, index].detach().cpu()),
+                self.action_ids[index],
             )
-        return FederalBankStep((candidate,))
+        )
+        candidates: list[FederalCandidate] = []
+        for action_index in eligible[:max_candidates]:
+            score = log_probability[0, action_index]
+            if action_index == len(self.actions):
+                candidates.append(
+                    FederalCandidate.terminal(
+                        self.terminal_action.action_id,
+                        local_log_score=score,
+                        outputs=self.terminal_action(value, score),
+                    )
+                )
+                continue
+            action = self.actions[action_index]
+            next_value = action(value)
+            if action.result_kind == "continue":
+                candidates.append(
+                    FederalCandidate.local(
+                        action.action_id,
+                        local_log_score=score,
+                        next_value=next_value,
+                    )
+                )
+            else:
+                assert action.next_bank_id is not None
+                candidates.append(
+                    FederalCandidate.child(
+                        action.action_id,
+                        local_log_score=score,
+                        next_bank_id=action.next_bank_id,
+                        next_value=next_value,
+                    )
+                )
+        return FederalBankStep(tuple(candidates))
 
 
 BankLocalTaskLoss = Callable[[Mapping[str, Tensor], object], Tensor]

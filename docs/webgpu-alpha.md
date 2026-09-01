@@ -170,12 +170,6 @@ and entrypoint fan-out, and downloads model files sequentially. Recall masks
 must match `[batch, tokens]` exactly; broadcastable higher-rank masks are
 rejected before latent computation.
 
-The controlled validation is available as:
-
-```bash
-uv run python benchmarks/verify_stateful_recall_stream.py
-```
-
-It compares frozen Recall, equal-memory exact KV retrieval, pure additive
-memory, and delta-rule stateful Recall. Exact KV is treated as an upper bound,
-not a weak baseline.
+Stateful applications should compare committed updates with frozen and reset
+state under the same inputs. The browser runtime does not assign neural meaning
+to those states or substitute JavaScript logic for the exported Python graph.

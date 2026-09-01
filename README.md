@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.11"
+uv add "arti-fit==3.0.12"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.11"
-uv add "arti-fit[qwen]==3.0.11"
-uv add "arti-fit[sd]==3.0.11"
-uv add "arti-fit[web]==3.0.11"
+uv add "arti-fit[jax]==3.0.12"
+uv add "arti-fit[qwen]==3.0.12"
+uv add "arti-fit[sd]==3.0.12"
+uv add "arti-fit[web]==3.0.12"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,7 +41,14 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Stable 3.0.11
+## Stable 3.0.12
+
+This release restores real K-wide Recall traversal and extends Formula Fabric
+with stable typed atoms for nonlinear maps, broadcast, selection, lookup,
+slicing, concatenation, and masked softmax. It also ships optional alpha
+components for bounded Formula program selection and shape-polymorphic Federal
+Bank execution. Alpha component identities remain explicitly marked in the
+registry even though they are distributed in the stable package.
 
 `arti.ARTILayer` is now `arti/layer@2`: a tensor-in/tensor-out host for one
 composable `AdaptivePulse` graph. An empty graph is an exact identity, so a
@@ -129,6 +136,7 @@ layout, dtype, and position. See [Unified Attachment](docs/unified-attachment.md
 | K-wide Recall with hard winner | `arti.nn.Recall` |
 | Iterative hidden-state refinement | `arti.RecallRefiner` |
 | Typed Formula programs | `arti.mechanisms.FormulaFabricV2` |
+| Bounded typed program selection (alpha) | `arti.mechanisms.FormulaProgramQuery` |
 | Addressable forward Bank updates | `arti.mechanisms.TargetBankUpdater` |
 | Shape-autonomous Bank hierarchy | `arti.mechanisms.FederalRecall` |
 | Persistent auxiliary tensor editing | `arti.mechanisms.TensorOperationLoop` |
@@ -175,6 +183,11 @@ arti.set_recall_refine_schedule(
 Formula Fabric executes bounded, typed tensor programs with declared operands,
 shapes, route sources, and output contracts. Built-in atoms include ordinary
 tensor transforms as well as Fabric-native Fold and UnFold operations.
+
+The stable atom basis can compose Transformer-like subgraphs without hiding an
+opaque Attention, MLP, or Transformer primitive. `FormulaProgramQuery@1` is an
+alpha controller for selecting a bounded, shape-valid SSA path from final task
+loss; it chooses one hard candidate per step rather than averaging outputs.
 
 Federal Banks can carry their own sealed Query, Formula program, local Refine
 policy, and terminal ABI. A Bank may change its tensor shape internally and
@@ -246,7 +259,7 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.11
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.12
 将 `AdaptivePulse` 设为默认 `ARTILayer` 的执行图，并把经过版本化和验证的
 Recall、Formula、Fold/UnFold、Bank、Observation、TensorOperation 与
 Federal Bank 机制提升为稳定 API。应用负责张量的业务语义，ARTI 负责张量

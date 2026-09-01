@@ -12,13 +12,16 @@ from typing import ClassVar, Mapping
 from torch import Tensor, nn
 
 from .bank_query import QueryExecutionSignature
+from .shape_query import TensorViewQueryExecutionSignature
 from .component_registry import ComponentRef
 from .tensor_schema import GradientContract, ShapeRelation, TensorSchema, TensorSchemaError
+from .tensor_view import TensorViewPattern
 
 
 TERMINAL_OUTPUT_ABI_VERSION = 1
 BANK_EXECUTION_SIGNATURE_VERSION = 1
 BANK_EXECUTION_SIGNATURE_V2_VERSION = 2
+BANK_EXECUTION_SIGNATURE_V3_VERSION = 3
 
 _NAME = re.compile(r"^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -657,12 +660,220 @@ class BankExecutionSignatureV2:
             raise TerminalABIError("Bank signature does not match the terminal ABI")
 
 
+@dataclass(frozen=True)
+class BankExecutionSignatureV3:
+    """A federated Bank contract whose local Query accepts changing TensorViews."""
+
+    program_ref: str
+    program_api_identity: str
+    program_config_fingerprint: str
+    program_state_schema_fingerprint: str
+    input_pattern: TensorViewPattern
+    exit_pattern: TensorViewPattern
+    query_signature: TensorViewQueryExecutionSignature
+    local_normalization_contract: Mapping[str, object]
+    terminal_adapter_ref: str
+    terminal_abi_ref: str
+    terminal_abi_fingerprint: str
+    score_contract: str
+    gradient_contract: GradientContract
+    local_formula_ref: str
+    local_refine_ref: str
+    execution_capabilities: tuple[str, ...] = ()
+    schema_version: int = BANK_EXECUTION_SIGNATURE_V3_VERSION
+
+    _component_reference: ClassVar[str] = "arti/bank-execution-signature@3"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != BANK_EXECUTION_SIGNATURE_V3_VERSION:
+            raise TerminalABIError("unsupported BankExecutionSignatureV3 version")
+        ComponentRef.parse(self.program_ref)
+        ComponentRef.parse(self.query_signature.query_ref)
+        ComponentRef.parse(self.terminal_adapter_ref)
+        ComponentRef.parse(self.local_formula_ref)
+        ComponentRef.parse(self.local_refine_ref)
+        if not isinstance(self.program_api_identity, str) or not self.program_api_identity:
+            raise TerminalABIError("program_api_identity must be a qualified name")
+        for value, name in (
+            (self.program_config_fingerprint, "program_config_fingerprint"),
+            (self.program_state_schema_fingerprint, "program_state_schema_fingerprint"),
+            (self.terminal_abi_fingerprint, "terminal_abi_fingerprint"),
+        ):
+            _require_sha256(value, field=name)
+        if not isinstance(self.input_pattern, TensorViewPattern) or not isinstance(
+            self.exit_pattern, TensorViewPattern
+        ):
+            raise TypeError("BankExecutionSignatureV3 patterns must be TensorViewPattern")
+        if not isinstance(self.query_signature, TensorViewQueryExecutionSignature):
+            raise TypeError("query_signature must be TensorViewQueryExecutionSignature")
+        if self.query_signature.pattern.fingerprint != self.input_pattern.fingerprint:
+            raise TerminalABIError("Bank input pattern must match its Query input pattern")
+        if self.terminal_abi_ref != TerminalOutputABI._component_reference:
+            raise TerminalABIError("terminal_abi_ref must name TerminalOutputABI@1")
+        if not isinstance(self.gradient_contract, GradientContract):
+            raise TypeError("gradient_contract must be GradientContract")
+        if self.gradient_contract.mode != "autograd":
+            raise TerminalABIError("BankExecutionSignatureV3 supports only autograd gradients")
+        normalization = _freeze_json(self.local_normalization_contract)
+        if not isinstance(normalization, Mapping) or normalization.get("scope") != "bank_local":
+            raise TerminalABIError("federal normalization must remain Bank-local")
+        object.__setattr__(self, "local_normalization_contract", normalization)
+        capabilities = tuple(self.execution_capabilities)
+        for capability in capabilities:
+            _require_name(capability, field="execution_capability")
+        if tuple(sorted(set(capabilities))) != capabilities:
+            raise TerminalABIError("execution_capabilities must be sorted and unique")
+        object.__setattr__(self, "execution_capabilities", capabilities)
+        _require_text(self.score_contract, field="score_contract")
+
+    @property
+    def fingerprint(self) -> str:
+        return _fingerprint(self._payload())
+
+    @classmethod
+    def from_program(
+        cls,
+        program: nn.Module,
+        *,
+        input_pattern: TensorViewPattern,
+        exit_pattern: TensorViewPattern,
+        query_signature: TensorViewQueryExecutionSignature,
+        local_normalization_contract: Mapping[str, object],
+        terminal_adapter_ref: str,
+        terminal_abi_ref: str,
+        terminal_abi_fingerprint: str,
+        score_contract: str,
+        gradient_contract: GradientContract,
+        local_formula_ref: str,
+        local_refine_ref: str,
+        execution_capabilities: tuple[str, ...] = (),
+    ) -> BankExecutionSignatureV3:
+        if not isinstance(program, nn.Module):
+            raise TypeError("program must be an nn.Module")
+        from .component_registry import component_spec
+
+        spec = component_spec(program)
+        return cls(
+            program_ref=spec.reference,
+            program_api_identity=spec.api,
+            program_config_fingerprint=spec.config_fingerprint,
+            program_state_schema_fingerprint=spec.parameter_schema_fingerprint,
+            input_pattern=input_pattern,
+            exit_pattern=exit_pattern,
+            query_signature=query_signature,
+            local_normalization_contract=local_normalization_contract,
+            terminal_adapter_ref=terminal_adapter_ref,
+            terminal_abi_ref=terminal_abi_ref,
+            terminal_abi_fingerprint=terminal_abi_fingerprint,
+            score_contract=score_contract,
+            gradient_contract=gradient_contract,
+            local_formula_ref=local_formula_ref,
+            local_refine_ref=local_refine_ref,
+            execution_capabilities=execution_capabilities,
+        )
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "ref": self._component_reference,
+            "program_ref": self.program_ref,
+            "program_api_identity": self.program_api_identity,
+            "program_config_fingerprint": self.program_config_fingerprint,
+            "program_state_schema_fingerprint": self.program_state_schema_fingerprint,
+            "input_pattern": self.input_pattern.to_dict(),
+            "exit_pattern": self.exit_pattern.to_dict(),
+            "query_signature": self.query_signature.to_dict(),
+            "local_normalization_contract": _thaw_json(
+                self.local_normalization_contract
+            ),
+            "local_formula_ref": self.local_formula_ref,
+            "local_refine_ref": self.local_refine_ref,
+            "terminal_adapter_ref": self.terminal_adapter_ref,
+            "terminal_abi_ref": self.terminal_abi_ref,
+            "terminal_abi_fingerprint": self.terminal_abi_fingerprint,
+            "score_contract": self.score_contract,
+            "gradient_contract": self.gradient_contract.to_dict(),
+            "execution_capabilities": list(self.execution_capabilities),
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self._payload(), "fingerprint": self.fingerprint}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> BankExecutionSignatureV3:
+        required = {
+            "schema_version",
+            "ref",
+            "program_ref",
+            "program_api_identity",
+            "program_config_fingerprint",
+            "program_state_schema_fingerprint",
+            "input_pattern",
+            "exit_pattern",
+            "query_signature",
+            "local_normalization_contract",
+            "local_formula_ref",
+            "local_refine_ref",
+            "terminal_adapter_ref",
+            "terminal_abi_ref",
+            "terminal_abi_fingerprint",
+            "score_contract",
+            "gradient_contract",
+            "execution_capabilities",
+            "fingerprint",
+        }
+        if not isinstance(value, Mapping) or set(value) != required:
+            raise TerminalABIError(
+                "BankExecutionSignatureV3 payload contains missing or unknown fields"
+            )
+        if value["ref"] != cls._component_reference:
+            raise TerminalABIError("BankExecutionSignatureV3 reference is invalid")
+        capabilities = value["execution_capabilities"]
+        if not isinstance(capabilities, (list, tuple)):
+            raise TerminalABIError("execution_capabilities must be a sequence")
+        result = cls(
+            program_ref=value["program_ref"],
+            program_api_identity=value["program_api_identity"],
+            program_config_fingerprint=value["program_config_fingerprint"],
+            program_state_schema_fingerprint=value["program_state_schema_fingerprint"],
+            input_pattern=TensorViewPattern.from_dict(value["input_pattern"]),
+            exit_pattern=TensorViewPattern.from_dict(value["exit_pattern"]),
+            query_signature=TensorViewQueryExecutionSignature.from_dict(
+                value["query_signature"]
+            ),
+            local_normalization_contract=value["local_normalization_contract"],
+            local_formula_ref=value["local_formula_ref"],
+            local_refine_ref=value["local_refine_ref"],
+            terminal_adapter_ref=value["terminal_adapter_ref"],
+            terminal_abi_ref=value["terminal_abi_ref"],
+            terminal_abi_fingerprint=value["terminal_abi_fingerprint"],
+            score_contract=value["score_contract"],
+            gradient_contract=GradientContract.from_dict(value["gradient_contract"]),
+            execution_capabilities=tuple(capabilities),
+            schema_version=value["schema_version"],
+        )
+        if value["fingerprint"] != result.fingerprint:
+            raise TerminalABIError("BankExecutionSignatureV3 fingerprint is invalid")
+        return result
+
+    def validate_terminal_abi(self, abi: TerminalOutputABI) -> None:
+        if not isinstance(abi, TerminalOutputABI):
+            raise TypeError("abi must be TerminalOutputABI")
+        if (
+            self.terminal_abi_ref != abi._component_reference
+            or self.terminal_abi_fingerprint != abi.fingerprint
+        ):
+            raise TerminalABIError("Bank signature does not match the terminal ABI")
+
+
 __all__ = [
     "BANK_EXECUTION_SIGNATURE_VERSION",
     "BANK_EXECUTION_SIGNATURE_V2_VERSION",
+    "BANK_EXECUTION_SIGNATURE_V3_VERSION",
     "TERMINAL_OUTPUT_ABI_VERSION",
     "BankExecutionSignature",
     "BankExecutionSignatureV2",
+    "BankExecutionSignatureV3",
     "TerminalABIError",
     "TerminalField",
     "TerminalOutputABI",

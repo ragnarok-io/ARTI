@@ -139,9 +139,13 @@ def _validate_sealed_bank_queries(model: nn.Module) -> None:
     """Fail before writing when a mounted Query no longer matches its asset."""
 
     from .bank_query import SealedBankQuery
+    from .shape_query import SealedTensorViewBankQuery
 
     for module in model.modules():
         if isinstance(module, SealedBankQuery):
+            module.validate_runtime_state()
+            module.signature.validate_query(module.query)
+        elif isinstance(module, SealedTensorViewBankQuery):
             module.validate_runtime_state()
             module.signature.validate_query(module.query)
 
