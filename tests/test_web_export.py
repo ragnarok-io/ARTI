@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from arti import COMPONENT_PROVENANCE_VERSION, component_provenance
 from arti.nn import Fold, FusionPulse, Half, LearnedPulse
-from arti.experimental import StatefulRecall
+from arti.legacy import StatefulRecall
 from arti.experimental.web import ARTIWebTensorMetadata, artifact_schema, export, export_stateful_recall, render_artifact_typescript, render_typescript_contract, stateful_artifact_schema
 
 

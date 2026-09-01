@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
 class _DynamicFoldSource(torch.nn.Module):
@@ -22,9 +22,9 @@ class _DynamicFoldSource(torch.nn.Module):
         query: torch.Tensor,
         *,
         mask: torch.Tensor,
-    ) -> alpha.TopologyProposal:
+    ) -> mechanisms.TopologyProposal:
         priority = torch.einsum("bnd,bd->bn", keys @ self.weight, query)
-        return alpha.TopologyProposal(alpha.TopologyAction(priority))
+        return mechanisms.TopologyProposal(mechanisms.TopologyAction(priority))
 
     def topology_contract(self) -> dict[str, object]:
         return {
@@ -35,23 +35,23 @@ class _DynamicFoldSource(torch.nn.Module):
         }
 
 
-class _StateSwitchingRouteSource(alpha.BankFormulaRouteSource):
+class _StateSwitchingRouteSource(mechanisms.BankFormulaRouteSource):
     """Deterministic fixture whose second operand follows committed slot zero."""
 
-    def __init__(self, program: alpha.FormulaFabricProgram) -> None:
+    def __init__(self, program: mechanisms.FormulaFabricProgram) -> None:
         torch.nn.Module.__init__(self)
         self.program = program
         self.active_count = 2
         self.config_fingerprint = "state-switching-route-source"
-        self._limits = alpha.ContractLimits()
+        self._limits = mechanisms.ContractLimits()
 
     def operation_bytes_upper_bound(self, workspace: object) -> int:
         return 1
 
     def forward(
         self, workspace: object
-    ) -> tuple[alpha.FormulaRoutePlan, alpha.BankFormulaRouteInfo]:
-        assert isinstance(workspace, alpha.ActiveWorkspace)
+    ) -> tuple[mechanisms.FormulaRoutePlan, mechanisms.BankFormulaRouteInfo]:
+        assert isinstance(workspace, mechanisms.ActiveWorkspace)
         value = workspace.value
         batch = value.shape[0]
         first = torch.zeros(batch, dtype=torch.long, device=value.device)
@@ -63,11 +63,11 @@ class _StateSwitchingRouteSource(alpha.BankFormulaRouteSource):
         selected = torch.stack((first, second), dim=-1).reshape(batch, 1, 1, 2)
         weights = torch.nn.functional.one_hot(selected, 2).to(value.dtype)
         valid = torch.ones(batch, 1, 1, dtype=torch.bool, device=value.device)
-        route = alpha.FormulaRoutePlan(weights, valid, valid, valid)
+        route = mechanisms.FormulaRoutePlan(weights, valid, valid, valid)
         availability = torch.ones(
             batch, 2, 2, dtype=torch.bool, device=value.device
         )
-        return route, alpha.BankFormulaRouteInfo(
+        return route, mechanisms.BankFormulaRouteInfo(
             selected,
             valid,
             valid,
@@ -78,8 +78,8 @@ class _StateSwitchingRouteSource(alpha.BankFormulaRouteSource):
         )
 
 
-def _policy(dim: int, seed: int) -> alpha.TypedBankFormulaTopologyPolicy:
-    bank = alpha.TypedTopologyOperandBank(
+def _policy(dim: int, seed: int) -> mechanisms.TypedBankFormulaTopologyPolicy:
+    bank = mechanisms.TypedTopologyOperandBank(
         slots=4,
         key_dim=4,
         factor_dim=1,
@@ -87,7 +87,7 @@ def _policy(dim: int, seed: int) -> alpha.TypedBankFormulaTopologyPolicy:
         value_seed=seed + 100,
         bank_id=f"formula-route-{seed}",
     )
-    return alpha.TypedBankFormulaTopologyPolicy(
+    return mechanisms.TypedBankFormulaTopologyPolicy(
         dim,
         [bank],
         key_dim=4,
@@ -96,11 +96,11 @@ def _policy(dim: int, seed: int) -> alpha.TypedBankFormulaTopologyPolicy:
     )
 
 
-def _program(dim: int = 2) -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def _program(dim: int = 2) -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=dim,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
         domain="bank-formula-route",
     )
 
@@ -109,17 +109,17 @@ def _stack(
     *,
     estimator: str = "straight-through",
     weighted: bool = False,
-    limits: alpha.ContractLimits | None = None,
+    limits: mechanisms.ContractLimits | None = None,
 ) -> tuple[
-    alpha.RoutedFormulaFabricCompute,
-    alpha.BankFormulaRouteSource,
-    alpha.FormulaFabricCompute,
+    mechanisms.RoutedFormulaFabricCompute,
+    mechanisms.BankFormulaRouteSource,
+    mechanisms.FormulaFabricCompute,
 ]:
     program = _program()
-    limits = alpha.ContractLimits() if limits is None else limits
+    limits = mechanisms.ContractLimits() if limits is None else limits
     candidate = torch.zeros(1, 1, 2, 4, dtype=torch.bool)
     candidate[..., :2] = True
-    source = alpha.BankFormulaRouteSource(
+    source = mechanisms.BankFormulaRouteSource(
         program,
         [_policy(2, 1), _policy(2, 2)],
         active_count=3,
@@ -127,44 +127,44 @@ def _stack(
         candidate_mask=candidate,
         limits=limits,
     )
-    fabric: torch.nn.Module = alpha.FormulaFabric(program, limits=limits)
+    fabric: torch.nn.Module = mechanisms.FormulaFabric(program, limits=limits)
     if weighted:
-        fabric = alpha.FormulaCommitBlend(fabric)
-    compute = alpha.FormulaFabricCompute(fabric, active_count=3)
-    return alpha.RoutedFormulaFabricCompute(compute, source), source, compute
+        fabric = mechanisms.FormulaCommitBlend(fabric)
+    compute = mechanisms.FormulaFabricCompute(fabric, active_count=3)
+    return mechanisms.RoutedFormulaFabricCompute(compute, source), source, compute
 
 
-def _workspace(*, requires_grad: bool = False) -> alpha.ActiveWorkspace:
+def _workspace(*, requires_grad: bool = False) -> mechanisms.ActiveWorkspace:
     value = torch.tensor(
         [[[1.0, 2.0], [3.0, 5.0], [9.0, 11.0]]],
         requires_grad=requires_grad,
     )
     support = torch.ones(1, 3, dtype=torch.bool)
     intervened = torch.tensor([[False, False, True]])
-    return alpha.ActiveWorkspace(value, support, support, intervened)
+    return mechanisms.ActiveWorkspace(value, support, support, intervened)
 
 
 def _typed_inputs(
     value: torch.Tensor,
     *,
     intervened: torch.Tensor | None = None,
-) -> tuple[alpha.TensorEnvelope, alpha.PulseSupports]:
+) -> tuple[mechanisms.TensorEnvelope, mechanisms.PulseSupports]:
     mask = torch.ones(value.shape[:-1], dtype=torch.bool, device=value.device)
     if intervened is None:
         intervened = mask
-    domain = alpha.SupportDomain.for_tensor(
+    domain = mechanisms.SupportDomain.for_tensor(
         mask,
         domain_id="dynamic-routed-formula",
         owner_ref="arti/pulse@2",
         partition_id="world",
         transition_id="joint-path",
     )
-    world = alpha.TensorEnvelope(alpha.EnvelopeRef.WORLD, value, mask, domain)
-    supports = alpha.PulseSupports(
-        alpha.SupportMask(alpha.SupportKind.OBSERVED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.EXPOSED, mask, domain),
-        alpha.SupportMask(
-            alpha.SupportKind.INTERVENED,
+    world = mechanisms.TensorEnvelope(mechanisms.EnvelopeRef.WORLD, value, mask, domain)
+    supports = mechanisms.PulseSupports(
+        mechanisms.SupportMask(mechanisms.SupportKind.OBSERVED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.EXPOSED, mask, domain),
+        mechanisms.SupportMask(
+            mechanisms.SupportKind.INTERVENED,
             intervened,
             domain,
         ),
@@ -217,7 +217,7 @@ def test_routed_compute_supports_dynamic_batch() -> None:
     routed, _source, _compute = _stack()
     for batch in (1, 3, 5):
         base = _workspace()
-        workspace = alpha.ActiveWorkspace(
+        workspace = mechanisms.ActiveWorkspace(
             base.value.expand(batch, -1, -1).clone(),
             base.validity.expand(batch, -1),
             base.exposed.expand(batch, -1),
@@ -247,9 +247,9 @@ def test_pulse_hot_path_does_not_query_component_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     routed, _source, _compute = _stack()
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -268,9 +268,9 @@ def test_pulse_hot_path_does_not_query_component_registry(
 
 def test_explicit_manifest_validation_rejects_policy_drift() -> None:
     routed, source, _compute = _stack()
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -323,12 +323,12 @@ def test_hard_route_has_no_surrogate_bank_gradient() -> None:
 
 
 def test_route_source_tracks_scratch_availability() -> None:
-    program = alpha.FormulaFabricProgram(
+    program = mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
         steps=(
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 3),),
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 3),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),
         ),
         domain="scratch-route",
     )
@@ -336,7 +336,7 @@ def test_route_source_tracks_scratch_availability() -> None:
     candidate[0, 0, :, :2] = True
     candidate[1, 0, 0, 3] = True
     candidate[1, 0, 1, 0] = True
-    source = alpha.BankFormulaRouteSource(
+    source = mechanisms.BankFormulaRouteSource(
         program,
         [_policy(2, seed) for seed in range(10, 14)],
         active_count=3,
@@ -367,11 +367,11 @@ def test_route_source_rejects_joint_budget_before_bank_read(
 ) -> None:
     program = _program()
     policies = [_policy(2, 31), _policy(2, 32)]
-    source = alpha.BankFormulaRouteSource(
+    source = mechanisms.BankFormulaRouteSource(
         program,
         policies,
         active_count=3,
-        limits=alpha.ContractLimits(max_operation_bytes=1),
+        limits=mechanisms.ContractLimits(max_operation_bytes=1),
     )
     called: list[bool] = []
 
@@ -387,9 +387,9 @@ def test_route_source_rejects_joint_budget_before_bank_read(
 
 def test_routed_compute_runs_as_pulse_stage() -> None:
     routed, _source, _compute = _stack()
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -401,15 +401,15 @@ def test_routed_compute_runs_as_pulse_stage() -> None:
     )
 
     assert result.value.shape == value.shape
-    assert isinstance(result.diagnostics.compute, alpha.RoutedFormulaFabricComputeInfo)
+    assert isinstance(result.diagnostics.compute, mechanisms.RoutedFormulaFabricComputeInfo)
     assert result.diagnostics.compute.route_origin == "bank-formula"
 
 
 def test_dynamic_fold_weighted_routed_formula_unfold_joint_path() -> None:
     routed, _route_source, _compute = _stack(weighted=True)
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -442,8 +442,8 @@ def test_dynamic_fold_weighted_routed_formula_unfold_joint_path() -> None:
     assert record is not None
     assert torch.equal(record.active_index, torch.tensor([[1, 2, 3]]))
     torch.testing.assert_close(result.value[:, 0], value[:, 0])
-    assert isinstance(info, alpha.RoutedFormulaFabricComputeInfo)
-    assert isinstance(info.trace, alpha.FormulaCommitBlendTrace)
+    assert isinstance(info, mechanisms.RoutedFormulaFabricComputeInfo)
+    assert isinstance(info.trace, mechanisms.FormulaCommitBlendTrace)
     assert info.route_origin == "bank-formula"
     assert info.commit_mode == "weighted"
     assert info.factor_contract == "required"
@@ -456,9 +456,9 @@ def test_dynamic_fold_routed_formula_pulse_component_graph_and_round_trip(
     tmp_path,
 ) -> None:
     routed, _route_source, _compute = _stack(weighted=True)
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    source = alpha.AdaptivePulse(
+    source = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -486,9 +486,9 @@ def test_dynamic_fold_routed_formula_pulse_component_graph_and_round_trip(
 
     saved = arti.save(source, tmp_path / "dynamic-routed-formula.arti.st")
     target_routed, _target_route_source, _target_compute = _stack(weighted=True)
-    target_topology = alpha.ReversibleTopology(active_count=3)
+    target_topology = mechanisms.ReversibleTopology(active_count=3)
     target_fold, target_unfold = target_topology.operations()
-    target = alpha.AdaptivePulse(
+    target = mechanisms.AdaptivePulse(
         fold=target_fold,
         selective_compute=target_routed,
         unfold=target_unfold,
@@ -509,16 +509,16 @@ def test_dynamic_fold_routed_formula_pulse_component_graph_and_round_trip(
     torch.testing.assert_close(actual.value, expected.value)
     actual_info = actual.diagnostics.compute
     expected_info = expected.diagnostics.compute
-    assert isinstance(actual_info, alpha.RoutedFormulaFabricComputeInfo)
-    assert isinstance(expected_info, alpha.RoutedFormulaFabricComputeInfo)
+    assert isinstance(actual_info, mechanisms.RoutedFormulaFabricComputeInfo)
+    assert isinstance(expected_info, mechanisms.RoutedFormulaFabricComputeInfo)
     assert actual_info.executor_config_fingerprint == (
         expected_info.executor_config_fingerprint
     )
     assert actual_info.adapter_config_fingerprint == (
         expected_info.adapter_config_fingerprint
     )
-    assert isinstance(actual_info.trace, alpha.FormulaCommitBlendTrace)
-    assert isinstance(expected_info.trace, alpha.FormulaCommitBlendTrace)
+    assert isinstance(actual_info.trace, mechanisms.FormulaCommitBlendTrace)
+    assert isinstance(expected_info.trace, mechanisms.FormulaCommitBlendTrace)
     torch.testing.assert_close(actual_info.trace.weights, expected_info.trace.weights)
     assert actual_info.trace.formula.program_fingerprint == (
         expected_info.trace.formula.program_fingerprint
@@ -537,7 +537,7 @@ def test_dynamic_fold_routed_formula_pulse_component_graph_and_round_trip(
 
 def test_fold_source_contract_binding_is_manifest_owned_and_fail_closed() -> None:
     source = _DynamicFoldSource()
-    fold = alpha.Fold(active_count=2).bind_source_contract(source)
+    fold = mechanisms.Fold(active_count=2).bind_source_contract(source)
     binding = arti.component_spec(fold).config["source_contract_binding"]
 
     assert binding["source_ref"] == source._component_reference
@@ -561,12 +561,12 @@ def test_fold_source_contract_binding_is_manifest_owned_and_fail_closed() -> Non
 
 def test_fold_source_preflight_rejects_payload_aliases_and_binding_reuse() -> None:
     source = _DynamicFoldSource()
-    fold = alpha.Fold(active_count=2).bind_source_contract(source)
+    fold = mechanisms.Fold(active_count=2).bind_source_contract(source)
     payload = torch.randn(1, 4, 2)
     query = torch.randn(1, 2)
 
     public_parameters = inspect.signature(
-        alpha.ReversibleTopology.fold_from_source
+        mechanisms.ReversibleTopology.fold_from_source
     ).parameters
     assert "source_provenance_fingerprint" not in public_parameters
     assert "_source_binding" not in public_parameters
@@ -579,7 +579,7 @@ def test_fold_source_preflight_rejects_payload_aliases_and_binding_reuse() -> No
         payload,
         (torch.randn(1, 4, 2), query),
     )
-    other_fold = alpha.Fold(active_count=2).bind_source_contract(source)
+    other_fold = mechanisms.Fold(active_count=2).bind_source_contract(source)
     with pytest.raises(ValueError, match="another binding"):
         other_fold.from_source(
             payload,
@@ -590,35 +590,35 @@ def test_fold_source_preflight_rejects_payload_aliases_and_binding_reuse() -> No
 
 def test_bound_fold_component_round_trip_requires_matching_rebind(tmp_path) -> None:
     source = _DynamicFoldSource()
-    fold = alpha.Fold(active_count=2).bind_source_contract(source).eval()
+    fold = mechanisms.Fold(active_count=2).bind_source_contract(source).eval()
     saved = arti.save(fold, tmp_path / "bound-fold.arti.st")
 
     target_source = _DynamicFoldSource()
-    target = alpha.Fold(active_count=2).bind_source_contract(target_source).eval()
+    target = mechanisms.Fold(active_count=2).bind_source_contract(target_source).eval()
     arti.load(saved.weights_path, model=target)
 
-    unbound = alpha.Fold(active_count=2).eval()
+    unbound = mechanisms.Fold(active_count=2).eval()
     with pytest.raises(ValueError, match="component (graph|state contract) does not match"):
         arti.load(saved.weights_path, model=unbound)
 
 
 def test_iterative_routed_formula_requeries_committed_workspace() -> None:
-    program = alpha.FormulaFabricProgram(
+    program = mechanisms.FormulaFabricProgram(
         arena_capacity=2,
         feature_dim=1,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 0),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 0),),),
         domain="iterative-route-test",
     )
-    compute = alpha.FormulaFabricCompute(
-        alpha.FormulaFabric(program),
+    compute = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaFabric(program),
         active_count=2,
     )
     source = _StateSwitchingRouteSource(program)
-    routed = alpha.RoutedFormulaFabricCompute(compute, source)
-    iterative = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=2)
+    routed = mechanisms.RoutedFormulaFabricCompute(compute, source)
+    iterative = mechanisms.IterativeRoutedFormulaFabricCompute(routed, steps=2)
     value = torch.tensor([[[1.0], [2.0]]], requires_grad=True)
     support = torch.ones(1, 2, dtype=torch.bool)
-    workspace = alpha.ActiveWorkspace(value, support, support, support)
+    workspace = mechanisms.ActiveWorkspace(value, support, support, support)
 
     initial_route, _ = source(workspace)
     frozen_once = compute(workspace, formula_route=initial_route)
@@ -640,11 +640,11 @@ def test_iterative_routed_formula_requeries_committed_workspace() -> None:
 
 def test_iterative_routed_formula_component_round_trip(tmp_path) -> None:
     routed, _route_source, _compute = _stack()
-    source = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=3).eval()
+    source = mechanisms.IterativeRoutedFormulaFabricCompute(routed, steps=3).eval()
     expected = source(_workspace()).value
     saved = arti.save(source, tmp_path / "iterative-route.arti.st")
     target_routed, _target_route_source, _target_compute = _stack()
-    target = alpha.IterativeRoutedFormulaFabricCompute(
+    target = mechanisms.IterativeRoutedFormulaFabricCompute(
         target_routed,
         steps=3,
     ).eval()
@@ -670,9 +670,9 @@ def test_iterative_routed_formula_admits_cumulative_cost_before_route() -> None:
     per_iteration = source.operation_bytes_upper_bound(
         workspace
     ) + compute.operation_bytes_upper_bound(workspace)
-    tight = alpha.ContractLimits(max_operation_bytes=per_iteration + 1)
+    tight = mechanisms.ContractLimits(max_operation_bytes=per_iteration + 1)
     routed, source, compute = _stack(limits=tight)
-    iterative = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=2)
+    iterative = mechanisms.IterativeRoutedFormulaFabricCompute(routed, steps=2)
 
     with pytest.raises(ValueError, match="cumulative operation byte limits"):
         iterative(workspace)
@@ -681,13 +681,13 @@ def test_iterative_routed_formula_admits_cumulative_cost_before_route() -> None:
 def test_route_limits_change_transitive_runtime_fingerprints() -> None:
     default_routed, default_source, _ = _stack()
     tight_routed, tight_source, _ = _stack(
-        limits=alpha.ContractLimits(max_operation_bytes=1_000_000)
+        limits=mechanisms.ContractLimits(max_operation_bytes=1_000_000)
     )
-    default_iterative = alpha.IterativeRoutedFormulaFabricCompute(
+    default_iterative = mechanisms.IterativeRoutedFormulaFabricCompute(
         default_routed,
         steps=2,
     )
-    tight_iterative = alpha.IterativeRoutedFormulaFabricCompute(
+    tight_iterative = mechanisms.IterativeRoutedFormulaFabricCompute(
         tight_routed,
         steps=2,
     )
@@ -696,7 +696,7 @@ def test_route_limits_change_transitive_runtime_fingerprints() -> None:
     assert default_routed.config_fingerprint != tight_routed.config_fingerprint
     assert default_iterative.config_fingerprint != tight_iterative.config_fingerprint
     with pytest.raises(AttributeError):
-        default_source.limits = alpha.ContractLimits(max_operation_bytes=1_000_000)
+        default_source.limits = mechanisms.ContractLimits(max_operation_bytes=1_000_000)
 
 
 def test_routed_compute_component_graph_and_round_trip(tmp_path) -> None:
@@ -736,7 +736,7 @@ def test_routed_compute_cuda_fullgraph(dtype: torch.dtype) -> None:
     intervened = torch.tensor(
         [[False, False, True]], device="cuda"
     ).expand(2, -1)
-    workspace = alpha.ActiveWorkspace(value, support, support, intervened)
+    workspace = mechanisms.ActiveWorkspace(value, support, support, intervened)
 
     actual = compiled(workspace).value
     actual.float().square().mean().backward()
@@ -752,9 +752,9 @@ def test_routed_compute_cuda_fullgraph(dtype: torch.dtype) -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_routed_formula_full_pulse_cuda_fullgraph() -> None:
     routed, _source, _compute = _stack()
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,
@@ -768,18 +768,18 @@ def test_routed_formula_full_pulse_cuda_fullgraph() -> None:
     intervened = torch.tensor(
         [[False, False, True]], device="cuda"
     ).expand(2, -1)
-    domain = alpha.SupportDomain.for_tensor(
+    domain = mechanisms.SupportDomain.for_tensor(
         mask,
         domain_id="compiled-route-pulse",
         owner_ref="arti/pulse@2",
         partition_id="world",
         transition_id="fullgraph",
     )
-    world = alpha.TensorEnvelope(alpha.EnvelopeRef.WORLD, value, mask, domain)
-    supports = alpha.PulseSupports(
-        alpha.SupportMask(alpha.SupportKind.OBSERVED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.EXPOSED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.INTERVENED, intervened, domain),
+    world = mechanisms.TensorEnvelope(mechanisms.EnvelopeRef.WORLD, value, mask, domain)
+    supports = mechanisms.PulseSupports(
+        mechanisms.SupportMask(mechanisms.SupportKind.OBSERVED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.EXPOSED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.INTERVENED, intervened, domain),
         validity=mask,
     )
 
@@ -793,7 +793,7 @@ def test_routed_formula_full_pulse_cuda_fullgraph() -> None:
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_iterative_routed_formula_cuda_fullgraph(dtype: torch.dtype) -> None:
     routed, route_source, _compute = _stack()
-    iterative = alpha.IterativeRoutedFormulaFabricCompute(
+    iterative = mechanisms.IterativeRoutedFormulaFabricCompute(
         routed,
         steps=3,
     ).cuda().to(dtype).train()
@@ -804,7 +804,7 @@ def test_iterative_routed_formula_cuda_fullgraph(dtype: torch.dtype) -> None:
         dtype=dtype,
     ).expand(2, -1, -1).clone().requires_grad_(True)
     support = torch.ones(2, 3, dtype=torch.bool, device="cuda")
-    workspace = alpha.ActiveWorkspace(value, support, support, support)
+    workspace = mechanisms.ActiveWorkspace(value, support, support, support)
 
     actual = compiled(workspace).value
     actual.float().square().mean().backward()
@@ -824,10 +824,10 @@ def test_iterative_routed_formula_pulse_cuda_fullgraph_diagnostics(
 ) -> None:
     torch._dynamo.reset()
     routed, route_source, _compute = _stack()
-    iterative = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=3)
-    topology = alpha.ReversibleTopology(active_count=3)
+    iterative = mechanisms.IterativeRoutedFormulaFabricCompute(routed, steps=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=iterative,
         unfold=unfold,
@@ -844,7 +844,7 @@ def test_iterative_routed_formula_pulse_cuda_fullgraph_diagnostics(
     result.value.float().square().mean().backward()
 
     info = result.diagnostics.compute
-    assert isinstance(info, alpha.IterativeRoutedFormulaFabricComputeInfo)
+    assert isinstance(info, mechanisms.IterativeRoutedFormulaFabricComputeInfo)
     assert info.executed_steps == 3
     assert len(info.iterations) == 3
     assert value.grad is not None and torch.isfinite(value.grad).all()
@@ -862,7 +862,7 @@ def test_dynamic_fold_weighted_routed_formula_cuda_fullgraph(
     class CompiledJointPath(torch.nn.Module):
         def __init__(
             self,
-            pulse: alpha.AdaptivePulse,
+            pulse: mechanisms.AdaptivePulse,
             topology_source: torch.nn.Module,
         ) -> None:
             super().__init__()
@@ -871,11 +871,11 @@ def test_dynamic_fold_weighted_routed_formula_cuda_fullgraph(
 
         def forward(
             self,
-            world: alpha.TensorEnvelope,
-            supports: alpha.PulseSupports,
+            world: mechanisms.TensorEnvelope,
+            supports: mechanisms.PulseSupports,
             factors: torch.Tensor,
             prepared_inputs: object,
-        ) -> alpha.PulseOutput:
+        ) -> mechanisms.PulseOutput:
             return self.pulse.forward(
                 world,
                 supports,
@@ -885,14 +885,14 @@ def test_dynamic_fold_weighted_routed_formula_cuda_fullgraph(
             )
 
     routed, route_source, _compute = _stack(weighted=True)
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=3,
-        surrogate=alpha.SoftTopKTopologySurrogate(),
+        surrogate=mechanisms.SoftTopKTopologySurrogate(),
     )
     fold, unfold = topology.operations()
     topology_source = _DynamicFoldSource().cuda().to(dtype).train()
     fold.bind_source_contract(topology_source)
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=routed,
         unfold=unfold,

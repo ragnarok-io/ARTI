@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from arti import ARTILayer, build_participant_context, last_non_assistant_participant
+from arti import build_participant_context, last_non_assistant_participant
+from arti.legacy import ARTILayer
 
 
 def test_last_non_assistant_participant_ignores_assistant_and_padding() -> None:

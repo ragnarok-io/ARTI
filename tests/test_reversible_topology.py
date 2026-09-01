@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 from arti.reversible_topology import FoldRecord, FoldedTensor
 
 
@@ -17,9 +17,9 @@ def _markers(batch: int = 2, length: int = 4, dim: int = 3) -> torch.Tensor:
 
 def test_fixed_topology_fold_and_unfold_are_exact() -> None:
     x = _markers()
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     fold, unfold = topology.operations()
 
@@ -35,7 +35,7 @@ def test_fixed_topology_fold_and_unfold_are_exact() -> None:
 def test_masked_instances_do_not_displace_valid_active_instances() -> None:
     x = _markers(batch=1)
     mask = torch.tensor([[False, True, False, True]])
-    fold = alpha.Fold(active_count=2)
+    fold = mechanisms.Fold(active_count=2)
 
     state = fold(x, mask)
 
@@ -56,7 +56,7 @@ def test_ragged_and_all_masked_batches_have_valid_records() -> None:
             [True, True, True, True, True],
         ]
     )
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
 
     state = topology.fold(x, mask)
     restored = topology.unfold(state)
@@ -69,9 +69,9 @@ def test_ragged_and_all_masked_batches_have_valid_records() -> None:
 def test_fold_payload_does_not_alias_the_original_input_or_public_record_views() -> None:
     original = _markers(batch=1)
     x = original.clone()
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[3, 1, 0, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[3, 1, 0, 2]),
     )
     state = topology.fold(x)
 
@@ -86,9 +86,9 @@ def test_fold_payload_does_not_alias_the_original_input_or_public_record_views()
 
 def test_active_and_folded_mutations_return_to_their_host_slots_only() -> None:
     x = _markers(batch=1, length=4, dim=2)
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     state = topology.fold(x)
 
@@ -109,9 +109,9 @@ def test_active_and_folded_mutations_return_to_their_host_slots_only() -> None:
 
 def test_active_overlay_matches_canonical_transport_and_gradients() -> None:
     torch.manual_seed(113)
-    left = alpha.ReversibleTopology(
+    left = mechanisms.ReversibleTopology(
         active_count=3,
-        policy=alpha.LearnedTopologyPolicy(dim=4),
+        policy=mechanisms.LearnedTopologyPolicy(dim=4),
     )
     right = deepcopy(left)
     x_left = torch.randn(2, 8, 4, requires_grad=True)
@@ -144,12 +144,12 @@ def test_active_overlay_matches_canonical_transport_and_gradients() -> None:
 
 
 def test_fold2_public_signatures_do_not_expose_pulse_observation_support() -> None:
-    assert "observed" not in inspect.signature(alpha.ReversibleTopology.fold).parameters
-    assert "observed" not in inspect.signature(alpha.Fold.forward).parameters
+    assert "observed" not in inspect.signature(mechanisms.ReversibleTopology.fold).parameters
+    assert "observed" not in inspect.signature(mechanisms.Fold.forward).parameters
 
 
 def test_active_overlay_rejects_tampered_non_bijection_record() -> None:
-    topology = alpha.ReversibleTopology(active_count=2)
+    topology = mechanisms.ReversibleTopology(active_count=2)
     fold, unfold = topology.operations()
     overlay = fold._overlay(torch.randn(1, 4, 3))
     broken = overlay.record._trusted_permutation().clone()
@@ -168,13 +168,13 @@ def test_observation_batch_is_planned_once_with_independent_topologies() -> None
 
         def forward(self, x: torch.Tensor, mask: torch.Tensor):
             self.calls += 1
-            return alpha.TopologyProposal(alpha.TopologyAction(x[..., 0]))
+            return mechanisms.TopologyProposal(mechanisms.TopologyAction(x[..., 0]))
 
         def topology_contract(self) -> dict[str, object]:
             return {"ref": "test/counting-policy@1"}
 
     policy = CountingPolicy()
-    topology = alpha.ReversibleTopology(active_count=1, policy=policy)
+    topology = mechanisms.ReversibleTopology(active_count=1, policy=policy)
     x = torch.tensor([[[[9.0], [1.0], [0.0]], [[0.0], [1.0], [9.0]]]])
     overlay = topology._fold_overlay(x, torch.ones(1, 2, 3, dtype=torch.bool))
 
@@ -185,9 +185,9 @@ def test_observation_batch_is_planned_once_with_independent_topologies() -> None
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_active_overlay_cuda_inductor_fullgraph() -> None:
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=3,
-        policy=alpha.FixedTopologyPolicy(order=[5, 1, 3, 0, 4, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[5, 1, 3, 0, 4, 2]),
     ).cuda()
     fold, unfold = topology.operations()
 
@@ -211,8 +211,8 @@ def test_learned_active_overlay_cuda_fullgraph_preserves_policy_gradient() -> No
     class OverlayModule(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.topology = alpha.ReversibleTopology(
-                3, policy=alpha.LearnedTopologyPolicy(dim=4)
+            self.topology = mechanisms.ReversibleTopology(
+                3, policy=mechanisms.LearnedTopologyPolicy(dim=4)
             )
             self.fold, self.unfold = self.topology.operations()
 
@@ -246,13 +246,13 @@ def test_learned_active_overlay_cuda_fullgraph_preserves_policy_gradient() -> No
 
 def test_nested_topologies_unfold_in_lifo_order() -> None:
     x = _markers(batch=1, length=6, dim=2)
-    outer = alpha.ReversibleTopology(
+    outer = mechanisms.ReversibleTopology(
         active_count=4,
-        policy=alpha.FixedTopologyPolicy(order=[5, 1, 3, 0, 4, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[5, 1, 3, 0, 4, 2]),
     )
-    inner = alpha.ReversibleTopology(
+    inner = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
 
     outer_state = outer.fold(x)
@@ -265,9 +265,9 @@ def test_nested_topologies_unfold_in_lifo_order() -> None:
 
 def test_value_gradient_follows_only_the_selected_transport_path() -> None:
     x = _markers(batch=1, length=4, dim=1).requires_grad_()
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     state = topology.fold(x)
     y = topology.unfold(state.replace(active=state.active * 2)).value
@@ -282,9 +282,9 @@ def test_value_gradient_follows_only_the_selected_transport_path() -> None:
 def test_fold_unfold_round_trip_preserves_arbitrary_cotangent() -> None:
     x = _markers(batch=2, length=5, dim=3).requires_grad_()
     cotangent = torch.randn_like(x)
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=3,
-        policy=alpha.FixedTopologyPolicy(order=[4, 1, 3, 0, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[4, 1, 3, 0, 2]),
     )
 
     restored = topology.unfold(topology.fold(x)).value
@@ -307,11 +307,11 @@ def test_invalid_permutation_fails_and_inverse_needs_only_transport_contract() -
             topology_config_fingerprint="test",
         )
 
-    source = alpha.ReversibleTopology(active_count=2)
+    source = mechanisms.ReversibleTopology(active_count=2)
     state = source.fold(x)
-    different = alpha.ReversibleTopology(
+    different = mechanisms.ReversibleTopology(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[1, 0, 2, 3]),
+        policy=mechanisms.FixedTopologyPolicy(order=[1, 0, 2, 3]),
     )
     restored = different.unfold(state)
     assert torch.equal(restored.value, x)
@@ -320,7 +320,7 @@ def test_invalid_permutation_fails_and_inverse_needs_only_transport_contract() -
 
 def test_mask_lineage_tampering_is_rejected() -> None:
     x = _markers(batch=1)
-    topology = alpha.ReversibleTopology(active_count=2)
+    topology = mechanisms.ReversibleTopology(active_count=2)
     state = topology.fold(x, torch.tensor([[True, True, False, False]]))
     tampered = FoldedTensor(
         active=state.active,
@@ -335,7 +335,7 @@ def test_mask_lineage_tampering_is_rejected() -> None:
 
 
 def test_fold_record_metadata_is_immutable_after_construction() -> None:
-    record = alpha.ReversibleTopology(2).fold(_markers(batch=1)).record
+    record = mechanisms.ReversibleTopology(2).fold(_markers(batch=1)).record
 
     with pytest.raises(AttributeError, match="immutable"):
         record.active_count = 3
@@ -376,13 +376,13 @@ def test_component_versions_and_dependencies_are_explicit() -> None:
 
 
 def test_state_dict_round_trip_preserves_the_fixed_topology() -> None:
-    source = alpha.Fold(
+    source = mechanisms.Fold(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[3, 1, 0, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[3, 1, 0, 2]),
     )
-    target = alpha.Fold(
+    target = mechanisms.Fold(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[0, 1, 2, 3]),
+        policy=mechanisms.FixedTopologyPolicy(order=[0, 1, 2, 3]),
     )
     target.load_state_dict(source.state_dict())
     x = _markers(batch=1)
@@ -392,14 +392,14 @@ def test_state_dict_round_trip_preserves_the_fixed_topology() -> None:
 
 
 def test_arti_st_round_trip_preserves_component_versions_and_order(tmp_path) -> None:
-    source = alpha.Fold(
+    source = mechanisms.Fold(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     ).eval()
     saved = arti.save(source, tmp_path / "topology.arti.st")
-    target = alpha.Fold(
+    target = mechanisms.Fold(
         active_count=2,
-        policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     ).eval()
 
     loaded = arti.load(saved.weights_path, model=target)
@@ -420,7 +420,7 @@ def test_arti_st_round_trip_preserves_component_versions_and_order(tmp_path) -> 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_cpu_dtype_round_trip(dtype: torch.dtype) -> None:
     x = _markers(batch=1).to(dtype)
-    topology = alpha.ReversibleTopology(active_count=2)
+    topology = mechanisms.ReversibleTopology(active_count=2)
     restored = topology.unfold(topology.fold(x)).value
     assert restored.dtype == dtype
     assert torch.equal(restored, x)
@@ -428,7 +428,7 @@ def test_cpu_dtype_round_trip(dtype: torch.dtype) -> None:
 
 def test_single_instance_has_an_empty_folded_payload() -> None:
     x = _markers(batch=2, length=1, dim=3)
-    topology = alpha.ReversibleTopology(active_count=1)
+    topology = mechanisms.ReversibleTopology(active_count=1)
     state = topology.fold(x)
 
     assert state.active.shape == (2, 1, 3)
@@ -437,8 +437,8 @@ def test_single_instance_has_an_empty_folded_payload() -> None:
 
 
 def test_private_observed_transport_is_distinct_from_public_fold_validity() -> None:
-    policy = alpha.LearnedTopologyPolicy(dim=3)
-    topology = alpha.ReversibleTopology(active_count=2, policy=policy)
+    policy = mechanisms.LearnedTopologyPolicy(dim=3)
+    topology = mechanisms.ReversibleTopology(active_count=2, policy=policy)
     first = torch.randn(2, 6, 3)
     second = first.clone()
     second[:, 3:] = torch.randn_like(second[:, 3:]) * 1000
@@ -454,7 +454,7 @@ def test_private_observed_transport_is_distinct_from_public_fold_validity() -> N
 
 
 def test_observed_support_must_be_valid_and_cover_active_width() -> None:
-    topology = alpha.ReversibleTopology(active_count=2)
+    topology = mechanisms.ReversibleTopology(active_count=2)
     x = torch.randn(1, 4, 3)
     validity = torch.tensor([[True, True, False, True]])
 
@@ -476,9 +476,9 @@ def test_observed_support_must_be_valid_and_cover_active_width() -> None:
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cuda_round_trip_and_gradient(dtype: torch.dtype) -> None:
     x = _markers(batch=2, length=8, dim=4).cuda().to(dtype).requires_grad_()
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=3,
-        policy=alpha.FixedTopologyPolicy(order=[7, 1, 4, 0, 6, 3, 5, 2]),
+        policy=mechanisms.FixedTopologyPolicy(order=[7, 1, 4, 0, 6, 3, 5, 2]),
     ).cuda()
     state = topology.fold(x)
     result = topology.unfold(state.replace(active=state.active + 1)).value
@@ -498,7 +498,7 @@ def test_cuda_fullgraph_compile_preserves_the_topology_contract(
     class CompiledTopology(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            topology = alpha.ReversibleTopology(active_count=2)
+            topology = mechanisms.ReversibleTopology(active_count=2)
             self.fold, self.unfold = topology.operations()
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:

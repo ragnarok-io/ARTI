@@ -1,10 +1,10 @@
 """PyTorch backend layer re-exports."""
 
+from ..arti_layer import ARTILayer
 from ..layers import (
     ARTIDynamicStateLayer,
     ARTILatentRecallField,
     ARTILatentTensorLayer,
-    ARTILayer,
     ARTIPhaseMixer,
     ARTIVirtualInterfaceMixer,
 )

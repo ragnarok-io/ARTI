@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     OperandKind,
     TypedBankFormulaTopologyPolicy,
     TypedTopologyOperandBank,
@@ -14,7 +14,7 @@ from arti.component_registry import component_spec
 
 
 def test_typed_topology_matches_v1_values_and_gradients() -> None:
-    old_bank = arti.alpha.TopologyOperandBank(
+    old_bank = arti.mechanisms.TopologyOperandBank(
         slots=5,
         key_dim=3,
         factor_dim=2,
@@ -28,7 +28,7 @@ def test_typed_topology_matches_v1_values_and_gradients() -> None:
         seed=7,
         value_seed=11,
     )
-    old = arti.alpha.BankFormulaTopologyPolicy(dim=4, banks=[old_bank], key_dim=3)
+    old = arti.mechanisms.BankFormulaTopologyPolicy(dim=4, banks=[old_bank], key_dim=3)
     typed = TypedBankFormulaTopologyPolicy(dim=4, banks=[typed_bank], key_dim=3)
     x = torch.randn(2, 6, 4)
     mask = torch.tensor(
@@ -80,7 +80,7 @@ def test_typed_formula_rejects_wrong_source_asset_and_old_formula() -> None:
             dim=4,
             banks=[source],
             key_dim=3,
-            formula=arti.alpha.TopologyPriorityFormula(factor_dim=2),
+            formula=arti.mechanisms.TopologyPriorityFormula(factor_dim=2),
         )
 
 
@@ -107,10 +107,10 @@ def test_typed_topology_versions_and_dependency_graph_are_explicit() -> None:
 def test_typed_policy_drives_real_reversible_topology_and_bank_gradient() -> None:
     bank = TypedTopologyOperandBank(slots=6, key_dim=3, factor_dim=2)
     policy = TypedBankFormulaTopologyPolicy(dim=4, banks=[bank], key_dim=3)
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
         policy=policy,
-        surrogate=arti.alpha.SoftTopKTopologySurrogate(temperature=0.5),
+        surrogate=arti.mechanisms.SoftTopKTopologySurrogate(temperature=0.5),
     )
     x = torch.randn(2, 5, 4, requires_grad=True)
     mask = torch.tensor([[True, True, True, False, True], [True, True, True, True, True]])

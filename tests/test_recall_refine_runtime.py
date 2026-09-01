@@ -272,19 +272,19 @@ def test_recall_asset_identity_does_not_include_runtime_budget() -> None:
 
 
 def test_recall_runtime_state_contract_does_not_include_runtime_budget() -> None:
-    updater_a = arti.alpha.NormalizedDeltaRecallValueUpdater(
+    updater_a = arti.mechanisms.NormalizedDeltaRecallValueUpdater(
         hidden_dim=4,
         slots=4,
         workspace_dim=8,
     )
-    updater_b = arti.alpha.NormalizedDeltaRecallValueUpdater(
+    updater_b = arti.mechanisms.NormalizedDeltaRecallValueUpdater(
         hidden_dim=4,
         slots=4,
         workspace_dim=8,
     )
     updater_b.load_state_dict(updater_a.state_dict())
-    shallow = arti.alpha.RecallRuntime(updater_a, arti.Recall(4, 4))
-    deep = arti.alpha.RecallRuntime(updater_b, arti.Recall(4, 4))
+    shallow = arti.mechanisms.RecallRuntime(updater_a, arti.Recall(4, 4))
+    deep = arti.mechanisms.RecallRuntime(updater_b, arti.Recall(4, 4))
 
     assert shallow.contract_fingerprint == deep.contract_fingerprint
     assert arti.component_ref(shallow) == "arti/recall-runtime@1"

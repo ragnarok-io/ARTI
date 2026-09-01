@@ -6,18 +6,18 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 from arti import formula_fabric as formula_fabric_module
 from arti.vnext_contracts import ContractLimits
 
 
-def program() -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def program() -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
         steps=(
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.MULTIPLY, 3),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.MULTIPLY, 3),),
         ),
     )
 
@@ -27,21 +27,21 @@ def route(
     batch: int = 2,
     device: torch.device | str = "cpu",
     dtype: torch.dtype = torch.float32,
-) -> alpha.FormulaRoutePlan:
+) -> mechanisms.FormulaRoutePlan:
     weights = torch.zeros(batch, 2, 1, 2, 4, device=device, dtype=dtype)
     weights[:, 0, 0, 0, 0] = 1
     weights[:, 0, 0, 1, 1] = 1
     weights[:, 1, 0, 0, 2] = 1
     weights[:, 1, 0, 1, 1] = 1
     enabled = torch.ones(batch, 2, 1, dtype=torch.bool, device=device)
-    return alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    return mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
 def arena(
     *,
     device: torch.device | str = "cpu",
     requires_grad: bool = False,
-) -> alpha.FormulaArenaState:
+) -> mechanisms.FormulaArenaState:
     value = torch.tensor(
         [
             [[2.0, 3.0], [4.0, 5.0]],
@@ -51,14 +51,14 @@ def arena(
         requires_grad=requires_grad,
     )
     mask = torch.ones(2, 2, dtype=torch.bool, device=device)
-    state = alpha.FormulaArenaState.from_tensor(value, mask, capacity=4)
+    state = mechanisms.FormulaArenaState.from_tensor(value, mask, capacity=4)
     if requires_grad:
         state.value.retain_grad()
     return state
 
 
 def test_hard_fabric_executes_formula_chain_and_ssa_versions() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     source = arena()
 
     result = fabric(source, route())
@@ -77,10 +77,10 @@ def test_hard_fabric_executes_formula_chain_and_ssa_versions() -> None:
 
 
 def test_program_owns_an_immutable_normalized_schedule() -> None:
-    cell = alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2)
+    cell = mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2)
     step = [cell]
     steps = [step]
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=2,
         steps=steps,
@@ -96,9 +96,9 @@ def test_program_owns_an_immutable_normalized_schedule() -> None:
 
 def test_route_plan_owns_weights_without_breaking_source_gradients() -> None:
     logits = torch.randn(2, 2, 1, 2, 4, requires_grad=True)
-    weights = alpha.straight_through_route(logits)
+    weights = mechanisms.straight_through_route(logits)
     enabled = torch.ones(2, 2, 1, dtype=torch.bool)
-    plan = alpha.FormulaRoutePlan(
+    plan = mechanisms.FormulaRoutePlan(
         weights,
         enabled,
         enabled,
@@ -128,11 +128,11 @@ def test_route_plan_rejects_ownership_budget_before_cloning(monkeypatch) -> None
         side_effect=AssertionError("clone must not run before admission"),
     ):
         with pytest.raises(ValueError, match="ownership exceeds max_operation_bytes"):
-            alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+            mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
 def test_hard_executor_matches_independent_reference_interpreter() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     source = arena()
     plan = route()
 
@@ -145,15 +145,15 @@ def test_hard_executor_matches_independent_reference_interpreter() -> None:
 
 
 def test_straight_through_route_is_hard_forward_and_differentiable() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     source = arena(requires_grad=True)
     logits = torch.full((2, 2, 1, 2, 4), -4.0, requires_grad=True)
     preferred = torch.tensor([[[[[0], [1]]], [[[2], [1]]]]]).expand(2, -1, -1, -1, -1)
     with torch.no_grad():
         logits.scatter_(-1, preferred, 4.0)
-    weights = alpha.straight_through_route(logits)
+    weights = mechanisms.straight_through_route(logits)
     enabled = torch.ones(2, 2, 1, dtype=torch.bool)
-    plan = alpha.FormulaRoutePlan(
+    plan = mechanisms.FormulaRoutePlan(
         weights,
         enabled,
         enabled,
@@ -172,18 +172,18 @@ def test_straight_through_route_is_hard_forward_and_differentiable() -> None:
 
 
 def test_synchronous_step_does_not_observe_another_cell_write() -> None:
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=1,
         steps=(
             (
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.MULTIPLY, 1),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.MULTIPLY, 1),
             ),
         ),
     )
     value = torch.tensor([[[2.0], [3.0], [10.0]]])
-    source = alpha.FormulaArenaState(
+    source = mechanisms.FormulaArenaState(
         value,
         torch.ones(1, 3, dtype=torch.bool),
         torch.zeros(1, 3, dtype=torch.int64),
@@ -195,9 +195,9 @@ def test_synchronous_step_does_not_observe_another_cell_write() -> None:
     weights[0, 0, 1, 1, 0] = 1
     enabled = torch.ones(1, 1, 2, dtype=torch.bool)
 
-    result = alpha.FormulaFabric(schedule)(
+    result = mechanisms.FormulaFabric(schedule)(
         source,
-        alpha.FormulaRoutePlan(weights, enabled, enabled, enabled),
+        mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled),
     )
 
     assert result.state.value[0, 2, 0].item() == 5.0
@@ -206,18 +206,18 @@ def test_synchronous_step_does_not_observe_another_cell_write() -> None:
 
 def test_commit_mask_can_run_a_cost_matched_sham_without_mutation() -> None:
     source = arena()
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
     )
     weights = route().weights[:, :1]
     enabled = torch.ones(2, 1, 1, dtype=torch.bool)
-    base = alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    base = mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
     commit = torch.zeros_like(base.commit_mask)
-    result = alpha.FormulaFabric(schedule)(
+    result = mechanisms.FormulaFabric(schedule)(
         source,
-        alpha.FormulaRoutePlan(
+        mechanisms.FormulaRoutePlan(
             base.weights,
             base.valid_mask,
             base.fire_mask,
@@ -232,18 +232,18 @@ def test_commit_mask_can_run_a_cost_matched_sham_without_mutation() -> None:
 
 def test_ssa_versions_advance_only_for_committed_batch_rows() -> None:
     source = arena()
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
     )
     weights = route().weights[:, :1]
     enabled = torch.ones(2, 1, 1, dtype=torch.bool)
     commit = torch.tensor([[[True]], [[False]]])
 
-    result = alpha.FormulaFabric(schedule)(
+    result = mechanisms.FormulaFabric(schedule)(
         source,
-        alpha.FormulaRoutePlan(weights, enabled, enabled, commit),
+        mechanisms.FormulaRoutePlan(weights, enabled, enabled, commit),
     )
 
     torch.testing.assert_close(
@@ -259,14 +259,14 @@ def test_ssa_versions_advance_only_for_committed_batch_rows() -> None:
 
 def test_contracts_fail_closed() -> None:
     source = arena()
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     base = route()
     soft = base.weights.clone()
     soft[..., 0, :] = 0.25
     with pytest.raises(ValueError, match="exactly one-hot"):
         fabric(
             source,
-            alpha.FormulaRoutePlan(
+            mechanisms.FormulaRoutePlan(
                 soft,
                 base.valid_mask,
                 base.fire_mask,
@@ -274,7 +274,7 @@ def test_contracts_fail_closed() -> None:
             ),
         )
 
-    invalid_source = alpha.FormulaArenaState(
+    invalid_source = mechanisms.FormulaArenaState(
         source.value,
         source.mask.clone().scatter(1, torch.tensor([[1], [1]]), False),
         source.version,
@@ -283,27 +283,27 @@ def test_contracts_fail_closed() -> None:
         fabric(invalid_source, base)
 
     with pytest.raises(ValueError, match="write a slot twice"):
-        alpha.FormulaFabricProgram(
+        mechanisms.FormulaFabricProgram(
             arena_capacity=3,
             feature_dim=2,
             steps=(
                 (
-                    alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),
-                    alpha.FormulaInvocation(alpha.FormulaPrimitive.SUBTRACT, 2),
+                    mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),
+                    mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.SUBTRACT, 2),
                 ),
             ),
         )
 
 
 def test_invalid_slots_are_numerically_isolated_from_formula_execution() -> None:
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=1,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
     )
     value = torch.tensor([[[2.0], [3.0], [float("nan")]]], requires_grad=True)
     mask = torch.tensor([[True, True, False]])
-    state = alpha.FormulaArenaState(
+    state = mechanisms.FormulaArenaState(
         value,
         mask,
         torch.zeros(1, 3, dtype=torch.int64),
@@ -313,9 +313,9 @@ def test_invalid_slots_are_numerically_isolated_from_formula_execution() -> None
     weights[..., 1, 1] = 1
     enabled = torch.ones(1, 1, 1, dtype=torch.bool)
 
-    result = alpha.FormulaCommitBlend(alpha.FormulaFabric(schedule))(
+    result = mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(schedule))(
         state,
-        alpha.FormulaRoutePlan(weights, enabled, enabled, enabled),
+        mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled),
         torch.ones(1, 1, 1),
     )
     result.state.value[:, 2].sum().backward()
@@ -326,28 +326,28 @@ def test_invalid_slots_are_numerically_isolated_from_formula_execution() -> None
 
 def test_valid_non_finite_arena_value_fails_closed() -> None:
     source = arena()
-    invalid = alpha.FormulaArenaState(
+    invalid = mechanisms.FormulaArenaState(
         source.value.clone().index_fill(1, torch.tensor([0]), float("inf")),
         source.mask,
         source.version,
     )
 
     with pytest.raises(ValueError, match="valid Formula arena values must be finite"):
-        alpha.FormulaFabric(program())(invalid, route())
+        mechanisms.FormulaFabric(program())(invalid, route())
 
 
 def test_formula_fabric_has_versioned_alpha_identity() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
 
     assert arti.component_ref(fabric) == "arti/formula-fabric@1"
     spec = arti.component_spec(fabric)
-    assert spec.lifecycle == "alpha"
+    assert spec.lifecycle == "stable"
     assert spec.config_schema_version == 2
     assert spec.config["program_fingerprint"] == program().fingerprint
 
 
 def test_formula_fabric_rejects_runtime_allocation_over_limit() -> None:
-    fabric = alpha.FormulaFabric(
+    fabric = mechanisms.FormulaFabric(
         program(),
         limits=ContractLimits(max_operation_bytes=128),
     )
@@ -361,31 +361,31 @@ def test_formula_fabric_rejects_runtime_allocation_over_limit() -> None:
 
 
 def test_formula_fabric_rejects_static_tables_before_registration() -> None:
-    schedule = alpha.FormulaFabricProgram(
+    schedule = mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=1,
         steps=(
             (
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 0),
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 1),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 0),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 1),
             ),
             (
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 3),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 3),
             ),
             (
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 0),
-                alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 1),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 0),
+                mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 1),
             ),
         ),
     )
 
     with pytest.raises(ValueError, match="static table"):
-        alpha.FormulaFabric(schedule, limits=ContractLimits(max_elements=4))
+        mechanisms.FormulaFabric(schedule, limits=ContractLimits(max_elements=4))
 
 
 def test_formula_trace_is_an_independent_snapshot() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     plan = route()
     result = fabric(arena(), plan)
     original_formula = fabric._formula_ids.clone()
@@ -399,7 +399,7 @@ def test_formula_trace_is_an_independent_snapshot() -> None:
 
 
 def test_formula_fabric_revalidates_mutated_route_masks() -> None:
-    fabric = alpha.FormulaFabric(program())
+    fabric = mechanisms.FormulaFabric(program())
     plan = route()
     plan.fire_mask.zero_()
 
@@ -409,9 +409,9 @@ def test_formula_fabric_revalidates_mutated_route_masks() -> None:
 
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile is unavailable")
 def test_formula_fabric_fullgraph_forward_backward_matches_eager() -> None:
-    eager = alpha.FormulaFabric(program())
+    eager = mechanisms.FormulaFabric(program())
     compiled = torch.compile(
-        alpha.FormulaFabric(program()), backend="eager", fullgraph=True
+        mechanisms.FormulaFabric(program()), backend="eager", fullgraph=True
     )
     eager_source = arena(requires_grad=True)
     compiled_source = arena(requires_grad=True)
@@ -430,7 +430,7 @@ def test_formula_fabric_fullgraph_forward_backward_matches_eager() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_formula_fabric_cuda_parity_and_gradient() -> None:
-    fabric = alpha.FormulaFabric(program()).cuda()
+    fabric = mechanisms.FormulaFabric(program()).cuda()
     source = arena(device="cuda", requires_grad=True)
     plan = route(device="cuda")
 
@@ -444,8 +444,8 @@ def test_formula_fabric_cuda_parity_and_gradient() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_formula_fabric_cuda_fullgraph_forward_backward() -> None:
-    eager = alpha.FormulaFabric(program()).cuda()
-    compiled = torch.compile(alpha.FormulaFabric(program()).cuda(), fullgraph=True)
+    eager = mechanisms.FormulaFabric(program()).cuda()
+    compiled = torch.compile(mechanisms.FormulaFabric(program()).cuda(), fullgraph=True)
     eager_source = arena(device="cuda", requires_grad=True)
     compiled_source = arena(device="cuda", requires_grad=True)
     plan = route(device="cuda")

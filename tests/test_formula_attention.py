@@ -5,7 +5,7 @@ import torch
 from torch import Tensor, nn
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     ActiveWorkspace,
     FactorInterventionPolicy,
     FoldedWorkspace,
@@ -45,7 +45,7 @@ def folded_fixture(
     exposed: Tensor,
     intervened: Tensor,
     active_count: int = 4,
-) -> tuple[arti.alpha.ReversibleTopology, FoldedWorkspace]:
+) -> tuple[arti.mechanisms.ReversibleTopology, FoldedWorkspace]:
     validity = torch.ones(x.shape[:-1], dtype=torch.bool, device=x.device)
     domain = SupportDomain.for_tensor(
         validity,
@@ -60,9 +60,9 @@ def folded_fixture(
         SupportMask(SupportKind.INTERVENED, intervened, domain),
         validity=validity,
     )
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=active_count,
-        policy=arti.alpha.FixedTopologyPolicy(order=list(range(x.shape[-2]))),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=list(range(x.shape[-2]))),
     )
     state = topology.fold(x, validity)
     return topology, FoldedWorkspace(
@@ -185,7 +185,7 @@ def test_folded_workspace_commit_transports_selected_support_to_unfold() -> None
     )
 
     committed = folded.commit(attention(folded.active_workspace()))
-    reunited = arti.alpha.unfold_pulse_supports(committed.supports)
+    reunited = arti.mechanisms.unfold_pulse_supports(committed.supports)
 
     assert int(reunited.intervened.mask.sum()) == 2
     assert not reunited.intervened.mask[..., 4:].any()
@@ -238,7 +238,7 @@ def test_support_overflow_is_rejected_before_kernel_call() -> None:
 def test_empty_intervention_support_is_exact_identity_and_zero_recall_gradient() -> None:
     recall = arti.nn.Recall(dim=2, slots=4, activation="none")
     compute = SelectiveCompute(
-        arti.alpha.SelectiveRecallKernel(recall),
+        arti.mechanisms.SelectiveRecallKernel(recall),
         max_queries=2,
         max_sources=2,
     )
@@ -262,7 +262,7 @@ def test_empty_intervention_support_is_exact_identity_and_zero_recall_gradient()
 def test_selective_recall_matches_direct_packed_recall() -> None:
     recall = arti.nn.Recall(dim=3, slots=8, activation="none", identity_init=True)
     policy = RefinePolicy.fixed(3)
-    kernel = arti.alpha.SelectiveRecallKernel(recall, refine_policy=policy)
+    kernel = arti.mechanisms.SelectiveRecallKernel(recall, refine_policy=policy)
     compute = SelectiveCompute(kernel, max_queries=2, max_sources=3)
     value = torch.randn(2, 4, 3)
     exposed = torch.tensor([[True, True, True, False]]).expand(2, -1)
@@ -330,7 +330,7 @@ def test_selective_compute_cuda_inductor_fullgraph_forward_and_gradient() -> Non
 
 
 def test_selective_recall_component_binds_recall_and_refine_policy() -> None:
-    kernel = arti.alpha.SelectiveRecallKernel(
+    kernel = arti.mechanisms.SelectiveRecallKernel(
         arti.nn.Recall(dim=3, slots=4, activation="none"),
         refine_policy=RefinePolicy.fixed(2),
     )

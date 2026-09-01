@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from arti import ARTILayer
+import arti
 
 
 def main() -> None:
@@ -22,12 +22,17 @@ def main() -> None:
     coord_dim = 4
     hidden_dim = 24
 
-    layer = ARTILayer(
-        input_dim=input_dim,
-        coord_dim=coord_dim,
+    layer = arti.nn.Layer(
+        dim=input_dim,
         hidden_dim=hidden_dim,
-        recall_steps=1,
-        use_pairwise_context=True,
+        features=arti.features(
+            phase=True,
+            coord_dim=coord_dim,
+            visibility=True,
+            pairwise_context=True,
+            recall=True,
+            virtual_recall=True,
+        ),
     )
     recall_target = torch.nn.Linear(input_dim, hidden_dim)
 

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 from arti.tensor_transaction import (
     CommitReceipt,
     ConflictReceipt,
@@ -18,8 +18,8 @@ STATE = "2" * 64
 ABI = "3" * 64
 
 
-def runtime() -> alpha.VolatileTensorRuntime:
-    return alpha.VolatileTensorRuntime(
+def runtime() -> mechanisms.VolatileTensorRuntime:
+    return mechanisms.VolatileTensorRuntime(
         {"state": torch.zeros(1, 2)},
         world_id="branch-world",
         store_instance_id="branch-store",
@@ -29,10 +29,10 @@ def runtime() -> alpha.VolatileTensorRuntime:
 
 
 def bound(
-    store: alpha.VolatileTensorRuntime,
-    snapshot: alpha.TensorSnapshot,
-) -> alpha.BoundTensorRead:
-    return alpha.bind_external_tensor(
+    store: mechanisms.VolatileTensorRuntime,
+    snapshot: mechanisms.TensorSnapshot,
+) -> mechanisms.BoundTensorRead:
+    return mechanisms.bind_external_tensor(
         store,
         snapshot,
         "state",
@@ -40,7 +40,7 @@ def bound(
         partition_id="main",
         logical_id="state",
         role="formula-state",
-        authority=alpha.TensorAuthority.READ_WRITE,
+        authority=mechanisms.TensorAuthority.READ_WRITE,
         component_ref="arti/formula-fabric@1",
         component_config_fingerprint=CONFIG,
         state_schema_ref="arti/formula-arena-value@1",
@@ -50,10 +50,10 @@ def bound(
 
 
 def external(
-    item: alpha.BoundTensorRead,
+    item: mechanisms.BoundTensorRead,
     value: float,
-) -> alpha.ExternalTensorProposal:
-    return alpha.ExternalTensorProposal(
+) -> mechanisms.ExternalTensorProposal:
+    return mechanisms.ExternalTensorProposal(
         item.binding,
         torch.full((1, 2), value),
         producer_ref="arti/formula-fabric@1",
@@ -62,8 +62,8 @@ def external(
     )
 
 
-def work(*, steps: int = 2, operations: int = 8) -> alpha.BranchWorkReceipt:
-    return alpha.BranchWorkReceipt(
+def work(*, steps: int = 2, operations: int = 8) -> mechanisms.BranchWorkReceipt:
+    return mechanisms.BranchWorkReceipt(
         actual_steps=steps,
         formula_cells=4,
         route_applications=1,
@@ -76,8 +76,8 @@ def work(*, steps: int = 2, operations: int = 8) -> alpha.BranchWorkReceipt:
     )
 
 
-def spec(snapshot: alpha.TensorSnapshot, *, run_id: str = "run-1") -> alpha.BranchBatchSpec:
-    return alpha.BranchBatchSpec.from_snapshot(
+def spec(snapshot: mechanisms.TensorSnapshot, *, run_id: str = "run-1") -> mechanisms.BranchBatchSpec:
+    return mechanisms.BranchBatchSpec.from_snapshot(
         snapshot,
         run_id=run_id,
         branch_ids=("left", "right"),
@@ -87,18 +87,18 @@ def spec(snapshot: alpha.TensorSnapshot, *, run_id: str = "run-1") -> alpha.Bran
         input_fingerprint="6" * 64,
         rng_fingerprint="7" * 64,
         future_tape_fingerprint="8" * 64,
-        budgets=(alpha.BranchBudget(1, 4), alpha.BranchBudget(1, 4)),
+        budgets=(mechanisms.BranchBudget(1, 4), mechanisms.BranchBudget(1, 4)),
     )
 
 
 def overlay(
     branch_id: str,
-    item: alpha.BoundTensorRead,
+    item: mechanisms.BoundTensorRead,
     value: float,
     *,
-    branch_spec: alpha.BranchBatchSpec,
-    branch_work: alpha.BranchWorkReceipt | None = None,
-) -> alpha.OverlayProposal:
+    branch_spec: mechanisms.BranchBatchSpec,
+    branch_work: mechanisms.BranchWorkReceipt | None = None,
+) -> mechanisms.OverlayProposal:
     actual_work = work() if branch_work is None else branch_work
     inputs = [branch_spec.input_fingerprint]
     outputs = []
@@ -107,7 +107,7 @@ def overlay(
         outputs.append(output)
         if index + 1 < actual_work.actual_steps:
             inputs.append(output)
-    return alpha.OverlayProposal(
+    return mechanisms.OverlayProposal(
         branch_id=branch_id,
         spec_fingerprint=branch_spec.fingerprint,
         proposals=(external(item, value),),
@@ -122,13 +122,13 @@ def test_two_private_overlays_publish_only_explicit_winner() -> None:
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot))
     harness.propose(overlay("left", item, 1.0, branch_spec=harness.spec))
     harness.propose(overlay("right", item, 2.0, branch_spec=harness.spec))
     assert store.snapshot().root_id == snapshot.root_id
 
     receipt = harness.select("right", idempotency_key="winner-right")
-    assert receipt.status is alpha.BranchRunStatus.COMMITTED
+    assert receipt.status is mechanisms.BranchRunStatus.COMMITTED
     assert isinstance(receipt.commit_receipt, CommitReceipt)
     assert [item.branch_id for item in receipt.rollback_receipts] == ["left"]
     torch.testing.assert_close(store.read(store.snapshot(), "state").value, torch.full((1, 2), 2.0))
@@ -144,11 +144,11 @@ def test_discarded_matched_sham_executes_proposals_without_publication() -> None
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="sham"))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="sham"))
     harness.propose(overlay("left", item, 1.0, branch_spec=harness.spec))
     harness.propose(overlay("right", item, 2.0, branch_spec=harness.spec))
     receipt = harness.select(None, idempotency_key="unused-sham-key")
-    assert receipt.status is alpha.BranchRunStatus.DISCARDED
+    assert receipt.status is mechanisms.BranchRunStatus.DISCARDED
     assert receipt.decision_kind == "discard"
     assert receipt._runtime_contract_ref == "arti/branch-run-receipt@2"
     assert receipt.commit_receipt is None
@@ -159,9 +159,9 @@ def test_discarded_matched_sham_executes_proposals_without_publication() -> None
 
 def test_branch_run_receipt_cannot_be_forged_by_direct_construction() -> None:
     with pytest.raises(TensorTransactionContractError, match="factory owned"):
-        alpha.BranchRunReceipt(
+        mechanisms.BranchRunReceipt(
             spec_fingerprint=HASH,
-            status=alpha.BranchRunStatus.DISCARDED,
+            status=mechanisms.BranchRunStatus.DISCARDED,
             winner_branch_id=None,
             decision_idempotency_key="forged",
             decision_request_fingerprint=HASH,
@@ -178,7 +178,7 @@ def test_stale_winner_conflicts_and_loser_is_discarded() -> None:
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="stale"))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="stale"))
     harness.propose(overlay("left", item, 1.0, branch_spec=harness.spec))
     harness.propose(overlay("right", item, 2.0, branch_spec=harness.spec))
 
@@ -186,7 +186,7 @@ def test_stale_winner_conflicts_and_loser_is_discarded() -> None:
     outside.stage("state", torch.full((1, 2), 3.0), expected_version=1, provenance_fingerprint=HASH)
     outside.commit(idempotency_key="outside")
     receipt = harness.select("left", idempotency_key="stale-left")
-    assert receipt.status is alpha.BranchRunStatus.CONFLICTED
+    assert receipt.status is mechanisms.BranchRunStatus.CONFLICTED
     assert isinstance(receipt.commit_receipt, ConflictReceipt)
     assert [item.branch_id for item in receipt.rollback_receipts] == ["right"]
     torch.testing.assert_close(store.read(store.snapshot(), "state").value, torch.full((1, 2), 3.0))
@@ -196,13 +196,13 @@ def test_reconstructed_run_replays_original_commit_receipt() -> None:
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    first = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="replay"))
+    first = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="replay"))
     first.propose(overlay("left", item, 1.0, branch_spec=first.spec))
     first.propose(overlay("right", item, 2.0, branch_spec=first.spec))
     first_receipt = first.select("left", idempotency_key="replay-left")
     epoch = store.snapshot().epoch
 
-    replay = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="replay"))
+    replay = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="replay"))
     replay.propose(overlay("left", item, 1.0, branch_spec=replay.spec))
     replay.propose(overlay("right", item, 2.0, branch_spec=replay.spec))
     replay_receipt = replay.select("left", idempotency_key="replay-left")
@@ -214,7 +214,7 @@ def test_branch_work_budget_and_matched_work_fail_closed() -> None:
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="work"))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="work"))
     with pytest.raises(TensorTransactionContractError, match="violate its budget"):
         harness.propose(
             overlay(
@@ -239,7 +239,7 @@ def test_branch_work_budget_and_matched_work_fail_closed() -> None:
     with pytest.raises(TensorTransactionContractError, match="not matched"):
         harness.select("left", idempotency_key="mismatch")
     aborted = harness.abort(idempotency_key="abort-work")
-    assert aborted.status is alpha.BranchRunStatus.DISCARDED
+    assert aborted.status is mechanisms.BranchRunStatus.DISCARDED
     assert aborted.decision_kind == "discard"
     assert len(aborted.rollback_receipts) == 2
     assert store.snapshot().root_id == snapshot.root_id
@@ -250,7 +250,7 @@ def test_step_lineage_must_cover_every_executed_refine_step() -> None:
     snapshot = store.snapshot()
     item = bound(store, snapshot)
     with pytest.raises(TensorTransactionContractError, match="match actual_steps"):
-        alpha.OverlayProposal(
+        mechanisms.OverlayProposal(
             branch_id="left",
             spec_fingerprint=spec(snapshot).fingerprint,
             proposals=(external(item, 1.0),),
@@ -265,9 +265,9 @@ def test_partial_multi_page_failure_aborts_every_private_overlay() -> None:
     store = runtime()
     snapshot = store.snapshot()
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="atomic"))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="atomic"))
 
-    foreign = alpha.VolatileTensorRuntime(
+    foreign = mechanisms.VolatileTensorRuntime(
         {"other": torch.zeros(1, 2)},
         world_id="branch-world",
         store_instance_id="foreign-store",
@@ -275,7 +275,7 @@ def test_partial_multi_page_failure_aborts_every_private_overlay() -> None:
         provenance_fingerprint=HASH,
     )
     foreign_snapshot = foreign.snapshot()
-    foreign_item = alpha.bind_external_tensor(
+    foreign_item = mechanisms.bind_external_tensor(
         foreign,
         foreign_snapshot,
         "other",
@@ -283,7 +283,7 @@ def test_partial_multi_page_failure_aborts_every_private_overlay() -> None:
         partition_id="main",
         logical_id="other",
         role="formula-state",
-        authority=alpha.TensorAuthority.READ_WRITE,
+        authority=mechanisms.TensorAuthority.READ_WRITE,
         component_ref="arti/formula-fabric@1",
         component_config_fingerprint=CONFIG,
         state_schema_ref="arti/formula-arena-value@1",
@@ -291,7 +291,7 @@ def test_partial_multi_page_failure_aborts_every_private_overlay() -> None:
         provenance_fingerprint=HASH,
     )
     base = overlay("left", item, 1.0, branch_spec=harness.spec)
-    invalid = alpha.OverlayProposal(
+    invalid = mechanisms.OverlayProposal(
         branch_id="left",
         spec_fingerprint=harness.spec.fingerprint,
         proposals=(*base.proposals, external(foreign_item, 2.0)),
@@ -303,7 +303,7 @@ def test_partial_multi_page_failure_aborts_every_private_overlay() -> None:
     with pytest.raises(TensorTransactionContractError, match="parent snapshot"):
         harness.propose(invalid)
     receipt = harness.abort(idempotency_key="abort-atomic")
-    assert receipt.status is alpha.BranchRunStatus.DISCARDED
+    assert receipt.status is mechanisms.BranchRunStatus.DISCARDED
     assert store.snapshot().root_id == snapshot.root_id
 
 
@@ -311,7 +311,7 @@ def test_branch_spec_and_lifecycle_reject_implicit_or_duplicate_paths() -> None:
     store = runtime()
     snapshot = store.snapshot()
     with pytest.raises(TensorTransactionContractError, match="exactly two"):
-        alpha.BranchBatchSpec(
+        mechanisms.BranchBatchSpec(
             run_id="bad",
             branch_ids=("same", "same"),
             parent_store_instance_id=snapshot.store_instance_id,
@@ -325,10 +325,10 @@ def test_branch_spec_and_lifecycle_reject_implicit_or_duplicate_paths() -> None:
             input_fingerprint=HASH,
             rng_fingerprint=HASH,
             future_tape_fingerprint=HASH,
-            budgets=(alpha.BranchBudget(1, 1), alpha.BranchBudget(1, 1)),
+            budgets=(mechanisms.BranchBudget(1, 1), mechanisms.BranchBudget(1, 1)),
         )
     item = bound(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec(snapshot, run_id="lifecycle"))
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec(snapshot, run_id="lifecycle"))
     harness.propose(overlay("left", item, 1.0, branch_spec=harness.spec))
     with pytest.raises(TensorTransactionContractError, match="already has"):
         harness.propose(overlay("left", item, 2.0, branch_spec=harness.spec))
@@ -340,7 +340,7 @@ def test_matched_work_receipts_can_compare_commit_and_sham() -> None:
     committed_store = runtime()
     committed_snapshot = committed_store.snapshot()
     committed_bound = bound(committed_store, committed_snapshot)
-    committed = alpha.K2BranchHarness(
+    committed = mechanisms.K2BranchHarness(
         committed_store,
         committed_snapshot,
         spec(committed_snapshot, run_id="commit-arm"),
@@ -356,7 +356,7 @@ def test_matched_work_receipts_can_compare_commit_and_sham() -> None:
     sham_store = runtime()
     sham_snapshot = sham_store.snapshot()
     sham_bound = bound(sham_store, sham_snapshot)
-    sham = alpha.K2BranchHarness(
+    sham = mechanisms.K2BranchHarness(
         sham_store,
         sham_snapshot,
         spec(sham_snapshot, run_id="sham-arm"),
@@ -364,11 +364,11 @@ def test_matched_work_receipts_can_compare_commit_and_sham() -> None:
     sham.propose(overlay("left", sham_bound, 1.0, branch_spec=sham.spec))
     sham.propose(overlay("right", sham_bound, 2.0, branch_spec=sham.spec))
     sham_receipt = sham.select(None, idempotency_key="unused")
-    alpha.assert_matched_branch_work(committed_receipt, sham_receipt)
+    mechanisms.assert_matched_branch_work(committed_receipt, sham_receipt)
 
 
 def test_branch_harness_is_alpha_only_and_not_an_executor() -> None:
     assert not hasattr(arti, "K2BranchHarness")
     assert not hasattr(arti.nn, "K2BranchHarness")
-    assert alpha.K2BranchHarness._runtime_contract_ref == "arti/k2-branch-harness@1"
-    assert not hasattr(alpha.K2BranchHarness, "forward")
+    assert mechanisms.K2BranchHarness._runtime_contract_ref == "arti/k2-branch-harness@1"
+    assert not hasattr(mechanisms.K2BranchHarness, "forward")

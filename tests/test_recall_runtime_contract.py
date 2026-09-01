@@ -9,21 +9,21 @@ import arti
 from arti._recall_state import RECALL_STATE_SCHEMA_VERSION
 
 
-def _runtime(*, updater_factors: int = 2) -> arti.alpha.RecallRuntime:
-    updater = arti.alpha.NormalizedDeltaRecallValueUpdater(
+def _runtime(*, updater_factors: int = 2) -> arti.mechanisms.RecallRuntime:
+    updater = arti.mechanisms.NormalizedDeltaRecallValueUpdater(
         hidden_dim=4,
         slots=3,
         workspace_dim=8,
         factors=updater_factors,
     )
     reader = arti.Recall(4, 3, formula="arti/delta@1")
-    return arti.alpha.RecallRuntime(updater, reader)
+    return arti.mechanisms.RecallRuntime(updater, reader)
 
 
 def test_runtime_contract_binds_reader_updater_and_state_schema() -> None:
     runtime = _runtime()
     contract = runtime.contract
-    restored = arti.alpha.RecallRuntimeContract.from_dict(contract.to_dict())
+    restored = arti.mechanisms.RecallRuntimeContract.from_dict(contract.to_dict())
 
     assert restored == contract
     assert len(contract.fingerprint) == 64
@@ -39,7 +39,7 @@ def test_runtime_contract_binds_reader_updater_and_state_schema() -> None:
 def test_state_round_trip_preserves_contract_fingerprint() -> None:
     runtime = _runtime()
     state = runtime.initial_state(2, dtype=torch.float32)
-    restored = arti.alpha.RecallState.from_state_dict(state.state_dict())
+    restored = arti.mechanisms.RecallState.from_state_dict(state.state_dict())
 
     assert restored.contract_fingerprint == runtime.contract_fingerprint
     assert restored.schema_version == runtime.contract.state_schema_version
@@ -60,7 +60,7 @@ def test_runtime_rejects_unbound_tensor_and_legacy_state_payload() -> None:
     with pytest.raises(ValueError, match="contract fingerprint"):
         runtime.read(torch.randn(1, 3, 4), torch.zeros(1, 3, 4))
 
-    legacy = arti.alpha.RecallState.from_state_dict(
+    legacy = arti.mechanisms.RecallState.from_state_dict(
         {
             "value": torch.zeros(1, 3, 4),
             "step": torch.tensor(0, dtype=torch.int64),
@@ -92,14 +92,14 @@ def test_runtime_contract_rejects_formula_layout_or_state_drift() -> None:
         else:
             payload[field]["ref"] = "arti/recall-state@2"
         with pytest.raises(ValueError, match="fingerprint"):
-            arti.alpha.RecallRuntimeContract.from_dict(payload)
+            arti.mechanisms.RecallRuntimeContract.from_dict(payload)
 
 
 def test_runtime_contract_rejects_tampered_fingerprint() -> None:
     payload = copy.deepcopy(_runtime().contract.to_dict())
     payload["fingerprint"] = "0" * 64
     with pytest.raises(ValueError, match="fingerprint"):
-        arti.alpha.RecallRuntimeContract.from_dict(payload)
+        arti.mechanisms.RecallRuntimeContract.from_dict(payload)
 
 
 def test_runtime_scan_and_serial_update_are_equal() -> None:

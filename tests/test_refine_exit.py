@@ -47,7 +47,7 @@ def _recall() -> arti.Recall:
 
 def test_refine_exit_atom_preserves_trainable_score() -> None:
     source = torch.nn.Linear(4, 1)
-    control = arti.alpha.RefineExitControl(source)
+    control = arti.mechanisms.RefineExitControl(source)
     state = torch.randn(2, 3, 4)
     mask = torch.tensor([[True, True, False], [True, False, False]])
 
@@ -63,8 +63,8 @@ def test_refine_exit_atom_preserves_trainable_score() -> None:
 
 def test_refine_exit_atom_requires_declared_signal_kind() -> None:
     mask = torch.ones(1, 2, dtype=torch.bool)
-    predicate = arti.alpha.FormulaRefineExit(input_kind="predicate")
-    logit = arti.alpha.FormulaRefineExit(input_kind="logit")
+    predicate = arti.mechanisms.FormulaRefineExit(input_kind="predicate")
+    logit = arti.mechanisms.FormulaRefineExit(input_kind="logit")
 
     assert torch.all(predicate(torch.ones(1, 2, dtype=torch.bool), mask=mask).requested)
     with pytest.raises(TypeError, match="predicate"):
@@ -74,12 +74,12 @@ def test_refine_exit_atom_requires_declared_signal_kind() -> None:
 
 
 def test_refine_exit_components_are_versioned_separately_from_formula_v2() -> None:
-    atom = arti.alpha.FormulaRefineExit(
+    atom = arti.mechanisms.FormulaRefineExit(
         input_kind="logit",
         scope="branch",
         threshold=0.25,
     )
-    control = arti.alpha.RefineExitControl(torch.nn.Linear(4, 1), atom=atom)
+    control = arti.mechanisms.RefineExitControl(torch.nn.Linear(4, 1), atom=atom)
     request = atom(
         torch.tensor([1.0]),
         mask=torch.tensor([[True, False]]),
@@ -102,7 +102,7 @@ def test_model_exit_commits_current_step_and_matches_fixed_depth_prefix() -> Non
     recall = arti.Recall(4, 8, activation="none", breadth_mode="mixed")
     x = torch.randn(2, 3, 4)
     expected = recall(x, refine_policy=_policy(max_steps=3, min_steps=3))
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=3))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=3))
 
     actual, trace = recall(
         x,
@@ -156,7 +156,7 @@ def test_legacy_trace_rejects_model_exit_reason() -> None:
 def test_minimum_depth_records_blocked_requests_before_exit() -> None:
     recall = _recall()
     x = torch.randn(1, 2, 4)
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
 
     _, trace = recall(
         x,
@@ -176,7 +176,7 @@ def test_minimum_depth_records_blocked_requests_before_exit() -> None:
 def test_equal_minimum_and_maximum_keeps_max_steps_terminal_reason() -> None:
     recall = _recall()
     x = torch.randn(1, 2, 4)
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
 
     _, trace = recall(
         x,
@@ -198,7 +198,7 @@ def test_nonfinite_exit_signal_stops_after_committed_prefix() -> None:
     source = torch.nn.Linear(4, 1)
     with torch.no_grad():
         source.weight.fill_(float("nan"))
-    control = arti.alpha.RefineExitControl(source)
+    control = arti.mechanisms.RefineExitControl(source)
 
     with torch.no_grad():
         actual, trace = recall(
@@ -222,7 +222,7 @@ def test_nonfinite_exit_signal_stops_during_autograd() -> None:
     source = torch.nn.Linear(4, 1)
     with torch.no_grad():
         source.weight.fill_(float("nan"))
-    control = arti.alpha.RefineExitControl(source)
+    control = arti.mechanisms.RefineExitControl(source)
 
     y, trace = recall(
         x,
@@ -244,7 +244,7 @@ def test_model_exit_false_preserves_existing_trace_and_output() -> None:
     x = torch.randn(1, 2, 4)
     policy = _policy(max_steps=3, min_steps=1)
     expected, expected_trace = recall(x, refine_policy=policy, return_trace=True)
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
 
     actual, trace = recall(
         x,
@@ -269,7 +269,7 @@ def test_model_exit_is_disabled_by_default() -> None:
     recall = _recall()
     x = torch.randn(1, 2, 4)
     policy = _policy(max_steps=3, min_steps=1)
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
 
     _, trace = recall(
         x,
@@ -284,7 +284,7 @@ def test_model_exit_is_disabled_by_default() -> None:
 
 def test_refine_exit_requires_static_finite_policy() -> None:
     recall = _recall()
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
     dynamic = _policy(max_steps=2, min_steps=1).replace(executor="early_break")
     unchecked = _policy(max_steps=2, min_steps=1).replace(check_finite=False)
 
@@ -314,7 +314,7 @@ def test_batched_refine_exit_is_branch_local_without_k_aggregation() -> None:
         breadth_mode="independent",
     )
     x = torch.randn(1, 2, 4)
-    control = arti.alpha.RefineExitControl(_RowSignal(), scope="branch")
+    control = arti.mechanisms.RefineExitControl(_RowSignal(), scope="branch")
 
     _, result = recall(
         x,
@@ -338,11 +338,11 @@ def test_batched_refine_exit_is_k3_permutation_equivariant() -> None:
     torch.manual_seed(8043)
     recall = arti.Recall(4, 12, activation="none")
     x = torch.randn(2, 3, 4)
-    candidates = arti.alpha.query_recall_branches(recall, x, max_k=3, active_k=3)
+    candidates = arti.mechanisms.query_recall_branches(recall, x, max_k=3, active_k=3)
     source = torch.nn.Linear(4, 1)
-    control = arti.alpha.RefineExitControl(source)
+    control = arti.mechanisms.RefineExitControl(source)
     policy = _policy(max_steps=4, min_steps=1)
-    original = arti.alpha.run_batched_refine(
+    original = arti.mechanisms.run_batched_refine(
         recall,
         x,
         candidates=candidates,
@@ -351,7 +351,7 @@ def test_batched_refine_exit_is_k3_permutation_equivariant() -> None:
         model_exit=True,
     )
     order = torch.tensor([[2, 0, 1], [1, 2, 0]])
-    permuted = arti.alpha.run_batched_refine(
+    permuted = arti.mechanisms.run_batched_refine(
         recall,
         x,
         candidates=candidates.permute_branches(order),
@@ -375,18 +375,18 @@ def test_batched_refine_exit_is_k3_permutation_equivariant() -> None:
 def test_packed_empty_branches_still_validate_exit_policy() -> None:
     recall = arti.Recall(4, 8, activation="none")
     x = torch.randn(1, 2, 4)
-    candidates = arti.alpha.query_recall_branches(
+    candidates = arti.mechanisms.query_recall_branches(
         recall,
         x,
         mask=torch.zeros(1, 2, dtype=torch.bool),
         max_k=2,
         active_k=2,
     )
-    plan = arti.alpha.BatchedRefinePlan.recall_only(execution_layout="packed_active")
-    control = arti.alpha.RefineExitControl(torch.nn.Linear(4, 1))
+    plan = arti.mechanisms.BatchedRefinePlan.recall_only(execution_layout="packed_active")
+    control = arti.mechanisms.RefineExitControl(torch.nn.Linear(4, 1))
 
-    with pytest.raises(arti.alpha.BatchedRefineContractError, match="Adaptive"):
-        arti.alpha.run_batched_refine(
+    with pytest.raises(arti.mechanisms.BatchedRefineContractError, match="Adaptive"):
+        arti.mechanisms.run_batched_refine(
             recall,
             x,
             candidates=candidates,
@@ -395,8 +395,8 @@ def test_packed_empty_branches_still_validate_exit_policy() -> None:
             refine_exit=control,
             model_exit=True,
         )
-    with pytest.raises(arti.alpha.BatchedRefineContractError, match="finite-state"):
-        arti.alpha.run_batched_refine(
+    with pytest.raises(arti.mechanisms.BatchedRefineContractError, match="finite-state"):
+        arti.mechanisms.run_batched_refine(
             recall,
             x,
             candidates=candidates,
@@ -411,7 +411,7 @@ def test_packed_empty_branches_still_validate_exit_policy() -> None:
 
 def test_refine_exit_rejects_legacy_refine_policy() -> None:
     recall = _recall()
-    control = arti.alpha.RefineExitControl(_StepSignal(exit_at=1))
+    control = arti.mechanisms.RefineExitControl(_StepSignal(exit_at=1))
 
     with pytest.raises(ValueError, match="AdaptiveRefinePolicy"):
         recall(
@@ -443,7 +443,7 @@ def test_refine_exit_static_masked_fullgraph_matches_eager() -> None:
     with torch.no_grad():
         source.weight.zero_()
         source.bias.fill_(1.0)
-    control = arti.alpha.RefineExitControl(source)
+    control = arti.mechanisms.RefineExitControl(source)
     policy = _policy(max_steps=4, min_steps=2)
     compiled = torch.compile(recall, backend="eager", fullgraph=True)
     x = torch.randn(2, 3, 4)
@@ -464,7 +464,7 @@ def test_refine_exit_static_masked_fullgraph_matches_eager() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_refine_exit_cuda_static_masked_smoke() -> None:
     recall = _recall().cuda()
-    control = arti.alpha.RefineExitControl(torch.nn.Linear(4, 1)).cuda()
+    control = arti.mechanisms.RefineExitControl(torch.nn.Linear(4, 1)).cuda()
     x = torch.randn(2, 3, 4, device="cuda", requires_grad=True)
 
     y, trace = recall(

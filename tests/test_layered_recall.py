@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from arti import experimental
+from arti import legacy
 
 
 def backbone() -> nn.Sequential:
@@ -18,7 +18,7 @@ def backbone() -> nn.Sequential:
 
 
 def test_attach_freezes_backbone_and_keeps_only_layer_recalls_trainable() -> None:
-    model = experimental.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=3, slots=4)
+    model = legacy.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=3, slots=4)
     output = model(torch.randn(2, 5, 8))
 
     assert output.shape == (2, 5, 8)
@@ -28,14 +28,14 @@ def test_attach_freezes_backbone_and_keeps_only_layer_recalls_trainable() -> Non
 
 
 def test_local_trajectory_loss_uses_clean_hidden_targets_and_backpropagates_only_recall() -> None:
-    model = experimental.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=3, slots=4)
+    model = legacy.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=3, slots=4)
     clean = torch.randn(3, 6, 8)
     corrupt = clean.clone()
     corrupt[:, 2:4] = 0
     unseen = torch.randn_like(clean) + 8.0
     mask = torch.ones(3, 6, dtype=torch.bool)
 
-    result = experimental.layered_recall_trajectory_loss(model, clean, corrupt, mask=mask, unseen_inputs=unseen)
+    result = legacy.layered_recall_trajectory_loss(model, clean, corrupt, mask=mask, unseen_inputs=unseen)
     result.loss.backward()
 
     assert set(result.per_layer_mse) == {"0", "2", "4"}
@@ -48,23 +48,23 @@ def test_local_trajectory_loss_uses_clean_hidden_targets_and_backpropagates_only
 
 
 def test_local_trajectory_loss_accepts_per_layer_baseline_scales() -> None:
-    model = experimental.LayeredRecallModel.attach(backbone(), ("0", "2"), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.attach(backbone(), ("0", "2"), rank=2, slots=3)
     for wrapper in model.wrappers.values():
         wrapper.recall.survival.stochastic = False
     clean = torch.randn(2, 4, 8)
     corrupt = clean.clone()
     corrupt[:, 1] = 0
-    raw = experimental.layered_recall_trajectory_loss(model, clean, corrupt)
+    raw = legacy.layered_recall_trajectory_loss(model, clean, corrupt)
     scales = {path: value.detach() for path, value in raw.per_layer_mse.items()}
-    normalized = experimental.layered_recall_trajectory_loss(model, clean, corrupt, layer_scales=scales)
+    normalized = legacy.layered_recall_trajectory_loss(model, clean, corrupt, layer_scales=scales)
 
     assert torch.allclose(normalized.repair_loss, torch.ones_like(normalized.repair_loss), atol=1e-5)
 
 
 def test_layer_recall_strictly_applies_half_to_candidate_delta() -> None:
-    with_half = experimental.LayerRecall(8, rank=3, slots=4, use_half=True, recognition_mode="none")
+    with_half = legacy.LayerRecall(8, rank=3, slots=4, use_half=True, recognition_mode="none")
     with_half.survival.stochastic = False
-    without_half = experimental.LayerRecall(8, rank=3, slots=4, use_half=False, recognition_mode="none")
+    without_half = legacy.LayerRecall(8, rank=3, slots=4, use_half=False, recognition_mode="none")
     without_half.load_state_dict(with_half.state_dict(), strict=False)
     x = torch.randn(2, 5, 8)
     half_delta = with_half(x)
@@ -75,7 +75,7 @@ def test_layer_recall_strictly_applies_half_to_candidate_delta() -> None:
 
 
 def test_layer_recall_defaults_to_half_without_strength_or_recognition_gates() -> None:
-    recall = experimental.LayerRecall(8, rank=3, slots=4)
+    recall = legacy.LayerRecall(8, rank=3, slots=4)
 
     assert recall.use_half
     assert recall.recognition_mode == "none"
@@ -86,7 +86,7 @@ def test_layer_recall_defaults_to_half_without_strength_or_recognition_gates() -
 
 def test_layer_recall_first_step_reaches_every_parameter() -> None:
     torch.manual_seed(5)
-    recall = experimental.LayerRecall(8, rank=3, slots=4)
+    recall = legacy.LayerRecall(8, rank=3, slots=4)
     loss = recall(torch.randn(2, 5, 8)).square().mean()
 
     loss.backward()
@@ -112,7 +112,7 @@ def test_tuple_output_transformer_layer_contract_is_preserved() -> None:
         def forward(self, x):
             return self.block(x)
 
-    model = experimental.LayeredRecallModel.attach(Host(), ("block",), sample_batch=torch.randn(2, 4, 8), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.attach(Host(), ("block",), sample_batch=torch.randn(2, 4, 8), rank=2, slots=3)
     output = model(torch.randn(2, 4, 8))
 
     assert isinstance(output, tuple)
@@ -134,7 +134,7 @@ def test_layered_recall_attaches_to_arbitrary_spatial_tensor_boundary() -> None:
             return self.warp(hidden)["sample"]
 
     sample = torch.randn(2, 3, 4, 5, 6)
-    model = experimental.LayeredRecallModel.attach(
+    model = legacy.LayeredRecallModel.attach(
         Host(), ("warp",), sample_batch=sample, rank=2, slots=3
     )
     output = model(sample)
@@ -152,7 +152,7 @@ def test_layered_recall_accepts_explicit_feature_axis_for_channel_first_boundary
 
     host = nn.Sequential(ChannelFirstWarp())
     sample = torch.randn(2, 3, 4, 5)
-    model = experimental.LayeredRecallModel.attach(
+    model = legacy.LayeredRecallModel.attach(
         host,
         ("0",),
         sample_batch=sample,
@@ -167,25 +167,25 @@ def test_layered_recall_accepts_explicit_feature_axis_for_channel_first_boundary
 
 def test_attach_can_infer_dimensions_from_runtime_scan() -> None:
     host = backbone()
-    model = experimental.LayeredRecallModel.attach(host, ("0", "2", "4"), sample_batch=torch.randn(2, 8), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.attach(host, ("0", "2", "4"), sample_batch=torch.randn(2, 8), rank=2, slots=3)
     assert [wrapper.recall.dim for wrapper in model.wrappers.values()] == [8, 8, 8]
 
 
 def test_public_torch_namespace_matches_root() -> None:
-    assert experimental.LayerRecall is not None
-    assert experimental.LayeredRecallModel is not None
-    assert experimental.LayeredRecallConfig is not None
-    assert experimental.calibrate_layered_recall is not None
+    assert legacy.LayerRecall is not None
+    assert legacy.LayeredRecallModel is not None
+    assert legacy.LayeredRecallConfig is not None
+    assert legacy.calibrate_layered_recall is not None
 
 
 def test_stable_config_calibration_and_normalized_loss() -> None:
-    config = experimental.LayeredRecallConfig(layer_paths=("0", "2", "4"), rank=2, slots=3)
-    model = experimental.LayeredRecallModel.from_config(backbone(), config)
+    config = legacy.LayeredRecallConfig(layer_paths=("0", "2", "4"), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.from_config(backbone(), config)
     clean = torch.randn(3, 5, 8)
     corrupt = clean.clone()
     corrupt[:, 1:3] = 0
     calibration = model.calibrate(clean, corrupt)
-    result = experimental.layered_recall_trajectory_loss(model, clean, corrupt, calibration=calibration)
+    result = legacy.layered_recall_trajectory_loss(model, clean, corrupt, calibration=calibration)
 
     assert set(calibration.scales) == set(config.layer_paths)
     assert all(value.item() > 0 for value in calibration.scales.values())
@@ -193,14 +193,14 @@ def test_stable_config_calibration_and_normalized_loss() -> None:
 
 
 def test_open_ended_layer_specs_allow_independent_sizes_and_features() -> None:
-    config = experimental.LayeredRecallConfig(
+    config = legacy.LayeredRecallConfig(
         layers=(
-            experimental.LayerRecallSpec("0", dim=8, rank=1, slots=2, use_half=False, recognition_mode="none"),
-            experimental.LayerRecallSpec("2", dim=8, rank=3, slots=5, use_half=True, recognition_mode="explicit"),
-            experimental.LayerRecallSpec("4", dim=8, rank=2, slots=7, recognition_mode="alignment"),
+            legacy.LayerRecallSpec("0", dim=8, rank=1, slots=2, use_half=False, recognition_mode="none"),
+            legacy.LayerRecallSpec("2", dim=8, rank=3, slots=5, use_half=True, recognition_mode="explicit"),
+            legacy.LayerRecallSpec("4", dim=8, rank=2, slots=7, recognition_mode="alignment"),
         )
     )
-    model = experimental.LayeredRecallModel.from_config(backbone(), config)
+    model = legacy.LayeredRecallModel.from_config(backbone(), config)
 
     assert config.paths == ("0", "2", "4")
     assert [model.wrappers[path].recall.rank for path in config.paths] == [1, 3, 2]
@@ -210,14 +210,14 @@ def test_open_ended_layer_specs_allow_independent_sizes_and_features() -> None:
 
 
 def test_repeated_lines_can_share_one_physical_layer() -> None:
-    config = experimental.LayeredRecallConfig(
-        layers=(experimental.LayerRecallSpec("2", dim=8, rank=2, slots=3, copies=3, combine="mean"),)
+    config = legacy.LayeredRecallConfig(
+        layers=(legacy.LayerRecallSpec("2", dim=8, rank=2, slots=3, copies=3, combine="mean"),)
     )
-    model = experimental.LayeredRecallModel.from_config(backbone(), config)
+    model = legacy.LayeredRecallModel.from_config(backbone(), config)
     stack = model.wrappers["2"].recall
     output = model(torch.randn(2, 4, 8))
 
-    assert isinstance(stack, experimental.LayerRecallStack)
+    assert isinstance(stack, legacy.LayerRecallStack)
     assert len(stack.branches) == 3
     assert stack.combine == "mean"
     assert output.shape == (2, 4, 8)
@@ -229,7 +229,7 @@ def test_repeated_lines_can_share_one_physical_layer() -> None:
 
 
 def test_layer_enable_contexts_restore_state_and_validate_paths() -> None:
-    model = experimental.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.attach(backbone(), ("0", "2", "4"), rank=2, slots=3)
     model.set_enabled(False, paths=("2",))
     before = {path: wrapper.enabled for path, wrapper in model.wrappers.items()}
     with model.enabled_layers(("4",)):
@@ -242,7 +242,7 @@ def test_layer_enable_contexts_restore_state_and_validate_paths() -> None:
 
 
 def test_layer_diagnostics_exposes_latest_trace_components() -> None:
-    model = experimental.LayeredRecallModel.attach(backbone(), ("0", "2"), rank=2, slots=3)
+    model = legacy.LayeredRecallModel.attach(backbone(), ("0", "2"), rank=2, slots=3)
     for wrapper in model.wrappers.values():
         wrapper.capture = True
     model(torch.randn(2, 4, 8))
@@ -253,7 +253,7 @@ def test_layer_diagnostics_exposes_latest_trace_components() -> None:
 
 
 def test_layer_survival_diagnostic_is_finite_for_zero_fp16_delta() -> None:
-    model = experimental.LayeredRecallModel.attach(
+    model = legacy.LayeredRecallModel.attach(
         nn.Sequential(nn.Identity()),
         ("0",),
         dims={"0": 8},
@@ -284,7 +284,7 @@ def test_layered_recall_delegates_generate() -> None:
         def generate(self, x: torch.Tensor, *, scale: float = 1.0) -> torch.Tensor:
             return self.forward(x) * scale
 
-    wrapped = experimental.LayeredRecallModel.attach(Generative(), ("block",), dims={"block": 8}, rank=2, slots=2)
+    wrapped = legacy.LayeredRecallModel.attach(Generative(), ("block",), dims={"block": 8}, rank=2, slots=2)
     assert wrapped.generate(torch.randn(2, 8), scale=2.0).shape == (2, 8)
 
 
@@ -307,7 +307,7 @@ def test_qwen_style_nested_layer_paths_can_be_attached() -> None:
         def forward(self, x):
             return self.model(x)
 
-    layered = experimental.LayeredRecallModel.attach(
+    layered = legacy.LayeredRecallModel.attach(
         QwenLike(),
         ("model.layers.1", "model.layers.3", "model.layers.5"),
         rank=2,

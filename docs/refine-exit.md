@@ -1,6 +1,6 @@
 # Formula-Controlled Refine Exit
 
-`arti.alpha.FormulaRefineExit` is a stateless control atom that converts a
+`arti.mechanisms.FormulaRefineExit` is a stateless control atom that converts a
 boolean predicate or floating-point halt logit into a hard
 `RefineExitRequest`. It belongs to a control lane; it is not a Formula@2 data
 slot and it never replaces the current Recall transition.
@@ -10,7 +10,7 @@ import torch
 import arti
 
 head = torch.nn.Linear(64, 1)
-exit_control = arti.alpha.RefineExitControl(
+exit_control = arti.mechanisms.RefineExitControl(
     head,
     input_kind="logit",
     threshold=0.0,
@@ -40,7 +40,7 @@ effective request prevents transition `d + 1`; it cannot roll back transition
 hard host bound, and non-finite, convergence, and cycle monitors retain
 precedence over model exit.
 
-The alpha lane requires `executor="static_masked"` and finite-state checking.
+The stable lane requires `executor="static_masked"` and finite-state checking.
 This keeps token and K-branch execution on a fixed tensor schedule and prevents
 a controller from committing a non-finite state.
 
@@ -60,7 +60,7 @@ For token scope, the source maps independent `[B*N, D]` rows to `[B*N]` logits.
 For branch scope, `RefineExitControl` first masked-pools each branch and the
 source maps `[B, D]` to `[B]`. This structural boundary keeps padding, tokens,
 and K branches out of one another's source layout. Sources with shared mutable
-batch state or unkeyed randomness are outside the deterministic alpha contract.
+batch state or unkeyed randomness are outside the deterministic contract.
 
 `RecallTraceV3` records the hard request, allowance, effective request,
 minimum-depth block, actual model stop, differentiable score, and terminal
@@ -79,7 +79,7 @@ depth. Then freeze that task path and build a detached curve from the existing
 flattened training contracts:
 
 ```python
-from arti.alpha import RefineExitTraining, RefineStepTraining
+from arti.mechanisms import RefineExitTraining, RefineStepTraining
 
 step_training = RefineStepTraining()
 exit_training = RefineExitTraining(
@@ -129,7 +129,32 @@ the fixed Query, Bank, Formula, task head, and Recall transition receive no
 gradient during this phase. Deployment still uses the hard post-transition
 request from `FormulaRefineExit`.
 
-Evaluate a trained controller against fixed-depth Recall on held-out task data.
-Report task quality, the actual logical-step distribution, and every non-model
-termination reason separately. Logical exit depth does not establish lower
-FLOPs, memory traffic, or latency without a physical runtime measurement.
+Two bounded benchmarks keep the evidence levels separate:
+
+- `benchmarks/train_refine_exit_task_curve.py` is a synthetic objective smoke
+  test. It checks that the hazard can assign different depths when states carry
+  different convergence rates.
+- `benchmarks/train_refine_exit_combined.py` trains a real `arti.Recall` at full
+  depth, freezes it, trains the controller from replayed task loss, and finally
+  evaluates the hard `model_exit=True` runtime against fixed-depth Recall.
+- `benchmarks/train_qwen_refine_exit_next_token.py` freezes a locally cached
+  Qwen model, trains Recall from full-vocabulary next-token cross-entropy on
+  complete and disjoint train/control/validation/test text splits, then evaluates
+  learned hard exit against fixed Refine depths on the held-out test split. It
+  uses controlled latent corruption to expose a bounded repair task.
+
+The combined benchmark uses a controlled classification task so its result is
+mechanism evidence, not a claim about a particular pretrained model or
+downstream dataset. It fails unless learned hard-exit loss remains within the
+explicit `--quality-loss-tolerance` of the fixed full-depth loss for the same
+seed. A production evaluation should keep complete samples
+separate across train, validation, and test, select quality tolerances on
+validation data, and execute the hard Recall runtime once on the held-out test
+set. It should report task quality, actual logical step distribution, and all
+non-model termination reasons separately.
+
+The Qwen gate is pretrained-model downstream evidence, but its scope remains
+narrow: next-token prediction from cached final hidden states under controlled
+corruption. It does not establish open-generation quality, Qwen fine-tuning, or
+physical runtime acceleration. Its default hard-exit gate preserves full-depth
+loss within `0.05` while requiring at least 25% fewer logical Refine steps.

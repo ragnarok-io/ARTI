@@ -1,23 +1,23 @@
 """ARTI public API.
 
 ARTI is a PyTorch-first latent tensor dynamics package. The root namespace
-exports the stable alpha surface for downstream projects: core ARTI layers,
+exports the stable mechanism surface for downstream projects: core ARTI layers,
 activation/workspace modules, runtime vocabulary helpers, glyph/text tensor
 renderers, participant context builders, membrane routing helpers, source
 integrity utilities, fit/adaptation helpers, and backend diagnostics.
 
-For new code, start with ``ARTILayer`` / ``ARTIResidualBlock`` for full ARTI
-blocks, or ``Half`` / ``Fold`` / ``Pulse`` / ``Recall`` / ``RecallRefiner`` for standalone
-neural-network-native mechanisms. ``Pulse`` is the default learned pulse layer;
-``PulseCompressor`` is the legacy explicit pulse-id path.
+For new code, start with ``ARTILayer``. It is the stable host for the
+composable ``AdaptivePulse`` execution graph. Standalone, versioned mechanisms
+live under ``arti.mechanisms``; retired APIs live under ``arti.legacy``.
 """
 
 from ._version import __version__
-from . import alpha, experimental
+from . import experimental, legacy, mechanisms
 from .backend import available_backends, planned_backends
-from .attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIBankSet, ARTILayerInfo, discover_layers
+from .attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTILayerInfo, discover_layers
+from .attachment_layer import AttachedARTILayerConfig, AttachedARTILayerSpec
 from .attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
-from .attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, recall_alignment_objective, resolve_attachment_objective
+from .attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, resolve_attachment_objective, tensor_alignment_objective
 from .attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from .blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
 from .config import ARTIConfig
@@ -63,11 +63,11 @@ from .distinctness import LatentDistinctnessReport, assert_latent_distinct, late
 from .emission import EmissionRouter, EmissionRouterConfig, EmissionRouterOutput, build_stream_visibility, stream_emit_mask
 from .fit import ADAPTER_STACK_FORMAT, ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_adapter_stack, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, compile_adapter_hotpaths, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, reset_recall_queries, resolve_fit_config_mechanism, resolve_objectives, set_adapter_scale, set_recall_refine_schedule, set_recall_refine_steps, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from .fit import concatenate_adapter_banks, set_adapter_bank_influences, set_adapter_bank_weights
+from .arti_layer import ARTILayer
 from .layers import (
     ARTIDynamicStateLayer,
     ARTILatentRecallField,
     ARTILatentTensorLayer,
-    ARTILayer,
     ARTIPhaseMixer,
     ARTIVirtualInterfaceMixer,
 )
@@ -159,15 +159,22 @@ from .torch.cuda import cuda_device_report, cuda_runtime_available, cuda_smoke_r
 from .training import experiential_recall_alignment_loss, experiential_recall_selectivity_loss, recall_route_exterior_penalty, virtual_recall_alignment_loss
 from .usage import FeatureConfig, features, layer_profiles, profile
 
+# Compatibility name for previously recorded scripts and artifacts. New code
+# should import the stable ``arti.mechanisms`` namespace.
+alpha = mechanisms
+
 __all__ = [
     "ARTI",
+    "mechanisms",
     "alpha",
+    "legacy",
     "experimental",
     "ARTIAttachConfig",
     "ARTIAttachTrainingConfig",
     "ARTIAttachment",
     "ARTIAttachmentSummary",
-    "ARTIBankSet",
+    "AttachedARTILayerConfig",
+    "AttachedARTILayerSpec",
     "ARTILayerInfo",
     "discover_layers",
     "load_attach_config",
@@ -182,7 +189,7 @@ __all__ = [
     "ARTIHubSaveResult",
     "save_attachment_pretrained",
     "load_attachment_pretrained",
-    "recall_alignment_objective",
+    "tensor_alignment_objective",
     "model_loss_objective",
     "resolve_attachment_objective",
     "ARTIConfig",

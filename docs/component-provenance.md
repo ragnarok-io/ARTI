@@ -1,56 +1,220 @@
 # Component Provenance
 
-ARTI components use canonical references such as `arti/fold@2` and
-`arti/pulse@2`. The reference identifies a mechanism contract; the Python
-class name and registry aliases are convenience surfaces and are not stored as
-substitutes for that identity.
+ARTI records the identity of a mechanism separately from the Python package
+version and from the `arti.st` file format. This makes a saved component graph
+auditable without putting version strings into parameter names or changing the
+tensor computation performed by a layer.
 
-## Provenance Record
+## Four Versions
 
-Component provenance records:
+- **Package version**: the installed ARTI distribution version.
+- **Artifact format version**: the serialization contract for `arti.st`.
+- **Component reference**: the mechanism contract, for example
+  `arti/fold@1` or `arti/half@1`.
+- **Schema fingerprints**: normalized hashes of the concrete configuration and
+  parameter/buffer shapes and dtypes.
+- **State contract**: a separate hash binding a model graph to the exact
+  state-dict names, shapes, dtypes, and declared scope. A raw PyTorch
+  `state_dict` remains metadata-free; callers can validate it with
+  `arti.component_state_contract()` before loading it.
+- **Runtime state identity**: the caller-owned forward `RecallState` is a
+  values-only component with the canonical reference `arti/recall-state@1`.
+  Its runtime contract binds the declared Formula and Updater behavior, tensor
+  structure, Bank layout, and state schema. It is a structural compatibility
+  contract, not a content hash of trained Reader or Updater weights. Persisted
+  state that must be tied to one exact trained asset should travel with that
+  asset's external lock or artifact identity.
 
-- the canonical component reference and lifecycle;
-- deterministic configuration and its fingerprint;
-- parameter/state schema fingerprints;
-- declared capabilities;
-- ordered component dependencies.
+The component reference is not a class suffix. ARTI does not create classes
+such as `FoldV1`, and component versions never appear in `state_dict` keys.
+The same rule applies to nested dependencies such as the `Half` and `Fold`
+parts of the current learned `Pulse`.
 
-The record describes executable structure, not learned tensor values. Weight
-files remain responsible for tensor integrity.
+## Canonical Components
 
-Version 2 provenance normalizes valid version 1 records before validation. It
-does not silently reinterpret unknown component references, missing enabled
-dependencies, or incompatible configuration fingerprints.
+The following identities are registered by the package.
+Their lifecycle is part of the load contract.
 
-## Capabilities
+| Public surface | Canonical reference | Variant | Lifecycle |
+| --- | --- | --- | --- |
+| `ARTILayer` | `arti/layer@2` | AdaptivePulse host | stable |
+| Legacy `ARTILayer` | `arti/layer@1` | monolithic historical layer | legacy |
+| Internal classic layer | `arti/classic-layer@1` | composed block implementation | stable |
+| `Half` | `arti/half@1` | default | stable |
+| `Fold` | `arti/fold@1` | soft workspace compaction | stable |
+| `UnFold` | `arti/unfold@1` | trainable layout expansion | stable |
+| Reversible `Fold` | `arti/fold@2` | reversible forward transport | stable |
+| Reversible `UnFold` | `arti/unfold@2` | recorded exact inverse | stable |
+| `ReversibleTopology` | `arti/reversible-topology@1` | permutation partition | stable |
+| `FixedTopologyPolicy` | `arti/fixed-topology-policy@1` | fixed index policy | stable |
+| `StablePriorityPartition` | `arti/stable-priority-partition@1` | valid-first stable hard operator | stable |
+| `SoftTopKTopologySurrogate` | `arti/topology-surrogate@1` | backward-only topology estimator | stable |
+| `LearnedTopologyPolicy` | `arti/learned-topology-policy@1` | direct learned priority scorer | stable |
+| `BankFormulaTopologyPolicy` | `arti/bank-formula-topology-policy@1` | fixed Query and Bank Formula priority | stable |
+| `TopologyOperandBank` | `arti/topology-operand-bank@1` | fixed-address trainable operands | stable |
+| `TopologyPriorityFormula` | `arti/topology-priority-formula@1` | versioned operand interpretation | stable |
+| `InverseTopologyContract` | `arti/inverse-topology-contract@1` | recorded inverse without learner retention | stable |
+| `FoldRecord` / `FoldedTensor` | `arti/fold-record@1` / `arti/fold-state@1` | runtime topology state | stable |
+| `Pulse` / `LearnedPulse` | `arti/pulse@1` | learned | stable |
+| `AdaptivePulse` | `arti/pulse@2` | composable staged pulse | stable |
+| `AdaptiveObservation` | `arti/adaptive-observation@1` | bounded observation trajectory | stable |
+| `LearnedObservationPolicy` | `arti/learned-observation-policy@1` | input-conditioned bounded trajectory | stable |
+| `StateAffineObservationOperator` | `arti/state-affine-observation-operator@1` | bounded state-conditioned feature frame | stable |
+| `FormulaAttention` | `arti/formula-attention@1` | intervention support selection | stable |
+| `SelectiveCompute` | `arti/selective-compute@1` | pack, apply, scatter | stable |
+| `ReunionAggregate` | `arti/reunion-aggregate@1` | post-reunion aggregation host | stable |
+| `PulseCompressor` | `arti/pulse-legacy@1` | explicit | legacy |
+| `FusionPulse` | `arti/fusion-pulse@1` | multi-source | stable |
+| Global `Recall` | `arti/recall@2` | globally normalized formula-driven routing | stable |
+| Partitioned `Recall` | `arti/recall@3` | per-Bank normalization with explicit member asset identity | stable |
+| K-wide `Recall` | `arti/recall@4` | independent candidate refine with hard winner selection | stable |
+| `RecallRefiner` | `arti/recall-refiner@2` | runtime-policy-adapter | stable |
+| `RefinePolicy` | `arti/refine-policy@1` | runtime-only | stable |
+| Adaptive `RefinePolicy` | `arti/refine-policy@2` | adaptive-runtime | stable |
+| `RefineBudget` | `arti/refine-budget@1` | runtime-only | stable |
+| `RefineStop` | `arti/refine-stop@1` | runtime-only | stable |
+| `RecallRoutePlan` | `arti/recall-route-plan@1` | runtime-only | stable |
+| `RecallRouteStack` | `arti/recall-route-stack@1` | runtime-only | stable |
+| `RecallState` | `arti/recall-state@1` | values-only | stable |
+| `RecallValueUpdater` | `arti/updater@1` | value update | stable |
+| Affine updater | `arti/affine-updater@1` | affine value update | stable |
+| Normalized updater | `arti/normalized-updater@1` | normalized value update | stable |
+| Stacked updater | `arti/stacked-updater@1` | multi-site value update | stable |
+| `TensorContext` / `FrameContext` | `arti/tensor-context@1` / `arti/frame-context@1` | context | stable |
+| `EmissionRouter` | `arti/emission-router@1` | stream routing | stable |
+| Built-in Formula `delta` | `arti/delta@1` | one-factor state transition | stable |
+| Built-in Formula `affine` | `arti/affine@1` | two-factor state transition | stable |
+| Built-in Formula `state` | `arti/state@1` | structured state transition | stable |
 
-Capabilities describe where a component may be placed, for example a Pulse
-stage or a selective-compute kernel. They do not grant application authority
-and do not attach task semantics to masks or tensors.
+Formula references such as `arti/delta@1` are resolved through the Formula
+registry. They are recorded as dependencies of `Recall`, not silently folded
+into the layer identity. A Formula update therefore requires an explicit
+Formula reference and a fresh graph fingerprint.
 
-An enabled stage must declare a registered component with the required
-capability. A disabled stage is an identity operation and must not add a
-component dependency merely because a default implementation exists in
-Python.
+Recall@2 and Recall@3 are distinct artifact contracts. Recall@3 records Bank
+names, route ranges, weights, influences, and member artifact fingerprints;
+loading the same-shaped state into a differently assembled Bank fails closed.
+Runtime candidate/result batches are non-persistent components and must be
+recomputed after a fresh load.
 
-## Composition
+Recall@4 is the default constructor identity. It records `breadth`,
+`breadth_mode`, and `breadth_aggregation`; it supports either global or
+per-Bank normalization. The default `winner` aggregation forwards one complete
+trajectory, while `route_weighted` is an explicit opt-in mode. Resolving
+Recall@2 or Recall@3 forces their historical mixed-route semantics, so an old
+artifact cannot silently acquire K-wide execution.
 
-`component_spec()` returns one component and its direct dependencies.
-`component_provenance()` records the reachable, ordered component graph.
-Validation fails closed for unknown references, inconsistent fingerprints,
-undeclared enabled dependencies, and cycles.
+## Adaptive Pulse Contract
 
-This boundary is especially important for `AdaptivePulse`: the stage manifest
-is the execution contract, while Python module composition supplies the
-implementations bound to that manifest.
+`arti/pulse@2` owns one versioned stage graph. Every stage is independently
+enabled or off, and the manifest is revalidated against the bound module
+identity and configuration before execution and provenance generation.
 
-## Recall Identities
+The canonical observation path accepts `[B, N, D]` and produces
+`[B, T, N, D]`. Reversible Fold and UnFold operate on `N` independently for
+each `(B, T)` pair. Aggregate is the first stage allowed to flatten the middle
+instance axes.
 
-`arti/recall@2` identifies globally normalized mixed-route Recall.
-`arti/recall@3` adds per-Bank normalization and explicit member asset identity.
-`arti/recall@4` identifies independent K-wide candidate refinement and records
-`breadth`, `breadth_mode`, and `breadth_aggregation`.
+FormulaAttention selects intervention support `I` from exposed support `E`; it
+does not implement QKV attention or change values. SelectiveCompute changes
+only values in `I`. Values outside `I` remain identical, while exposed source
+values in `E` may still receive gradients through computations that update
+`I`.
 
-The default `Recall@4` aggregation is `winner`: one complete candidate
-trajectory is forwarded. `route_weighted` is an explicit optional mode. Loading
-or resolving an older Recall identity never silently enables K-wide execution.
+`PulseOutput.source_supports` deliberately names the pre-aggregation support
+space. It must not be interpreted as masks over an aggregated Pulse envelope.
+An optional Bank update returns an explicit next `BankState`; it never mutates
+the caller-owned state or hides a state transition in diagnostics.
+
+Pulse@2 uses an internal active-K overlay backend for reversible topology. It
+gathers only the K active values, retains the original substrate as the
+preserved base, and scatters the processed K values back when reunion is
+materialized. This is an execution optimization only: canonical artifacts and
+records remain `arti/fold@2`, `arti/unfold@2`, and `arti/fold-record@1`, and the
+public FoldedTensor path keeps its complete active and folded payload contract.
+
+Runtime-only Recall policy and route objects are versioned so experiments and
+integrations can validate their contracts, but they are not model assets. Route
+plans own independent tensor snapshots, route stacks fingerprint their ordered
+recursive child structure, and neither appears in a model `state_dict` or saved
+`arti.st` component graph.
+
+`Pulse` is the canonical loading alias for the current `LearnedPulse` path.
+The old explicit pulse-id implementation remains available only as the
+legacy `PulseCompressor` identity. An alias is convenient at construction
+time; saved provenance always uses the canonical reference.
+
+The registry exposes `arti.component_catalog()` for release tooling. It lists
+canonical references, ordinary construction aliases, and explicitly
+deprecated aliases. Aliases are never written into saved provenance; loading
+always records and checks the canonical reference.
+
+## Inspect and Construct
+
+```python
+import arti
+
+fold = arti.resolve_component("arti/fold@1", k=16, dim=64)
+print(arti.component_ref(fold))
+
+provenance = arti.component_provenance(fold)
+arti.validate_component_provenance(provenance)
+```
+
+For a nested model, `component_provenance(model)` returns a deterministic
+component graph. Each entry includes its module path, canonical reference,
+lifecycle, normalized configuration, configuration fingerprint, parameter
+schema fingerprint, and direct dependencies. The parameter schema describes
+tensor names, shapes, and dtypes; it intentionally does not include the
+transient `requires_grad` flag.
+
+## `arti.st` and Web Artifacts
+
+`arti.save()` writes the graph into the architecture manifest and stores the
+same graph fingerprint in the SafeTensors header. `arti.load()` verifies both
+copies before restoring weights. A model with a different `k`, `dim`, enabled
+subcomponent, parameter shape, or registered mechanism is rejected rather
+than silently receiving an incompatible state.
+
+The same manifest also carries a state contract. It checks the saved tensor
+schema and scope, while direct `state_dict` workflows can use:
+
+```python
+contract = arti.component_state_contract(model, model.state_dict(), scope="all")
+arti.validate_component_state_contract(
+    contract,
+    state_dict=model.state_dict(),
+    model=model,
+)
+```
+
+The Python Web exporter copies the same graph into the Web manifest. The
+TypeScript runtime treats it as declared metadata and executes the exported
+tensor graph; it does not reimplement Half, Fold, Pulse, UnFold, or Recall
+rules.
+
+## Compatibility and Migration
+
+| Change | Default result | Required action |
+| --- | --- | --- |
+| Package patch with identical graph | accepted | none |
+| Different component reference/version | rejected | export or migrate explicitly |
+| Different config or parameter schema | rejected | reconstruct the exact module or migrate |
+| Different `k`, `dim`, slots, or enabled feature | rejected | use a matching model |
+| Legacy component in an artifact | rejected | pass `allow_legacy=True` after review |
+| Old `PulseCompressor` to current `Pulse` | rejected | write an explicit migration |
+| Missing provenance in an old artifact | rejected | re-save it with a current ARTI build |
+
+`allow_legacy=True` is an admission switch, not an automatic conversion. ARTI
+does not infer a migration from a class name, tensor shape, or alias. A future
+migration must be an explicit function that declares its source and target
+references and produces a new artifact with fresh fingerprints.
+
+## Independent Feature Switches
+
+Optional mechanisms remain independently disableable. For example,
+`LearnedPulse(use_half=False)` records the learned Pulse without a `Half`
+dependency, and `Recall(activation="none")` records no Half dependency. The
+component graph therefore describes the actual execution path rather than a
+maximum feature set. This preserves tensor-in/tensor-out composition without
+forcing coordinates, masks, visibility, Pulse, or Recall onto unrelated data.

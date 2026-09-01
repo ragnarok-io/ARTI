@@ -1,120 +1,132 @@
-# Recall Artifacts
+# Recall Bank Artifacts
 
-Recall is a tensor mechanism: a fixed Query reads candidate factors from a
-Bank, and a Recall Formula maps the current state and recalled factors to the
-next state. Pretraining, fine-tuning, and test-time optimization are caller
-choices; they do not change Recall's forward semantics and do not require a
-Recall-specific training session.
+Recall Bank artifacts are strict `*.recall.arti.st` packages containing only
+the trainable Bank values plus a compatibility contract. The current artifact
+schema is v4 and its pure-data provenance schema is v1. The contract binds the
+host model, shared reader, Formula, optional Updater, Bank layout, shapes,
+dtypes, and SHA-256 fingerprints. Provenance records identities and schemas;
+it never stores executable code or imports a class named by an artifact.
 
-`*.recall.arti.st` stores a replaceable Recall expert. It is not a complete
-`arti.st` checkpoint. The artifact contains expert weights plus strict host and
-injection fingerprints so loading cannot silently target a merely
-shape-compatible model.
+An artifact from an older schema is rejected and must be exported again with
+the current package. ARTI does not silently migrate version, Formula, Updater,
+shape, or layout changes.
 
-```python
-import arti
-
-spec = arti.RecallArtifactSpec(
-    capability="latent-reconstruction",
-    base_model_fingerprint=arti.module_structure_fingerprint(model),
-    injection_fingerprint=arti.module_structure_fingerprint(recall_expert),
-    visibility_policy="caller-supplied",
-    training_metadata={"objective": "complete-trace alignment"},
-)
-
-arti.export_recall_artifact(
-    recall_expert,
-    "latent-reconstruction.recall.arti.st",
-    spec,
-)
-```
-
-Artifact metadata records provenance; it does not prescribe an optimizer,
-loss, support schema, or training schedule.
-
-`RecallCapacityPlan` is optional storage metadata. It deterministically reports
-how many items fit across bounded expert Banks, but it does not inspect tensors,
-route a forward pass, or control training.
-
-## Loading and rollback
-
-Use `RecallExpertRegistry` when expert selection is independent from model
-construction. Activation validates both fingerprints before changing the
-active expert, and a failed activation restores the prior state.
-
-```python
-registry = arti.RecallExpertRegistry(recall_expert, base_model=model)
-registry.activate("latent-reconstruction.recall.arti.st")
-registry.rollback()
-```
-
-## Simultaneous loading
-
-`RecallExpertPool` keeps several compatible artifacts resident. Routing stays
-explicit: choose one expert or provide non-negative mixture weights.
+## Save And Load
 
 ```python
 import torch
+import arti
 
-pool = arti.RecallExpertPool(recall_expert, base_model=model)
-pool.load_expert("first", "first.recall.arti.st", map_location="cuda")
-pool.load_expert("second", "second.recall.arti.st", map_location="cuda")
+host = torch.nn.Linear(64, 64, bias=False)
+recall = arti.Recall(64, slots=16, formula="arti/delta@1")
 
-exact = pool(h, expert="first")
-weights = torch.tensor([[0.9, 0.1], [0.2, 0.8]], device=h.device)
-mixed = pool(h, mixture_weights=weights)
-```
-
-The pool does not infer semantic routing. Tensor, tuple/list, and mapping
-outputs retain their structure, and every loaded expert participates normally
-in `state_dict()` and device movement.
-
-For native `ARTILatentRecallField` artifacts, concatenate compatible Banks to
-create one larger address space:
-
-```python
-recall = pool.concatenate()
-```
-
-This is Bank composition, not output remixing. Shared Query, routing,
-recognition, Formula, and projection state must be identical; only Bank values
-may differ.
-
-Fit-attached Recall fields expose the same composition path:
-
-```python
-arti.concatenate_adapter_banks(
-    model,
-    ("first.recall.arti.st", "second.recall.arti.st"),
-    bank_names=("first", "second"),
-    weights={"first": 2.0, "second": 1.0},
+contract = arti.create_recall_bank_contract(host, recall, bank_id="portrait")
+arti.freeze_for_recall_bank(host, recall)
+arti.save_recall_bank(
+    recall,
+    "portrait.recall.arti.st",
+    host=host,
+    bank_id="portrait",
+    contract=contract,
 )
 
-arti.set_adapter_bank_weights(model, {"first": 4.0, "second": 1.0})
+fresh = arti.Recall(64, slots=16, formula="arti/delta@1")
+asset = arti.load_recall_bank("portrait.recall.arti.st", fresh, contract=contract)
+print(asset.bank_id, asset.artifact_version)
 ```
 
-Bank weights modify routing priors, not recalled values. `1.0` is neutral and
-`0.0` disables a Bank; at least one valid route must remain enabled.
-
-Signed influence is a separate runtime control:
+When a bank belongs to an explicit Formula/Updater pair, record both roles and
+pass the same objects or references when saving and loading:
 
 ```python
-arti.set_adapter_bank_influences(model, {"first": -1.0, "second": 1.0})
+updater = arti.mechanisms.RecallValueUpdater(
+    hidden_dim=64,
+    slots=16,
+    workspace_dim=128,
+    depth=1,
+)
+contract = arti.create_recall_bank_contract(
+    host,
+    recall,
+    bank_id="portrait",
+    updater=updater,
+)
+arti.freeze_for_recall_bank(host, recall)
+arti.save_recall_bank(
+    recall,
+    "portrait.recall.arti.st",
+    host=host,
+    bank_id="portrait",
+    contract=contract,
+    updater=updater,
+)
+arti.load_recall_bank(
+    "portrait.recall.arti.st",
+    arti.Recall(64, slots=16, formula="arti/delta@1"),
+    contract=contract,
+    updater=updater,
+)
 ```
 
-Influence changes write direction and strength without changing source
-artifacts. Recall refinement depth still controls how often the updated state
-is queried again.
+`contract.provenance` exposes the recorded `reader`, `formula`, `updater`, and
+`bank_layout` descriptors. The descriptors are fingerprints and declarative
+metadata, not a second execution or serialization mechanism.
 
-## Training boundary
+Only the Bank parameters may be trainable at export time. Host and shared
+reader parameters are frozen so the artifact remains independently composable.
+The `RecallBankError` exception exposes a stable `code`, `path`, `field`, and
+`action` for invalid kind or version failures.
 
-Recall parameters use normal PyTorch autograd. A typical reconstruction setup
-compares the internal trace produced from a corrupted or incomplete view with
-the detached trace produced from the complete view of the same processed
-signal. The project trainer owns the optimizer, schedule, validation split,
-and parameter selection.
+## Composition
 
-Recall Formula contracts and parameter tags describe tensor behavior and
-parameter ownership. They deliberately do not inject an optimizer or create a
-second training runtime. See
-[Custom Recall Formulas](custom-recall-formulas.md).
+Different named Banks can share one host/reader contract. Their asset IDs are
+not part of the shared compatibility fingerprint, so they can be concatenated
+without mixing their values through a second routing or output layer:
+
+```python
+template = arti.Recall(64, slots=16, formula="arti/delta@1")
+assembly = arti.RecallBankAssembly(template, contract, updater=updater)
+assembly.add("portrait.recall.arti.st")
+assembly.add("lighting.recall.arti.st")
+merged, layout = assembly.materialize()
+print(layout.bank_ids)
+```
+
+Composition requires identical host, shared-reader, Formula, shape, and dtype
+contracts. It fails before mutating the template when a bank is incompatible.
+
+## Forward Updater
+
+The forward state-update mechanism is a separate stable feature, not an old TTT
+session:
+
+```python
+updater = arti.mechanisms.RecallValueUpdater(hidden_dim=64, slots=16)
+next_values = updater(trace, previous_values, mask=mask)
+```
+
+The caller owns detaching, persistence, validation, and any training schedule.
+The updater itself is tensor-in/tensor-out and does not create an optimizer or
+write an artifact implicitly.
+
+## Explicit Migration
+
+Migration is an opt-in operation with a target reader and target contract. It
+can apply a caller-provided tensor transform, but it never guesses how an old
+Formula, Updater, shape, or layout maps to a new one:
+
+```python
+arti.migrate_recall_bank(
+    "old.recall.arti.st",
+    "new.recall.arti.st",
+    target_expert=new_recall,
+    target_host=host,
+    target_contract=new_contract,
+    state_transform=lambda state: {
+        name: value for name, value in state.items()
+    },
+)
+```
+
+The output training metadata records the source package and both contract
+fingerprints. Private tensor extensions are not copied implicitly.

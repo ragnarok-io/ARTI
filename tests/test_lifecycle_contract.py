@@ -43,6 +43,15 @@ def test_component_catalog_is_canonical_and_explicit_about_deprecation() -> None
     assert executor["constructible"] is False
     assert executor["artifact_policy"] == "runtime_only"
     assert executor["config_schema_version"] == 2
+    assert next(item for item in catalog if item["ref"] == "arti/layer@2")[
+        "lifecycle"
+    ] == "stable"
+    assert next(item for item in catalog if item["ref"] == "arti/pulse@2")[
+        "lifecycle"
+    ] == "stable"
+    assert next(item for item in catalog if item["ref"] == "arti/layer@1")[
+        "lifecycle"
+    ] == "legacy"
 
 
 def test_component_schema_does_not_change_when_trainability_changes() -> None:
@@ -53,11 +62,11 @@ def test_component_schema_does_not_change_when_trainability_changes() -> None:
 
 
 def test_recall_state_has_a_canonical_component_identity() -> None:
-    state = arti.alpha.RecallState.zeros(1, 3, 4, dtype=torch.float32)
+    state = arti.mechanisms.RecallState.zeros(1, 3, 4, dtype=torch.float32)
     assert arti.component_ref(state) == "arti/recall-state@1"
     provenance = arti.component_spec(state).to_dict()
     assert provenance["variant"] == "values-only"
-    assert provenance["state_schema_version"] == arti.alpha.RECALL_STATE_SCHEMA_VERSION
+    assert provenance["state_schema_version"] == arti.mechanisms.RECALL_STATE_SCHEMA_VERSION
 
 
 def test_state_contract_binds_model_graph_and_tensor_schema() -> None:

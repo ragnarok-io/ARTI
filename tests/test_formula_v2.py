@@ -3,22 +3,23 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 
 import pytest
 import torch
 
 import arti
 import arti.formula_v2 as formula_v2
-from arti import alpha
+from arti import mechanisms
 
 
 def _bind_banks(
-    program: alpha.FormulaProgram, values: dict[str, torch.Tensor]
-) -> dict[str, alpha.FormulaBankOperand]:
+    program: mechanisms.FormulaProgram, values: dict[str, torch.Tensor]
+) -> dict[str, mechanisms.FormulaBankOperand]:
     return {
         binding.name: binding.bind(values[binding.name])
         for binding in program.bindings
-        if isinstance(binding, alpha.BankBinding)
+        if isinstance(binding, mechanisms.BankBinding)
     }
 
 
@@ -30,15 +31,15 @@ def _run_lora(
     output_dim: int,
     rank: int,
     dtype: torch.dtype = torch.float64,
-) -> tuple[torch.Tensor, torch.Tensor, alpha.FormulaFabricV2, dict[str, torch.Tensor]]:
-    program = alpha.build_lora_program(
+) -> tuple[torch.Tensor, torch.Tensor, mechanisms.FormulaFabricV2, dict[str, torch.Tensor]]:
+    program = mechanisms.build_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
         source_ref="arti/test-lora-bank@1",
         dtype=str(dtype).removeprefix("torch."),
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     values = {
         "x": torch.randn(batch, sequence, input_dim, dtype=dtype, requires_grad=True),
         "base": torch.randn(batch, sequence, output_dim, dtype=dtype, requires_grad=True),
@@ -102,14 +103,14 @@ def test_formula_v2_matches_complete_lora_gradients() -> None:
 def test_formula_v2_is_input_and_rank_permutation_equivariant() -> None:
     torch.manual_seed(9121)
     batch, sequence, input_dim, output_dim, rank = 2, 3, 7, 5, 4
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
         source_ref="arti/test-lora-bank@1",
         dtype="float64",
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     x = torch.randn(batch, sequence, input_dim, dtype=torch.float64)
     base = torch.randn(batch, sequence, output_dim, dtype=torch.float64)
     a = torch.randn(rank, input_dim, dtype=torch.float64)
@@ -137,7 +138,7 @@ def test_formula_v2_is_input_and_rank_permutation_equivariant() -> None:
 def test_formula_v2_explicit_k_bank_reduce_matches_reference() -> None:
     torch.manual_seed(9131)
     batch, sequence, members, input_dim, output_dim, rank = 2, 3, 4, 6, 5, 3
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
@@ -145,7 +146,7 @@ def test_formula_v2_explicit_k_bank_reduce_matches_reference() -> None:
         member_count=members,
         dtype="float64",
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     x = torch.randn(batch, sequence, input_dim, dtype=torch.float64, requires_grad=True)
     base = torch.randn(batch, sequence, output_dim, dtype=torch.float64, requires_grad=True)
     a = torch.randn(members, rank, input_dim, dtype=torch.float64, requires_grad=True)
@@ -173,7 +174,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
     torch.manual_seed(9132)
     members, rank, input_dim, output_dim = 5, 3, 7, 4
     member_ids = tuple(f"expert-{index}" for index in range(members))
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
@@ -185,7 +186,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
     bindings = {
         binding.name: binding
         for binding in program.bindings
-        if isinstance(binding, alpha.BankBinding)
+        if isinstance(binding, mechanisms.BankBinding)
     }
     assert bindings["lora.A"].bundle_id == bindings["lora.B"].bundle_id == "lora"
     assert bindings["lora.A"].member_ids == bindings["lora.B"].member_ids == member_ids
@@ -195,7 +196,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
     a = torch.randn(members, rank, input_dim, dtype=torch.float64, requires_grad=True)
     b = torch.randn(members, output_dim, rank, dtype=torch.float64, requires_grad=True)
     gain = torch.randn(members, dtype=torch.float64, requires_grad=True)
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     actual = fabric(
         inputs={"x": x, "base": base, "lora.gain": gain},
         banks=_bind_banks(program, {"lora.A": a, "lora.B": b}),
@@ -213,7 +214,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
 
     permutation = torch.randperm(members)
     permuted_ids = tuple(member_ids[index] for index in permutation.tolist())
-    permuted_program = alpha.build_lora_program(
+    permuted_program = mechanisms.build_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
@@ -222,7 +223,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
         member_ids=permuted_ids,
         dtype="float64",
     )
-    permuted = alpha.FormulaFabricV2(permuted_program)(
+    permuted = mechanisms.FormulaFabricV2(permuted_program)(
         inputs={"x": x, "base": base, "lora.gain": gain[permutation]},
         banks=_bind_banks(
             permuted_program,
@@ -233,7 +234,7 @@ def test_formula_v2_k_bank_matches_complete_gradients_and_member_permutation() -
 
 
 def test_formula_v2_rejects_mismatched_bank_bundle_member_order() -> None:
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=4,
         output_dim=3,
         rank=2,
@@ -243,20 +244,20 @@ def test_formula_v2_rejects_mismatched_bank_bundle_member_order() -> None:
     bank_b = next(binding for binding in payload["bindings"] if binding["name"] == "lora.B")
     bank_b["member_ids"] = list(reversed(bank_b["member_ids"]))
 
-    with pytest.raises(alpha.FormulaProgramError, match="inconsistent source or member order"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="inconsistent source or member order"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
 
 def test_dot_is_a_canonical_contract_alias() -> None:
-    vector = alpha.TensorType.axes(("B", "D"), sizes=(None, 5), dtype="float32")
-    weight = alpha.TensorType.axes(("R", "D"), sizes=(3, 5), dtype="float32")
-    left = alpha.InputBinding("x", vector)
-    right = alpha.BankBinding("bank.A", "arti/test-bank@1", "A", weight)
-    dot_program = alpha.FormulaProgram.build(
-        outputs=(alpha.dot(left, right, left_axis="D", right_axis="D"),)
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 5), dtype="float32")
+    weight = mechanisms.TensorType.axes(("R", "D"), sizes=(3, 5), dtype="float32")
+    left = mechanisms.InputBinding("x", vector)
+    right = mechanisms.BankBinding("bank.A", "arti/test-bank@1", "A", weight)
+    dot_program = mechanisms.FormulaProgram.build(
+        outputs=(mechanisms.dot(left, right, left_axis="D", right_axis="D"),)
     )
-    contract_program = alpha.FormulaProgram.build(
-        outputs=(alpha.contract(left, right, reduce_axes=(("D", "D"),)),)
+    contract_program = mechanisms.FormulaProgram.build(
+        outputs=(mechanisms.contract(left, right, reduce_axes=(("D", "D"),)),)
     )
 
     assert dot_program.to_dict() == contract_program.to_dict()
@@ -266,7 +267,7 @@ def test_dot_is_a_canonical_contract_alias() -> None:
 
 def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
     torch.manual_seed(9141)
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=5,
         output_dim=4,
         rank=2,
@@ -279,12 +280,12 @@ def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
     assert payload["limits"]["schema_ref"] == "arti/formula-limits@1"
     assert payload["slots"][0]["value_type"]["schema_ref"] == "arti/formula-tensor-type@1"
     assert payload["instructions"][0]["attributes"]["reduce_axes"] == [["Din", "Din"]]
-    restored_program = alpha.FormulaProgram.from_dict(payload)
+    restored_program = mechanisms.FormulaProgram.from_dict(payload)
     assert restored_program.fingerprint == program.fingerprint
     assert restored_program.to_dict() == payload
 
-    first = alpha.FormulaFabricV2(program)
-    second = alpha.FormulaFabricV2(restored_program)
+    first = mechanisms.FormulaFabricV2(program)
+    second = mechanisms.FormulaFabricV2(restored_program)
     second.load_state_dict(copy.deepcopy(first.state_dict()))
     inputs = {
         "x": torch.randn(2, 3, 5),
@@ -300,36 +301,36 @@ def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
 
     traced = first(inputs=inputs, banks=banks, return_trace=True).trace
     assert traced is not None
-    restored_trace = alpha.FormulaTraceV2.from_dict(
+    restored_trace = mechanisms.FormulaTraceV2.from_dict(
         json.loads(json.dumps(traced.to_dict()))
     )
-    assert alpha.FORMULA_TRACE_V1_SCHEMA_VERSION == 1
+    assert mechanisms.FORMULA_TRACE_V1_SCHEMA_VERSION == 1
     assert restored_trace == traced
     assert restored_trace.to_dict()["schema_ref"] == "arti/formula-trace@1"
     assert restored_trace.fingerprint == traced.fingerprint
     restored_trace.verify(restored_program)
     forged_trace = restored_trace.to_dict()
     forged_trace["atom_refs"][0] = "arti/formula-atom-add@1"
-    with pytest.raises(alpha.FormulaSchemaError, match="does not match"):
-        alpha.FormulaTraceV2.from_dict(forged_trace).verify(restored_program)
+    with pytest.raises(mechanisms.FormulaSchemaError, match="does not match"):
+        mechanisms.FormulaTraceV2.from_dict(forged_trace).verify(restored_program)
 
 
 def test_formula_v2_components_have_canonical_references_and_dependencies() -> None:
-    vector = alpha.TensorType.axes(("B", "D"), sizes=(None, 4))
-    matrix = alpha.TensorType.axes(("R", "D"), sizes=(2, 4))
-    contract_atom = alpha.ContractAtom(
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 4))
+    matrix = mechanisms.TensorType.axes(("R", "D"), sizes=(2, 4))
+    contract_atom = mechanisms.ContractAtom(
         vector, matrix, reduce_axes=(("D", "D"),), output_axes=("B", "R")
     )
-    scale_atom = alpha.ScaleAtom(vector, alpha.TensorType.scalar())
-    add_atom = alpha.AddAtom(vector)
-    reduce_atom = alpha.ReduceAtom(vector, axis="D")
+    scale_atom = mechanisms.ScaleAtom(vector, mechanisms.TensorType.scalar())
+    add_atom = mechanisms.AddAtom(vector)
+    reduce_atom = mechanisms.ReduceAtom(vector, axis="D")
     assert arti.component_ref(contract_atom) == "arti/formula-atom-contract@1"
     assert arti.component_ref(scale_atom) == "arti/formula-atom-scale@1"
     assert arti.component_ref(add_atom) == "arti/formula-atom-add@1"
     assert arti.component_ref(reduce_atom) == "arti/formula-atom-reduce@1"
 
-    fabric = alpha.FormulaFabricV2(
-        alpha.build_lora_program(
+    fabric = mechanisms.FormulaFabricV2(
+        mechanisms.build_lora_program(
             input_dim=4,
             output_dim=3,
             rank=2,
@@ -359,16 +360,215 @@ def test_formula_v2_components_have_canonical_references_and_dependencies() -> N
         arti.validate_component_provenance(forged)
 
 
+def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
+    value_type = mechanisms.TensorType.axes(
+        ("B", "N", "D"), sizes=(None, 6, 4), dtype="float32", domain="workspace"
+    )
+    index_type = mechanisms.TensorType.axes(
+        ("B", "K"), sizes=(None, 3), dtype="int64", domain="topology"
+    )
+    active_type = mechanisms.TensorType.axes(
+        ("B", "K", "D"), sizes=(None, 3, 4), dtype="float32", domain="workspace"
+    )
+    value = mechanisms.InputBinding("value", value_type)
+    delta = mechanisms.InputBinding("delta", active_type)
+    index_binding = mechanisms.BankBinding(
+        "topology.indices",
+        "arti/test-topology-bank@1",
+        "indices",
+        index_type,
+    )
+    active = mechanisms.gather(value, index_binding, axis="N", index_axis="K")
+    image = mechanisms.reshape(
+        active,
+        output_axes=("B", "H", "W", "D"),
+        output_sizes=(None, 1, 3, 4),
+    )
+    transposed = mechanisms.permute(image, output_axes=("B", "W", "H", "D"))
+    restored = mechanisms.scatter(
+        value,
+        index_binding,
+        mechanisms.add(active, delta),
+        axis="N",
+        index_axis="K",
+    )
+    program = mechanisms.FormulaProgram.build(outputs=(transposed, restored))
+    reloaded = mechanisms.FormulaProgram.from_dict(
+        json.loads(json.dumps(program.to_dict()))
+    )
+    fabric = mechanisms.FormulaFabricV2(reloaded)
+
+    source = torch.arange(48, dtype=torch.float32).reshape(2, 6, 4)
+    source.requires_grad_(True)
+    change = torch.randn(2, 3, 4, requires_grad=True)
+    indices = torch.tensor([[4, 1, 3], [0, 5, 2]], dtype=torch.int64)
+    result = fabric(
+        inputs={"value": source, "delta": change},
+        banks={"topology.indices": index_binding.bind(indices)},
+        return_trace=True,
+    )
+
+    expanded = indices.unsqueeze(-1).expand(-1, -1, 4)
+    expected_active = torch.gather(source, 1, expanded)
+    expected_restored = torch.scatter(source, 1, expanded, expected_active + change)
+    torch.testing.assert_close(
+        result.output(program.outputs[0]),
+        expected_active.reshape(2, 1, 3, 4).permute(0, 2, 1, 3),
+    )
+    torch.testing.assert_close(result.output(program.outputs[1]), expected_restored)
+    assert result.trace is not None
+    assert set(result.trace.atom_refs) == {
+        "arti/formula-atom-gather@1",
+        "arti/formula-atom-reshape@1",
+        "arti/formula-atom-permute@1",
+        "arti/formula-atom-add@1",
+        "arti/formula-atom-scatter@1",
+    }
+    result.output(program.outputs[1]).sum().backward()
+    assert source.grad is not None and torch.isfinite(source.grad).all()
+    assert change.grad is not None and torch.isfinite(change.grad).all()
+
+    spec = arti.component_spec(fabric)
+    assert {
+        "arti/formula-atom-gather@1",
+        "arti/formula-atom-reshape@1",
+        "arti/formula-atom-permute@1",
+        "arti/formula-atom-scatter@1",
+    }.issubset(spec.dependencies)
+    assert arti.validate_component_provenance(
+        arti.component_provenance(fabric)
+    ) == arti.component_provenance(fabric)
+
+
+def test_formula_v2_native_fold_unfold_changes_the_active_compute_surface() -> None:
+    value_type = mechanisms.TensorType.axes(
+        ("B", "N", "D"), sizes=(None, 7, 4), dtype="float32", domain="workspace"
+    )
+    index_type = mechanisms.TensorType.axes(
+        ("B", "K"), sizes=(None, 3), dtype="int64", domain="topology"
+    )
+    active_type = mechanisms.TensorType.axes(
+        ("B", "K", "D"), sizes=(None, 3, 4), dtype="float32", domain="workspace"
+    )
+    value = mechanisms.InputBinding("value", value_type)
+    delta = mechanisms.InputBinding("delta", active_type)
+    topology = mechanisms.BankBinding(
+        "topology.indices",
+        "arti/test-topology-bank@1",
+        "active",
+        index_type,
+    )
+
+    folded = mechanisms.fold(value, topology, axis="N", index_axis="K")
+    restored = mechanisms.unfold(folded, mechanisms.add(folded.active, delta))
+    program = mechanisms.FormulaProgram.build(outputs=(folded.active, restored))
+    program = mechanisms.FormulaProgram.from_dict(json.loads(json.dumps(program.to_dict())))
+    fabric = mechanisms.FormulaFabricV2(program)
+
+    assert folded.active.value_type.sizes == (None, 3, 4)
+    assert math.prod(size for size in value_type.sizes[1:] if size is not None) == 28
+    assert math.prod(size for size in folded.active.value_type.sizes[1:] if size is not None) == 12
+    assert tuple(item.atom_ref for item in program.instructions) == (
+        "arti/fold@2",
+        "arti/formula-atom-add@1",
+        "arti/unfold@2",
+    )
+
+    source = torch.arange(56, dtype=torch.float32).reshape(2, 7, 4).requires_grad_()
+    change = torch.randn(2, 3, 4, requires_grad=True)
+    indices = torch.tensor([[6, 2, 4], [1, 5, 0]], dtype=torch.int64)
+    result = fabric(
+        inputs={"value": source, "delta": change},
+        banks={"topology.indices": topology.bind(indices)},
+        return_trace=True,
+    )
+
+    expanded = indices.unsqueeze(-1).expand(-1, -1, 4)
+    expected_active = torch.gather(source, 1, expanded)
+    expected = torch.scatter(source, 1, expanded, expected_active + change)
+    torch.testing.assert_close(result.output(program.outputs[0]), expected_active)
+    torch.testing.assert_close(result.output(program.outputs[1]), expected)
+    assert result.trace is not None
+    assert result.trace.atom_refs == (
+        "arti/fold@2",
+        "arti/formula-atom-add@1",
+        "arti/unfold@2",
+    )
+    result.output(program.outputs[1]).square().mean().backward()
+    assert source.grad is not None and torch.isfinite(source.grad).all()
+    assert change.grad is not None and torch.isfinite(change.grad).all()
+
+    spec = arti.component_spec(fabric)
+    assert {"arti/fold@2", "arti/unfold@2"}.issubset(spec.dependencies)
+    assert arti.validate_component_provenance(
+        arti.component_provenance(fabric)
+    ) == arti.component_provenance(fabric)
+
+
+def test_formula_v2_native_fold_state_carries_boolean_mask_and_rejects_bad_record() -> None:
+    mask_type = mechanisms.TensorType.axes(
+        ("B", "N"), sizes=(1, 5), dtype="boolean", domain="validity"
+    )
+    index_type = mechanisms.TensorType.axes(
+        ("B", "K"), sizes=(1, 2), dtype="int64", domain="topology"
+    )
+    mask = mechanisms.InputBinding("mask", mask_type)
+    topology = mechanisms.InputBinding("indices", index_type)
+    folded = mechanisms.fold(mask, topology, axis="N", index_axis="K")
+    program = mechanisms.FormulaProgram.build(
+        outputs=(folded.active, mechanisms.unfold(folded, folded.active))
+    )
+    fabric = mechanisms.FormulaFabricV2(program)
+    source = torch.tensor([[True, False, True, True, False]])
+    indices = torch.tensor([[3, 1]], dtype=torch.int64)
+    result = fabric(inputs={"mask": source, "indices": indices}, banks={})
+
+    torch.testing.assert_close(result.output(program.outputs[0]), source[:, [3, 1]])
+    torch.testing.assert_close(result.output(program.outputs[1]), source)
+
+    with pytest.raises(mechanisms.FormulaBindingError, match="unique indices"):
+        fabric(
+            inputs={"mask": source, "indices": torch.tensor([[2, 2]], dtype=torch.int64)},
+            banks={},
+        )
+
+
+def test_formula_v2_topology_scatter_rejects_duplicate_positions() -> None:
+    value_type = mechanisms.TensorType.axes(
+        ("B", "N", "D"), sizes=(1, 4, 2), dtype="float32"
+    )
+    index_type = mechanisms.TensorType.axes(
+        ("B", "K"), sizes=(1, 2), dtype="int64"
+    )
+    update_type = mechanisms.TensorType.axes(
+        ("B", "K", "D"), sizes=(1, 2, 2), dtype="float32"
+    )
+    atom = mechanisms.ScatterAtom(
+        value_type,
+        index_type,
+        update_type,
+        axis="N",
+        index_axis="K",
+    )
+
+    with pytest.raises(mechanisms.FormulaBindingError, match="unique indices"):
+        atom(
+            torch.zeros(1, 4, 2),
+            torch.tensor([[1, 1]], dtype=torch.int64),
+            torch.ones(1, 2, 2),
+        )
+
+
 def test_formula_fabric_v1_identity_remains_frozen() -> None:
-    legacy_program = alpha.FormulaFabricProgram(
+    legacy_program = mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
         steps=(
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.MULTIPLY, 3),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.MULTIPLY, 3),),
         ),
     )
-    legacy = alpha.FormulaFabric(legacy_program)
+    legacy = mechanisms.FormulaFabric(legacy_program)
 
     assert legacy_program.fingerprint == (
         "ae99758c53615b27095201ed0c4fece21df276d79e14c6fc9ac5f5cea1770d71"
@@ -382,13 +582,13 @@ def test_formula_fabric_v1_identity_remains_frozen() -> None:
 
 
 def test_formula_v2_rejects_missing_unknown_and_wrong_shape_bindings() -> None:
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=5,
         output_dim=4,
         rank=2,
         source_ref="arti/test-lora-bank@1",
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     inputs = {
         "x": torch.randn(2, 3, 5),
         "base": torch.randn(2, 3, 4),
@@ -397,74 +597,74 @@ def test_formula_v2_rejects_missing_unknown_and_wrong_shape_bindings() -> None:
     bank_values = {"lora.A": torch.randn(2, 5), "lora.B": torch.randn(4, 2)}
     banks = _bind_banks(program, bank_values)
 
-    with pytest.raises(alpha.FormulaBindingError, match="keys must be"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="keys must be"):
         fabric(inputs={"x": inputs["x"], "base": inputs["base"]}, banks=banks)
-    with pytest.raises(alpha.FormulaBindingError, match="keys must be"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="keys must be"):
         fabric(inputs={**inputs, "unknown": torch.tensor(0.0)}, banks=banks)
-    with pytest.raises(alpha.FormulaBindingError, match="expected 5"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="expected 5"):
         fabric(inputs={**inputs, "x": torch.randn(2, 3, 6)}, banks=banks)
-    with pytest.raises(alpha.FormulaBindingError, match="conflicting extents"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="conflicting extents"):
         fabric(inputs={**inputs, "base": torch.randn(4, 3, 4)}, banks=banks)
-    with pytest.raises(alpha.FormulaBindingError, match="requires FormulaBankOperand"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="requires FormulaBankOperand"):
         fabric(inputs=inputs, banks=bank_values)
 
     mixed_dtype_inputs = {**inputs, "base": inputs["base"].to(torch.float64)}
-    with pytest.raises(alpha.FormulaBindingError, match="different dtypes"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="different dtypes"):
         fabric(inputs=mixed_dtype_inputs, banks=banks)
-    with pytest.raises(alpha.FormulaBindingError, match="different dtypes"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="different dtypes"):
         fabric.bind_tensors(inputs=mixed_dtype_inputs, banks=banks)
 
     wrong_identity = dict(banks)
-    wrong_identity["lora.A"] = alpha.FormulaBankOperand(
+    wrong_identity["lora.A"] = mechanisms.FormulaBankOperand(
         bank_values["lora.A"],
         source_ref="arti/wrong-bank@1",
         partition_id="A",
     )
-    with pytest.raises(alpha.FormulaBindingError, match="does not match"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="does not match"):
         fabric(inputs=inputs, banks=wrong_identity)
 
 
 def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
-    with pytest.raises(alpha.FormulaTypeError, match="different domains"):
-        alpha.add(
-            alpha.InputBinding("a", alpha.TensorType.scalar(domain="a")),
-            alpha.InputBinding("b", alpha.TensorType.scalar(domain="b")),
+    with pytest.raises(mechanisms.FormulaTypeError, match="different domains"):
+        mechanisms.add(
+            mechanisms.InputBinding("a", mechanisms.TensorType.scalar(domain="a")),
+            mechanisms.InputBinding("b", mechanisms.TensorType.scalar(domain="b")),
         )
-    with pytest.raises(alpha.FormulaTypeError, match="must be a permutation"):
-        alpha.contract(
-            alpha.InputBinding("x", alpha.TensorType.axes(("B", "D"))),
-            alpha.InputBinding("a", alpha.TensorType.axes(("R", "D"))),
+    with pytest.raises(mechanisms.FormulaTypeError, match="must be a permutation"):
+        mechanisms.contract(
+            mechanisms.InputBinding("x", mechanisms.TensorType.axes(("B", "D"))),
+            mechanisms.InputBinding("a", mechanisms.TensorType.axes(("R", "D"))),
             reduce_axes=(("D", "D"),),
             output_axes=("B",),
         )
-    with pytest.raises(alpha.FormulaTypeError, match="exactly one reduction"):
-        alpha.contract(
-            alpha.InputBinding("x", alpha.TensorType.axes(("B", "I", "J"))),
-            alpha.InputBinding("a", alpha.TensorType.axes(("R", "I", "J"))),
+    with pytest.raises(mechanisms.FormulaTypeError, match="exactly one reduction"):
+        mechanisms.contract(
+            mechanisms.InputBinding("x", mechanisms.TensorType.axes(("B", "I", "J"))),
+            mechanisms.InputBinding("a", mechanisms.TensorType.axes(("R", "I", "J"))),
             reduce_axes=(("I", "I"), ("J", "J")),
         )
-    with pytest.raises(alpha.FormulaTypeError, match="alias preserved axes"):
-        alpha.contract(
-            alpha.InputBinding("x", alpha.TensorType.axes(("B", "D"))),
-            alpha.InputBinding("a", alpha.TensorType.axes(("D", "R"))),
+    with pytest.raises(mechanisms.FormulaTypeError, match="alias preserved axes"):
+        mechanisms.contract(
+            mechanisms.InputBinding("x", mechanisms.TensorType.axes(("B", "D"))),
+            mechanisms.InputBinding("a", mechanisms.TensorType.axes(("D", "R"))),
             reduce_axes=(("D", "R"),),
         )
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     payload["hidden_parameter"] = 1
-    with pytest.raises(alpha.FormulaSchemaError, match="missing or unknown"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaSchemaError, match="missing or unknown"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     payload["instructions"][0]["attributes"]["unknown"] = True
-    with pytest.raises(alpha.FormulaProgramError, match="requires arity"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="requires arity"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -477,10 +677,10 @@ def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
         if item["atom_ref"] == "arti/formula-atom-reduce@1"
     )
     reduce_instruction["attributes"]["mode"] = "max"
-    with pytest.raises(alpha.FormulaProgramError, match="only supports mode='sum'"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="only supports mode='sum'"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     scale_instruction = next(
@@ -489,30 +689,66 @@ def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
         if item["atom_ref"] == "arti/formula-atom-scale@1"
     )
     scale_instruction["attributes"]["factor_axes"] = ["B"]
-    with pytest.raises(alpha.FormulaProgramError, match="factor_axes must exactly match"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="factor_axes must exactly match"):
+        mechanisms.FormulaProgram.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("axes", ["B", "N", "E"]),
+        ("sizes", [None, None, 4]),
+        ("dtype", "float64"),
+        ("domain", "mismatched-domain"),
+    ),
+)
+def test_formula_v2_rejects_binding_slot_type_split(
+    field: str, value: object
+) -> None:
+    payload = mechanisms.build_lora_program(
+        input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
+    ).to_dict()
+    slot = next(item for item in payload["slots"] if item["slot_id"] == "x")
+    slot["value_type"][field] = value
+
+    with pytest.raises(mechanisms.FormulaProgramError, match="exactly match its binding") as caught:
+        mechanisms.FormulaProgram.from_dict(payload)
+
+    assert caught.value.code == "FF2_BINDING_TYPE"
+
+
+def test_formula_v2_requires_one_same_named_slot_per_binding() -> None:
+    payload = mechanisms.build_lora_program(
+        input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
+    ).to_dict()
+    payload["slots"] = [item for item in payload["slots"] if item["slot_id"] != "x"]
+
+    with pytest.raises(mechanisms.FormulaProgramError, match="every binding") as caught:
+        mechanisms.FormulaProgram.from_dict(payload)
+
+    assert caught.value.code == "FF2_SLOT_PRODUCER"
 
 
 def test_formula_v2_standalone_atoms_share_runtime_validation() -> None:
-    vector = alpha.TensorType.axes(("B", "D"), sizes=(None, 4))
-    matrix = alpha.TensorType.axes(("R", "D"), sizes=(2, 4))
-    contract_atom = alpha.ContractAtom(
+    vector = mechanisms.TensorType.axes(("B", "D"), sizes=(None, 4))
+    matrix = mechanisms.TensorType.axes(("R", "D"), sizes=(2, 4))
+    contract_atom = mechanisms.ContractAtom(
         vector, matrix, reduce_axes=(("D", "D"),), output_axes=("B", "R")
     )
 
-    with pytest.raises(alpha.FormulaBindingError, match="same dtype"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="same dtype"):
         contract_atom(torch.randn(3, 4, dtype=torch.float32), torch.randn(2, 4, dtype=torch.float64))
 
-    scale_atom = alpha.ScaleAtom(
-        alpha.TensorType.axes(("B", "K", "D"), sizes=(None, None, 4)),
-        alpha.TensorType.axes(("K",), sizes=(None,)),
+    scale_atom = mechanisms.ScaleAtom(
+        mechanisms.TensorType.axes(("B", "K", "D"), sizes=(None, None, 4)),
+        mechanisms.TensorType.axes(("K",), sizes=(None,)),
     )
-    with pytest.raises(alpha.FormulaBindingError, match="conflicting extents"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="conflicting extents"):
         scale_atom(torch.randn(2, 3, 4), torch.randn(5))
 
 
 def test_formula_v2_rejects_instruction_writes_to_binding_slots() -> None:
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     payload["instructions"].append(
@@ -526,57 +762,57 @@ def test_formula_v2_rejects_instruction_writes_to_binding_slots() -> None:
         }
     )
 
-    with pytest.raises(alpha.FormulaProgramError, match="own produced slot"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="own produced slot"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
 
 def test_formula_v2_rejects_malformed_slot_and_output_sequences() -> None:
-    with pytest.raises(alpha.FormulaProgramError, match="instruction-produced"):
-        alpha.FormulaProgram.build(
-            outputs=(alpha.InputBinding("x", alpha.TensorType.axes(("B", "D"))),)
+    with pytest.raises(mechanisms.FormulaProgramError, match="instruction-produced"):
+        mechanisms.FormulaProgram.build(
+            outputs=(mechanisms.InputBinding("x", mechanisms.TensorType.axes(("B", "D"))),)
         )
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     payload["instructions"][0]["input_slots"] = "x"
-    with pytest.raises(alpha.FormulaSchemaError, match="input_slots must be a sequence"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaSchemaError, match="input_slots must be a sequence"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
-    payload = alpha.build_lora_program(
+    payload = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     ).to_dict()
     payload["outputs"] = payload["outputs"] * 2
-    with pytest.raises(alpha.FormulaProgramError, match="must not contain duplicates"):
-        alpha.FormulaProgram.from_dict(payload)
+    with pytest.raises(mechanisms.FormulaProgramError, match="must not contain duplicates"):
+        mechanisms.FormulaProgram.from_dict(payload)
 
 
 def test_formula_v2_scale_and_add_accumulation_policy_is_explicit() -> None:
-    value_type = alpha.TensorType.axes(("B", "D"), sizes=(2, 4), dtype="float16")
-    factor_type = alpha.TensorType.scalar(dtype="float16")
+    value_type = mechanisms.TensorType.axes(("B", "D"), sizes=(2, 4), dtype="float16")
+    factor_type = mechanisms.TensorType.scalar(dtype="float16")
     value = torch.randn(2, 4, dtype=torch.float16)
     factor = torch.tensor(0.75, dtype=torch.float16)
 
-    scale_atom = alpha.ScaleAtom(
+    scale_atom = mechanisms.ScaleAtom(
         value_type, factor_type, accumulation_dtype="float32"
     )
-    add_atom = alpha.AddAtom(value_type, accumulation_dtype="float32")
+    add_atom = mechanisms.AddAtom(value_type, accumulation_dtype="float32")
     scaled = scale_atom(value, factor)
     actual = add_atom(value, scaled)
     scaled_expected = value.float().mul(factor.float()).to(dtype=torch.float16)
     expected = (value.float() + scaled_expected.float()).to(dtype=torch.float16)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-    expression = alpha.add(
-        alpha.InputBinding("left", value_type),
-        alpha.scale(
-            alpha.InputBinding("value", value_type),
-            alpha.InputBinding("factor", factor_type),
+    expression = mechanisms.add(
+        mechanisms.InputBinding("left", value_type),
+        mechanisms.scale(
+            mechanisms.InputBinding("value", value_type),
+            mechanisms.InputBinding("factor", factor_type),
             accumulation_dtype="float32",
         ),
         accumulation_dtype="float32",
     )
-    program = alpha.FormulaProgram.build(outputs=(expression,))
+    program = mechanisms.FormulaProgram.build(outputs=(expression,))
     attributes = [dict(item.attributes) for item in program.instructions]
     assert attributes == [
         {"accumulation_dtype": "float32", "factor_axes": ()},
@@ -584,30 +820,30 @@ def test_formula_v2_scale_and_add_accumulation_policy_is_explicit() -> None:
     ]
 
 def test_formula_v2_limits_are_serialized_and_enforced() -> None:
-    with pytest.raises(alpha.FormulaProgramError, match="instruction count"):
-        alpha.build_lora_program(
+    with pytest.raises(mechanisms.FormulaProgramError, match="instruction count"):
+        mechanisms.build_lora_program(
             input_dim=3,
             output_dim=2,
             rank=1,
             source_ref="arti/test-bank@1",
-            limits=alpha.FormulaLimits(max_instructions=3),
+            limits=mechanisms.FormulaLimits(max_instructions=3),
         )
 
-    limits = alpha.FormulaLimits(max_tensor_elements=10)
-    program = alpha.build_lora_program(
+    limits = mechanisms.FormulaLimits(max_tensor_elements=10)
+    program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
         source_ref="arti/test-bank@1",
         limits=limits,
     )
-    default_program = alpha.build_lora_program(
+    default_program = mechanisms.build_lora_program(
         input_dim=3, output_dim=2, rank=1, source_ref="arti/test-bank@1"
     )
     assert program.fingerprint != default_program.fingerprint
     assert program.to_dict()["limits"] == limits.to_dict()
 
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     values = {
         "x": torch.randn(2, 2, 3),
         "base": torch.randn(2, 2, 2),
@@ -615,7 +851,7 @@ def test_formula_v2_limits_are_serialized_and_enforced() -> None:
         "lora.A": torch.randn(1, 3),
         "lora.B": torch.randn(2, 1),
     }
-    with pytest.raises(alpha.FormulaBindingError, match="element limit"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="element limit"):
         fabric(
             inputs={key: values[key] for key in ("x", "base", "lora.gain")},
             banks=_bind_banks(program, values),
@@ -623,7 +859,7 @@ def test_formula_v2_limits_are_serialized_and_enforced() -> None:
 
 
 def test_lora_recipe_records_explicit_accumulation_policy() -> None:
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -641,8 +877,8 @@ def test_lora_recipe_records_explicit_accumulation_policy() -> None:
 
 
 def test_formula_preflight_accounts_for_float32_working_tensors() -> None:
-    limits = alpha.FormulaLimits(max_tensor_bytes=20)
-    safe_program = alpha.build_lora_program(
+    limits = mechanisms.FormulaLimits(max_tensor_bytes=20)
+    safe_program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -651,7 +887,7 @@ def test_formula_preflight_accounts_for_float32_working_tensors() -> None:
         contract_accumulation_dtype="activation",
         limits=limits,
     )
-    strict_program = alpha.build_lora_program(
+    strict_program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -668,21 +904,21 @@ def test_formula_preflight_accounts_for_float32_working_tensors() -> None:
         "lora.B": torch.randn(2, 1, dtype=torch.float16),
     }
     inputs = {key: values[key] for key in ("x", "base", "lora.gain")}
-    alpha.FormulaFabricV2(safe_program).bind_tensors(
+    mechanisms.FormulaFabricV2(safe_program).bind_tensors(
         inputs=inputs,
         banks=_bind_banks(safe_program, values),
     )
-    with pytest.raises(alpha.FormulaBindingError, match="byte limit"):
-        alpha.FormulaFabricV2(strict_program).bind_tensors(
+    with pytest.raises(mechanisms.FormulaBindingError, match="byte limit"):
+        mechanisms.FormulaFabricV2(strict_program).bind_tensors(
             inputs=inputs,
             banks=_bind_banks(strict_program, values),
         )
 
 
 def test_formula_preflight_limits_aggregate_live_working_set() -> None:
-    safe_limits = alpha.FormulaLimits(max_working_bytes=84)
-    strict_limits = alpha.FormulaLimits(max_working_bytes=83)
-    safe_program = alpha.build_lora_program(
+    safe_limits = mechanisms.FormulaLimits(max_working_bytes=84)
+    strict_limits = mechanisms.FormulaLimits(max_working_bytes=83)
+    safe_program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -690,7 +926,7 @@ def test_formula_preflight_limits_aggregate_live_working_set() -> None:
         dtype="float16",
         limits=safe_limits,
     )
-    strict_program = alpha.build_lora_program(
+    strict_program = mechanisms.build_lora_program(
         input_dim=3,
         output_dim=2,
         rank=1,
@@ -707,12 +943,12 @@ def test_formula_preflight_limits_aggregate_live_working_set() -> None:
     }
     inputs = {key: values[key] for key in ("x", "base", "lora.gain")}
 
-    alpha.FormulaFabricV2(safe_program).bind_tensors(
+    mechanisms.FormulaFabricV2(safe_program).bind_tensors(
         inputs=inputs,
         banks=_bind_banks(safe_program, values),
     )
-    with pytest.raises(alpha.FormulaBindingError, match="aggregate working byte limit"):
-        alpha.FormulaFabricV2(strict_program).bind_tensors(
+    with pytest.raises(mechanisms.FormulaBindingError, match="aggregate working byte limit"):
+        mechanisms.FormulaFabricV2(strict_program).bind_tensors(
             inputs=inputs,
             banks=_bind_banks(strict_program, values),
         )
@@ -721,17 +957,17 @@ def test_formula_preflight_limits_aggregate_live_working_set() -> None:
 
 
 def test_formula_v2_rejects_dynamic_output_before_tensor_execution(monkeypatch) -> None:
-    value_type = alpha.TensorType.axes(
+    value_type = mechanisms.TensorType.axes(
         ("B", "D"), sizes=(None, 2), dtype="float32"
     )
-    bank_type = alpha.TensorType.axes(("R", "D"), sizes=(20, 2), dtype="float32")
-    x = alpha.InputBinding("x", value_type)
-    bank = alpha.BankBinding("bank", "arti/test-bank@1", "A", bank_type)
-    program = alpha.FormulaProgram.build(
-        outputs=(alpha.contract(x, bank, reduce_axes=(("D", "D"),)),),
-        limits=alpha.FormulaLimits(max_tensor_elements=100),
+    bank_type = mechanisms.TensorType.axes(("R", "D"), sizes=(20, 2), dtype="float32")
+    x = mechanisms.InputBinding("x", value_type)
+    bank = mechanisms.BankBinding("bank", "arti/test-bank@1", "A", bank_type)
+    program = mechanisms.FormulaProgram.build(
+        outputs=(mechanisms.contract(x, bank, reduce_axes=(("D", "D"),)),),
+        limits=mechanisms.FormulaLimits(max_tensor_elements=100),
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     called = False
 
     def fail_if_executed(*_args, **_kwargs):
@@ -740,7 +976,7 @@ def test_formula_v2_rejects_dynamic_output_before_tensor_execution(monkeypatch) 
         raise AssertionError("instruction executed before allocation admission")
 
     monkeypatch.setattr(formula_v2, "_execute_instruction", fail_if_executed)
-    with pytest.raises(alpha.FormulaBindingError, match="output allocation"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="output allocation"):
         fabric(
             inputs={"x": torch.randn(20, 2)},
             banks={"bank": bank.bind(torch.randn(20, 2))},
@@ -749,23 +985,23 @@ def test_formula_v2_rejects_dynamic_output_before_tensor_execution(monkeypatch) 
 
 
 def test_formula_v2_bank_sources_require_canonical_component_references() -> None:
-    with pytest.raises(alpha.FormulaSchemaError, match="canonical component reference"):
-        alpha.BankBinding(
+    with pytest.raises(mechanisms.FormulaSchemaError, match="canonical component reference"):
+        mechanisms.BankBinding(
             "bank",
             "not-a-component",
             "A",
-            alpha.TensorType.axes(("R", "D"), sizes=(2, 3)),
+            mechanisms.TensorType.axes(("R", "D"), sizes=(2, 3)),
         )
 
 
 def test_formula_v2_direct_constructors_reject_string_sequences() -> None:
-    value_type = alpha.TensorType.axes(("D",), sizes=(2,))
-    with pytest.raises(alpha.FormulaSchemaError, match="axes and sizes must be sequences"):
-        alpha.TensorType("D", (2,))
-    with pytest.raises(alpha.FormulaSchemaError, match="axes and sizes must be sequences"):
-        alpha.TensorType(("D",), "2")
-    with pytest.raises(alpha.FormulaSchemaError, match="member_ids must be a sequence"):
-        alpha.BankBinding(
+    value_type = mechanisms.TensorType.axes(("D",), sizes=(2,))
+    with pytest.raises(mechanisms.FormulaSchemaError, match="axes and sizes must be sequences"):
+        mechanisms.TensorType("D", (2,))
+    with pytest.raises(mechanisms.FormulaSchemaError, match="axes and sizes must be sequences"):
+        mechanisms.TensorType(("D",), "2")
+    with pytest.raises(mechanisms.FormulaSchemaError, match="member_ids must be a sequence"):
+        mechanisms.BankBinding(
             "bank",
             "arti/test-bank@1",
             "A",
@@ -773,16 +1009,16 @@ def test_formula_v2_direct_constructors_reject_string_sequences() -> None:
             bundle_id="bundle",
             member_ids="ab",
         )
-    with pytest.raises(alpha.FormulaBindingError, match="member_ids must be a sequence"):
-        alpha.FormulaBankOperand(
+    with pytest.raises(mechanisms.FormulaBindingError, match="member_ids must be a sequence"):
+        mechanisms.FormulaBankOperand(
             torch.randn(2),
             "arti/test-bank@1",
             "A",
             bundle_id="bundle",
             member_ids="ab",
         )
-    with pytest.raises(alpha.FormulaSchemaError, match="input_slots must be a sequence"):
-        alpha.FormulaInstructionV2(
+    with pytest.raises(mechanisms.FormulaSchemaError, match="input_slots must be a sequence"):
+        mechanisms.FormulaInstructionV2(
             "i0",
             1,
             "arti/formula-atom-add@1",
@@ -790,34 +1026,34 @@ def test_formula_v2_direct_constructors_reject_string_sequences() -> None:
             "%0",
             (("accumulation_dtype", "activation"),),
         )
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=2,
         output_dim=2,
         rank=1,
         source_ref="arti/test-bank@1",
     )
-    with pytest.raises(alpha.FormulaSchemaError, match="outputs must be a sequence"):
-        alpha.FormulaProgram(
+    with pytest.raises(mechanisms.FormulaSchemaError, match="outputs must be a sequence"):
+        mechanisms.FormulaProgram(
             program.bindings,
             program.slots,
             program.instructions,
             program.outputs[0],
             limits=program.limits,
         )
-    with pytest.raises(alpha.FormulaSchemaError, match="trace identifiers must be sequences"):
-        alpha.FormulaTraceV2(program.fingerprint, "i0", ("atom",), ("output",))
+    with pytest.raises(mechanisms.FormulaSchemaError, match="trace identifiers must be sequences"):
+        mechanisms.FormulaTraceV2(program.fingerprint, "i0", ("atom",), ("output",))
 
 
 def test_contract_rejects_unequal_dynamic_reduction_extents() -> None:
-    left = alpha.InputBinding(
-        "left", alpha.TensorType.axes(("B", "I"), sizes=(None, None))
+    left = mechanisms.InputBinding(
+        "left", mechanisms.TensorType.axes(("B", "I"), sizes=(None, None))
     )
-    right = alpha.InputBinding(
-        "right", alpha.TensorType.axes(("R", "J"), sizes=(None, None))
+    right = mechanisms.InputBinding(
+        "right", mechanisms.TensorType.axes(("R", "J"), sizes=(None, None))
     )
-    program = alpha.FormulaProgram.build(
+    program = mechanisms.FormulaProgram.build(
         outputs=(
-            alpha.contract(
+            mechanisms.contract(
                 left,
                 right,
                 reduce_axes=(("I", "J"),),
@@ -825,8 +1061,8 @@ def test_contract_rejects_unequal_dynamic_reduction_extents() -> None:
             ),
         )
     )
-    with pytest.raises(alpha.FormulaBindingError, match="reduction extents differ"):
-        alpha.FormulaFabricV2(program)(
+    with pytest.raises(mechanisms.FormulaBindingError, match="reduction extents differ"):
+        mechanisms.FormulaFabricV2(program)(
             inputs={"left": torch.randn(2, 3), "right": torch.randn(4, 5)},
             banks={},
         )
@@ -834,7 +1070,7 @@ def test_contract_rejects_unequal_dynamic_reduction_extents() -> None:
 
 def test_formula_execution_plan_is_positional_compilable_and_versioned() -> None:
     torch.manual_seed(9161)
-    program = alpha.build_lora_program(
+    program = mechanisms.build_lora_program(
         input_dim=5,
         output_dim=4,
         rank=2,
@@ -842,7 +1078,7 @@ def test_formula_execution_plan_is_positional_compilable_and_versioned() -> None
         source_ref="arti/test-bank@1",
         dtype="float32",
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     values = {
         "x": torch.randn(2, 3, 5, requires_grad=True),
         "base": torch.randn(2, 3, 4, requires_grad=True),
@@ -870,10 +1106,10 @@ def test_formula_execution_plan_is_positional_compilable_and_versioned() -> None
 
     with pytest.raises(TypeError, match="PreparedFormulaBindings"):
         plan(prepared.values)
-    forged = alpha.PreparedFormulaBindings(
+    forged = mechanisms.PreparedFormulaBindings(
         "0" * 64,
         prepared.binding_names,
         prepared.values,
     )
-    with pytest.raises(alpha.FormulaBindingError, match="different program"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="different program"):
         plan(forged)

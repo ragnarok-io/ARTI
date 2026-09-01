@@ -630,6 +630,16 @@ def _adaptive_pulse_dependencies(component: Any) -> Sequence[str]:
     )
 
 
+def _arti_layer_config(component: Any) -> Mapping[str, Any]:
+    return {
+        "pulse": component_spec(_attr(component, "pulse")).to_dict(),
+    }
+
+
+def _arti_layer_dependencies(component: Any) -> Sequence[str]:
+    return (component_ref(_attr(component, "pulse")),)
+
+
 def _learned_pulse_config(component: Any) -> Mapping[str, Any]:
     fold = getattr(component, "fold", None)
     return _dropout_config(
@@ -724,6 +734,39 @@ def _refiner_dependencies(component: Any) -> Sequence[str]:
     if registration is not None:
         result.append(registration.reference)
     return result
+
+
+def _bank_execution_signature_v2_dependencies(component: Any) -> Sequence[str]:
+    result = {
+        "arti/gradient-contract@1",
+        "arti/query-execution-signature@1",
+        "arti/shape-relation@1",
+        "arti/tensor-schema@1",
+        "arti/terminal-output-abi@1",
+        component.program_ref,
+        component.query_signature.query_ref,
+        component.terminal_adapter_ref,
+    }
+    if component.local_formula_ref is not None:
+        result.add(component.local_formula_ref)
+    if component.local_refine_ref is not None:
+        result.add(component.local_refine_ref)
+    return tuple(sorted(result))
+
+
+def _federal_recall_v2_dependencies(component: Any) -> Sequence[str]:
+    result = {
+        "arti/bank-execution-signature@2",
+        "arti/sealed-bank-query@1",
+        "arti/terminal-output-abi@1",
+    }
+    for bank_id in component.banks:
+        result.update(
+            _bank_execution_signature_v2_dependencies(
+                component.banks[bank_id].signature
+            )
+        )
+    return tuple(sorted(result))
 
 
 def _target_bank_updater_config(component: Any) -> Mapping[str, Any]:
@@ -1211,11 +1254,12 @@ def _build_default_registry() -> ComponentRegistry:
     )
     from .context import FrameContext, TensorContext
     from .emission import EmissionRouter, EmissionRouterConfig
+    from .arti_layer import ARTILayer
     from .layers import (
         ARTIDynamicStateLayer,
         ARTILatentRecallField,
         ARTILatentTensorLayer,
-        ARTILayer,
+        ARTILayer as LegacyARTILayer,
         ARTIPhaseMixer,
         ARTIVirtualInterfaceMixer,
     )
@@ -1262,8 +1306,12 @@ def _build_default_registry() -> ComponentRegistry:
         FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION,
         FormulaExecutionPlanV2,
         FormulaFabricV2,
+        GatherAtom,
+        PermuteAtom,
         ReduceAtom,
+        ReshapeAtom,
         ScaleAtom,
+        ScatterAtom,
     )
     from .formula_learning import FormulaOperandBank
     from .gpu_resident import (
@@ -1313,6 +1361,27 @@ def _build_default_registry() -> ComponentRegistry:
         TypedTopologyOperandBank,
         TypedTopologyPriorityFormula,
     )
+    from .tensor_schema import GradientContract, ShapeRelation, TensorSchema
+    from .bank_query import (
+        LinearBankQuery,
+        QueryExecutionSignature,
+        SealedBankQuery,
+    )
+    from .bank_local_program import (
+        BankLocalFormulaAction,
+        BankLocalFormulaProgram,
+        BankLocalTerminalAction,
+        DetachedBankLocalProgramTraining,
+        DetachedBankLocalRollout,
+        ExactBankLocalProgramTraining,
+        ValueTerminalAdapter,
+    )
+    from .terminal_abi import (
+        BankExecutionSignature,
+        BankExecutionSignatureV2,
+        TerminalOutputABI,
+    )
+    from .federal_recall import BankLocalRefinePolicy, FederalRecall, FederalRecallV2
     from .recall_refine import (
         AdaptiveRefinePolicy,
         RecallRoutePlan,
@@ -1476,11 +1545,11 @@ def _build_default_registry() -> ComponentRegistry:
         kwargs["target_coupling"] = "required_after_bootstrap"
         return TargetBankUpdater(**kwargs)
 
-    alpha = "alpha"
+    stable = "stable"
     add(
         "arti/half@1",
         Half,
-        lifecycle=alpha,
+        lifecycle=stable,
         capabilities=("pulse.stage.half",),
         config_schema_version=2,
         factory=scalar_half_factory,
@@ -1490,7 +1559,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/half@2",
         Half,
-        lifecycle=alpha,
+        lifecycle=stable,
         capabilities=("pulse.stage.half",),
         variant="contextual",
         config_schema_version=3,
@@ -1498,19 +1567,19 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=_half_config,
         dependency_builder=_half_dependencies,
     )
-    add("arti/fold@1", Fold, lifecycle=alpha, config_builder=_fold_config)
-    add("arti/unfold@1", UnFold, lifecycle=alpha, config_builder=_unfold_config)
+    add("arti/fold@1", Fold, lifecycle=stable, config_builder=_fold_config)
+    add("arti/unfold@1", UnFold, lifecycle=stable, config_builder=_unfold_config)
     add(
         "arti/fixed-topology-policy@1",
         FixedTopologyPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-index",
         config_builder=_fixed_topology_policy_config,
     )
     add(
         "arti/topology-action@1",
         TopologyAction,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="priority-operands",
         config_builder=lambda component: {
             "shape": list(_attr(component, "priority.shape")),
@@ -1520,7 +1589,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/topology-proposal@1",
         TopologyProposal,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="continuous-priority-proposal",
         config_builder=lambda component: {
             "action_ref": component_ref(_attr(component, "action")),
@@ -1530,27 +1599,27 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/stable-priority-partition@1",
         StablePriorityPartition,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="valid-first-stable-sort",
     )
     add(
         "arti/topology-surrogate@1",
         SoftTopKTopologySurrogate,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="soft-top-k-vjp",
         config_builder=_topology_surrogate_config,
     )
     add(
         "arti/topology-surrogate@2",
         PairwiseRankTopologySurrogate,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="pairwise-soft-rank-position-vjp",
         config_builder=_topology_surrogate_config,
     )
     add(
         "arti/learned-topology-policy@1",
         LearnedTopologyPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="equivariant-scorer",
         config_builder=_learned_topology_policy_config,
         dependency_builder=_learned_topology_policy_dependencies,
@@ -1558,48 +1627,48 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/topology-priority-formula@1",
         TopologyPriorityFormula,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="affine-priority",
         config_builder=_topology_formula_config,
     )
     add(
         "arti/topology-priority-formula@2",
         TypedTopologyPriorityFormula,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-affine-priority",
         config_builder=_topology_formula_config,
     )
     add(
         "arti/topology-formula-lock@1",
         TopologyFormulaLock,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="formula-binding",
     )
     add(
         "arti/fixed-topology-query@1",
         FixedTopologyQuery,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="deterministic-projection",
         config_builder=_fixed_topology_query_config,
     )
     add(
         "arti/topology-operand-bank@1",
         TopologyOperandBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-address-values",
         config_builder=_topology_operand_bank_config,
     )
     add(
         "arti/topology-operand-bank@2",
         TypedTopologyOperandBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-fixed-address-values",
         config_builder=_topology_operand_bank_config,
     )
     add(
         "arti/bank-formula-topology-policy@1",
         BankFormulaTopologyPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-bank-formula",
         config_builder=_bank_formula_topology_policy_config,
         dependency_builder=_bank_formula_topology_policy_dependencies,
@@ -1607,7 +1676,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/bank-formula-topology-policy@2",
         TypedBankFormulaTopologyPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-fixed-query-bank-formula",
         config_builder=_bank_formula_topology_policy_config,
         dependency_builder=_bank_formula_topology_policy_dependencies,
@@ -1615,7 +1684,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/reversible-topology@1",
         ReversibleTopology,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="permutation-partition",
         config_builder=_reversible_topology_config,
         dependency_builder=_reversible_topology_dependencies,
@@ -1623,14 +1692,14 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/inverse-topology-contract@1",
         InverseTopologyContract,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="recorded-permutation-inverse",
         config_builder=_inverse_topology_contract_config,
     )
     add(
         "arti/fold@2",
         TopologyFold,
-        lifecycle=alpha,
+        lifecycle=stable,
         capabilities=("pulse.stage.fold",),
         variant="reversible-forward",
         config_schema_version=3,
@@ -1640,7 +1709,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/unfold@2",
         TopologyUnFold,
-        lifecycle=alpha,
+        lifecycle=stable,
         capabilities=("pulse.stage.unfold",),
         variant="recorded-inverse",
         config_schema_version=2,
@@ -1650,7 +1719,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fold-record@1",
         FoldRecord,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-record",
         state_schema_version=FOLD_RECORD_SCHEMA_VERSION,
         config_builder=_fold_record_config,
@@ -1658,7 +1727,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fold-state@1",
         FoldedTensor,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-state",
         state_schema_version=FOLD_STATE_SCHEMA_VERSION,
         config_builder=_fold_state_config,
@@ -1667,7 +1736,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/pulse-stage@1",
         PulseStageSpec,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="ordered-stage-spec",
         state_schema_version=PULSE_STAGE_SCHEMA_VERSION,
         config_builder=lambda component: component.to_dict(),
@@ -1680,7 +1749,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fixed-observation-policy@1",
         FixedObservationPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-fixed-trajectory",
         config_builder=lambda component: {
             "max_observations": component.max_observations,
@@ -1692,13 +1761,13 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/identity-observation-operator@1",
         IdentityObservationOperator,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="identity-substrate-observation",
     )
     add(
         "arti/fourier-observation-operator@1",
         FourierShiftObservationOperator,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="circular-subpixel-phase-shift",
         config_builder=lambda component: {
             "spatial_shape": list(component.spatial_shape),
@@ -1711,7 +1780,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/learned-observation-policy@1",
         LearnedObservationPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="input-conditioned-bounded-trajectory",
         config_builder=lambda component: {
             "input_dim": component.input_dim,
@@ -1726,7 +1795,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/state-affine-observation-operator@1",
         StateAffineObservationOperator,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-state-conditioned-feature-frame",
         config_builder=lambda component: {
             "dim": component.dim,
@@ -1737,14 +1806,14 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fixed-observation-query@1",
         FixedObservationQuery,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="deterministic-input-trajectory-query",
         config_builder=lambda component: component.observation_query_contract(),
     )
     add(
         "arti/observation-operand-bank@1",
         ObservationOperandBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-fixed-address-observation-values",
         config_builder=lambda component: {
             **component.structure_contract,
@@ -1755,7 +1824,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/observation-trajectory-formula@1",
         ObservationTrajectoryFormula,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-state-and-continuation",
         config_builder=lambda component: {
             "state_dim": component.state_dim,
@@ -1767,7 +1836,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/bank-observation-policy@1",
         BankConditionedObservationPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-typed-bank-trajectory",
         config_builder=lambda component: {
             "input_dim": component.input_dim,
@@ -1794,7 +1863,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/adaptive-observation@1",
         AdaptiveObservation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-original-substrate-trajectory",
         capabilities=("pulse.stage.observation",),
         config_builder=lambda component: {
@@ -1811,7 +1880,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/scale-shift-formula@1",
         ScaleShiftFormula,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="per-feature-next-state",
         capabilities=("selective.compute.kernel",),
         config_builder=lambda component: {"dim": component.dim},
@@ -1819,14 +1888,14 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/magnitude-intervention-policy@1",
         MagnitudeInterventionPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="feature-strength-priority",
         capabilities=("formula.intervention.policy",),
     )
     add(
         "arti/factor-intervention-policy@1",
         FactorInterventionPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-factor-priority",
         capabilities=("formula.intervention.policy",),
         config_builder=lambda component: {"factor_index": component.factor_index},
@@ -1834,7 +1903,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/stable-topk-intervention@1",
         StableTopKIntervention,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-stable-support-selection",
         capabilities=("formula.intervention.operator",),
         config_builder=lambda component: {
@@ -1844,7 +1913,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-attention@1",
         FormulaAttention,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="formula-intervention-support",
         capabilities=("pulse.stage.intervention",),
         config_builder=lambda component: {
@@ -1859,7 +1928,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-fabric@1",
         FormulaFabric,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-hard-ssa-formula-executor",
         config_schema_version=2,
         capabilities=("formula.fabric.executor",),
@@ -1872,7 +1941,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-atom-contract@1",
         ContractAtom,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="named-axis-parameter-free-contraction",
         capabilities=("formula.fabric.typed-atom",),
         config_builder=lambda component: {
@@ -1887,7 +1956,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-atom-scale@1",
         ScaleAtom,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="named-axis-explicit-operand-scale",
         capabilities=("formula.fabric.typed-atom",),
         config_builder=lambda component: {
@@ -1899,7 +1968,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-atom-add@1",
         AddAtom,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-binary-add",
         capabilities=("formula.fabric.typed-atom",),
         config_builder=lambda component: {
@@ -1910,7 +1979,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-atom-reduce@1",
         ReduceAtom,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="ordered-named-axis-sum",
         capabilities=("formula.fabric.typed-atom",),
         config_builder=lambda component: {
@@ -1922,9 +1991,64 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
+        "arti/formula-atom-reshape@1",
+        ReshapeAtom,
+        lifecycle=stable,
+        variant="typed-element-preserving-shape-repartition",
+        capabilities=("formula.fabric.shape", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "output_axes": list(component.output_axes),
+            "output_sizes": list(component.output_sizes),
+        },
+    )
+    add(
+        "arti/formula-atom-permute@1",
+        PermuteAtom,
+        lifecycle=stable,
+        variant="typed-named-axis-permutation",
+        capabilities=("formula.fabric.shape", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "output_axes": list(component.output_axes),
+        },
+    )
+    add(
+        "arti/formula-atom-gather@1",
+        GatherAtom,
+        lifecycle=stable,
+        variant="typed-indexed-workset-selection",
+        capabilities=("formula.fabric.topology", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "index_type": component.index_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "index_axis": component.index_axis,
+        },
+    )
+    add(
+        "arti/formula-atom-scatter@1",
+        ScatterAtom,
+        lifecycle=stable,
+        variant="typed-indexed-workset-restoration",
+        capabilities=("formula.fabric.topology", "formula.fabric.typed-atom"),
+        config_builder=lambda component: {
+            "base_type": component.base_type.to_dict(),
+            "index_type": component.index_type.to_dict(),
+            "update_type": component.update_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "index_axis": component.index_axis,
+            "mode": component.mode,
+        },
+    )
+    add(
         "arti/formula-fabric@2",
         FormulaFabricV2,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-heterogeneous-ssa-formula-executor",
         config_schema_version=2,
         capabilities=("formula.fabric.executor", "formula.fabric.typed-executor"),
@@ -1939,7 +2063,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-execution-plan@1",
         FormulaExecutionPlanV2,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="typed-static-positional-formula-lowering",
         config_builder=lambda component: {
             "schema_ref": FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
@@ -1956,7 +2080,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-operand-bank@1",
         FormulaOperandBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="joint-typed-formula-operand-candidates",
         capabilities=("formula.fabric.learned-route", "formula.fabric.operand-bank"),
         config_builder=lambda component: {
@@ -1979,7 +2103,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-commit-blend@1",
         FormulaCommitBlend,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-continuous-formula-commit",
         capabilities=("formula.fabric.executor",),
         config_builder=lambda component: {
@@ -1992,7 +2116,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-fabric-compute@1",
         FormulaFabricCompute,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="folded-workspace-formula-executor",
         capabilities=("pulse.stage.selective-compute",),
         config_schema_version=2,
@@ -2011,7 +2135,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fixed-resident-bucket@1",
         FixedResidentBucket,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-static-cuda-bucket-contract",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2028,7 +2152,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/fixed-page-refs@1",
         FixedPageRefs,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-fixed-resident-page-references",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2038,7 +2162,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/hot-page-pool@1",
         HotPagePool,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="host-bound-cuda-page-pool",
         constructible=False,
         artifact_policy="host_bound",
@@ -2048,7 +2172,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/bound-hot-page-pool@1",
         BoundHotPagePool,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="host-bound-fixed-page-workset",
         constructible=False,
         artifact_policy="host_bound",
@@ -2063,7 +2187,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/captured-hot-step@1",
         CapturedHotStep,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="host-bound-read-only-cuda-graph-step",
         constructible=False,
         artifact_policy="host_bound",
@@ -2078,7 +2202,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/resident-latency-receipt@1",
         ResidentLatencyReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-scoped-latency-receipt",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2088,7 +2212,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/cuda-activity-receipt@1",
         CUDAActivityReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-cupti-activity-receipt",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2098,7 +2222,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/runtime-checkpoint-receipt@1",
         RuntimeCheckpointReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-atomic-checkpoint-receipt",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2108,7 +2232,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/restored-runtime-checkpoint@1",
         RestoredRuntimeCheckpoint,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="host-bound-restored-runtime-root",
         constructible=False,
         artifact_policy="host_bound",
@@ -2130,7 +2254,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-resident-operation@1",
         FormulaResidentOperation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-route-resident-formula",
         capabilities=("formula.fabric.resident-operation",),
         config_builder=_resident_formula_operation_config,
@@ -2139,7 +2263,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/topology-formula-resident-operation@1",
         TopologyFormulaResidentOperation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fold-formula-unfold-resident-operation",
         capabilities=("formula.fabric.resident-operation", "topology.reversible"),
         config_builder=_topology_resident_operation_config,
@@ -2152,7 +2276,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/batched-refine-operation@1",
         BatchedRefineOperation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="existing-formula-topology-step-operation",
         capabilities=("recall.batched-refine.operation",),
         config_builder=lambda component: {
@@ -2166,7 +2290,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/execution-rng-plan@2",
         ExecutionRNGPlan,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-callsite-and-branch-origin-keyed-rng-plan",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2181,7 +2305,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/execution-context-receipt@3",
         ExecutionContextReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-keyed-or-deterministic-execution-context",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2199,7 +2323,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/batched-refine@1",
         BatchedRefineExecutor,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="factory-owned-authority-closure",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2245,7 +2369,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/resident-branch-run@1",
         ResidentBranchRun,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="host-bound-gpu-resident-branch-authority",
         constructible=False,
         artifact_policy="host_bound",
@@ -2268,7 +2392,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/resident-branch-score@1",
         ResidentBranchScoreReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-host-visible-k-score-receipt",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2290,7 +2414,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/resident-branch-decision@1",
         ResidentBranchDecision,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-host-authority-decision",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2309,7 +2433,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/resident-branch-commit@1",
         ResidentBranchCommitReceipt,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-gpu-resident-publication-receipt",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2330,7 +2454,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/batched-refine-plan@1",
         BatchedRefinePlan,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="candidate-recall-operation-requery",
         capabilities=("recall.batched-refine.plan",),
         config_builder=lambda component: {
@@ -2352,7 +2476,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/branch-refine-policy@1",
         BranchRefinePolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-candidate-bound-branch-policy",
         artifact_policy="runtime_only",
         capabilities=("recall.batched-refine.branch-policy",),
@@ -2365,7 +2489,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-branch-batch@3",
         RecallBranchBatch,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-single-value-candidate-batch",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2377,7 +2501,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-formula-branch-batch@3",
         RecallFormulaBranchBatch,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-joint-formula-candidate-batch",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2395,7 +2519,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/batched-refine-result@1",
         BatchedRefineResult,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only-branch-result",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2407,7 +2531,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/bank-formula-route-source@1",
         BankFormulaRouteSource,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-bank-formula-route-plan",
         capabilities=("formula.fabric.route-source",),
         config_builder=_bank_formula_route_source_config,
@@ -2416,7 +2540,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/routed-formula-fabric-compute@1",
         RoutedFormulaFabricCompute,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bank-routed-formula-fabric-adapter",
         capabilities=("pulse.stage.selective-compute",),
         config_schema_version=2,
@@ -2426,7 +2550,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/iterative-routed-formula-fabric-compute@1",
         IterativeRoutedFormulaFabricCompute,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="state-conditioned-route-refinement",
         capabilities=("pulse.stage.selective-compute",),
         config_builder=lambda component: {
@@ -2441,7 +2565,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/selective-compute@1",
         SelectiveCompute,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="pack-apply-scatter",
         capabilities=("pulse.stage.selective-compute",),
         config_builder=lambda component: {
@@ -2455,7 +2579,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/selective-recall-kernel@1",
         SelectiveRecallKernel,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="packed-canonical-recall-kernel",
         capabilities=("selective.compute.kernel",),
         config_builder=lambda component: {
@@ -2470,7 +2594,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/soft-fold-aggregate@1",
         SoftFoldAggregate,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="soft-slot-aggregation",
         capabilities=("pulse.aggregate.kernel",),
         config_builder=lambda component: {
@@ -2483,7 +2607,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/reunion-aggregate@1",
         ReunionAggregate,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="reunion-only-aggregate-host",
         capabilities=("pulse.stage.aggregate",),
         config_builder=lambda component: {
@@ -2492,9 +2616,248 @@ def _build_default_registry() -> ComponentRegistry:
         dependency_builder=lambda component: (component_ref(component.kernel),),
     )
     add(
+        "arti/tensor-schema@1",
+        TensorSchema,
+        lifecycle=stable,
+        variant="shape-autonomous-logical-schema",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.contract.tensor-schema",),
+    )
+    add(
+        "arti/shape-relation@1",
+        ShapeRelation,
+        lifecycle=stable,
+        variant="declared-shape-relation",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.contract.shape-relation",),
+    )
+    add(
+        "arti/gradient-contract@1",
+        GradientContract,
+        lifecycle=stable,
+        variant="declared-gradient-boundary",
+        config_builder=lambda component: component.to_dict(),
+        capabilities=("federal.contract.gradient",),
+    )
+    add(
+        "arti/terminal-output-abi@1",
+        TerminalOutputABI,
+        lifecycle=stable,
+        variant="named-terminal-tensor-alliance",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda _component: (
+            "arti/gradient-contract@1",
+            "arti/tensor-schema@1",
+        ),
+        capabilities=("federal.contract.terminal-abi",),
+    )
+    add(
+        "arti/bank-execution-signature@1",
+        BankExecutionSignature,
+        lifecycle=stable,
+        variant="shape-autonomous-bank-program",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda _component: (
+            "arti/gradient-contract@1",
+            "arti/shape-relation@1",
+            "arti/tensor-schema@1",
+            "arti/terminal-output-abi@1",
+        ),
+        capabilities=("federal.contract.bank-signature",),
+    )
+    add(
+        "arti/linear-bank-query@1",
+        LinearBankQuery,
+        lifecycle=stable,
+        variant="trainable-bank-local-projection",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: (
+            "arti/gradient-contract@1",
+            "arti/tensor-schema@1",
+        ),
+        capabilities=("federal.query.pretrainable",),
+    )
+    add(
+        "arti/query-execution-signature@1",
+        QueryExecutionSignature,
+        lifecycle=stable,
+        variant="sealed-bank-query-identity",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: (
+            "arti/gradient-contract@1",
+            "arti/tensor-schema@1",
+            component.query_ref,
+        ),
+        capabilities=("federal.query.sealed-signature",),
+    )
+    add(
+        "arti/sealed-bank-query@1",
+        SealedBankQuery,
+        lifecycle=stable,
+        variant="bank-owned-pretrained-then-sealed",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.query),
+            "arti/query-execution-signature@1",
+        ),
+        capabilities=(
+            "federal.query.bank-owned",
+            "federal.query.runtime-fixed",
+        ),
+    )
+    add(
+        "arti/bank-execution-signature@2",
+        BankExecutionSignatureV2,
+        lifecycle=stable,
+        variant="shape-autonomous-bank-owned-query-program",
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=_bank_execution_signature_v2_dependencies,
+        capabilities=("federal.contract.bank-owned-query-signature",),
+    )
+    add(
+        "arti/bank-local-refine-policy@1",
+        BankLocalRefinePolicy,
+        lifecycle=stable,
+        variant="latest-local-state-requery-budget",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("federal.bank-local-refine.policy",),
+    )
+    add(
+        "arti/bank-local-formula-action@1",
+        BankLocalFormulaAction,
+        lifecycle=stable,
+        variant="typed-bank-owned-formula-transition",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.fabric),
+            "arti/tensor-schema@1",
+        ),
+        capabilities=("federal.bank-local.formula-action",),
+    )
+    add(
+        "arti/value-terminal-adapter@1",
+        ValueTerminalAdapter,
+        lifecycle=stable,
+        variant="value-validity-score-terminal-adapter",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("federal.terminal.adapter",),
+    )
+    add(
+        "arti/bank-local-terminal-action@1",
+        BankLocalTerminalAction,
+        lifecycle=stable,
+        variant="formula-requested-terminal-action",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.adapter),
+            component_ref(component.exit_atom),
+            "arti/tensor-schema@1",
+        ),
+        capabilities=("federal.bank-local.terminal-action",),
+    )
+    add(
+        "arti/bank-local-formula-program@1",
+        BankLocalFormulaProgram,
+        lifecycle=stable,
+        variant="declarative-latest-state-formula-program",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted(
+                {
+                    *(component_ref(action) for action in component.actions),
+                    component_ref(component.terminal_action),
+                    component_ref(component.query),
+                    component_ref(component.local_refine),
+                    "arti/bank-execution-signature@2",
+                    "arti/terminal-output-abi@1",
+                }
+            )
+        ),
+        capabilities=(
+            "federal.bank-local.latest-state-requery",
+            "federal.bank-local.typed-formula-program",
+        ),
+    )
+    add(
+        "arti/exact-bank-local-program-training@1",
+        ExactBankLocalProgramTraining,
+        lifecycle=stable,
+        variant="exact-expected-policy-final-task-loss",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: (
+            "arti/bank-local-formula-action@1",
+            "arti/bank-local-terminal-action@1",
+        ),
+        capabilities=("federal.bank-local.training.exact-expected-policy",),
+    )
+    add(
+        "arti/detached-bank-local-rollout@1",
+        DetachedBankLocalRollout,
+        lifecycle=stable,
+        variant="variable-shape-detached-on-policy-states",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: {
+            "state_count": len(component.states),
+            "min_steps": component.min_steps,
+            "max_steps": component.max_steps,
+            "terminated": component.terminated,
+            "route_cache": False,
+            "transition_teacher": False,
+        },
+        capabilities=("federal.bank-local.training.detached-rollout",),
+    )
+    add(
+        "arti/detached-bank-local-program-training@1",
+        DetachedBankLocalProgramTraining,
+        lifecycle=stable,
+        variant="fresh-one-step-final-task-loss",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: (
+            "arti/detached-bank-local-rollout@1",
+            "arti/bank-local-formula-action@1",
+            "arti/bank-local-terminal-action@1",
+        ),
+        capabilities=("federal.bank-local.training.detached-on-policy",),
+    )
+    add(
+        "arti/federal-recall@1",
+        FederalRecall,
+        lifecycle=stable,
+        variant="shape-autonomous-fixed-k-eager-reference",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: (
+            "arti/bank-execution-signature@1",
+            "arti/terminal-output-abi@1",
+        ),
+        capabilities=(
+            "federal.execution.eager-reference",
+            "federal.execution.fixed-k",
+            "federal.execution.hard-one-winner",
+        ),
+    )
+    add(
+        "arti/federal-recall@2",
+        FederalRecallV2,
+        lifecycle=stable,
+        variant="bank-owned-query-serial-requery",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_federal_recall_v2_dependencies,
+        capabilities=(
+            "federal.execution.eager-reference",
+            "federal.execution.latest-state-requery",
+            "federal.execution.serial-k1",
+        ),
+    )
+    add(
         "arti/pulse-stage-graph@1",
         PulseStageGraph,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="ordered-stage-graph",
         state_schema_version=PULSE_STAGE_GRAPH_SCHEMA_VERSION,
         config_builder=lambda component: component.to_dict(),
@@ -2506,7 +2869,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/pulse-executor@1",
         PulseExecutor,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="manifest-bound-executor",
         config_builder=lambda component: {
             "manifest_ref": "arti/pulse-stage-graph@1",
@@ -2522,7 +2885,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/pulse@1",
         LearnedPulse,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="learned",
         aliases=("Pulse", "LearnedPulse"),
         deprecated_aliases=("arti/learned-pulse@1",),
@@ -2531,7 +2894,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/pulse@2",
         AdaptivePulse,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="adaptive-composable-stage-graph",
         config_schema_version=2,
         config_builder=_adaptive_pulse_config,
@@ -2544,11 +2907,11 @@ def _build_default_registry() -> ComponentRegistry:
         variant="explicit",
         aliases=("PulseCompressor",),
     )
-    add("arti/fusion-pulse@1", FusionPulse, lifecycle=alpha, config_builder=_fields("k", "dim", "hidden_dim", "salience_heads", "half_threshold", "salience_scale", "similarity_threshold", "representative_target", "redundancy_weight", "support_weight", "representative_weight", "value_operators", "value_rank", "eps"))
+    add("arti/fusion-pulse@1", FusionPulse, lifecycle=stable, config_builder=_fields("k", "dim", "hidden_dim", "salience_heads", "half_threshold", "salience_scale", "similarity_threshold", "representative_target", "redundancy_weight", "support_weight", "representative_weight", "value_operators", "value_rank", "eps"))
     add(
         "arti/recall@2",
         Recall,
-        lifecycle=alpha,
+        lifecycle=stable,
         config_schema_version=2,
         factory=global_recall_factory,
         config_builder=_recall_config,
@@ -2557,7 +2920,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall@3",
         Recall,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="per-bank-route-normalization",
         config_schema_version=4,
         factory=per_bank_recall_factory,
@@ -2567,7 +2930,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall@4",
         Recall,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="independent-k-wide-refine",
         config_schema_version=1,
         factory=wide_recall_factory,
@@ -2577,7 +2940,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-refiner@2",
         RecallRefiner,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-policy-adapter",
         config_builder=lambda _component: {},
         dependency_builder=_refiner_dependencies,
@@ -2585,7 +2948,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/target-bank-updater@1",
         TargetBankUpdater,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-policy-adapter",
         capabilities=("pulse.stage.bank-update",),
         config_builder=_target_bank_updater_config,
@@ -2594,7 +2957,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/target-bank-updater@2",
         TargetBankUpdater,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="target-coupled-after-bootstrap",
         config_schema_version=2,
         capabilities=("pulse.stage.bank-update",),
@@ -2605,7 +2968,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/write-refine-policy@1",
         WriteRefinePolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_builder=_fields("budget", "stop", "exposure_schedule"),
         dependency_builder=lambda component: (
@@ -2616,7 +2979,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/objective-exposure-bank@1",
         ObjectiveExposureBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-trainable-value-exposure",
         config_builder=_fields(
             "slots",
@@ -2632,7 +2995,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/objective-formula-fabric-compute@1",
         ObjectiveFormulaFabricCompute,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="objective-controlled-formula-commit",
         config_schema_version=1,
         capabilities=("pulse.stage.selective-compute",),
@@ -2653,7 +3016,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-policy@1",
         RefinePolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_builder=_fields(
             "max_steps",
@@ -2671,14 +3034,14 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-budget@1",
         RefineBudget,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_builder=_fields("max_steps", "min_steps"),
     )
     add(
         "arti/refine-stop@1",
         RefineStop,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_builder=_fields(
             "scope",
@@ -2693,7 +3056,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-policy@2",
         AdaptiveRefinePolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="adaptive-runtime",
         config_schema_version=2,
         factory=RefinePolicy.adaptive,
@@ -2715,7 +3078,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-rollout@1",
         RefineRollout,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="detached-on-policy-adjacent-steps",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2731,7 +3094,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-step-training@1",
         RefineStepTraining,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fresh-query-one-step-task-loss",
         artifact_policy="runtime_only",
         config_builder=_fields("max_snapshot_staleness"),
@@ -2739,7 +3102,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/formula-atom-refine-exit@1",
         FormulaRefineExit,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="post-transition-hard-refine-exit",
         capabilities=("refine.exit.atom", "refine.exit.request"),
         config_builder=_fields("input_kind", "scope", "threshold"),
@@ -2747,7 +3110,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-exit-request@1",
         RefineExitRequest,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="tensor-only-post-transition-request",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2757,7 +3120,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-exit-control@1",
         RefineExitControl,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="neural-source-with-typed-exit-atom",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2776,7 +3139,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-exit-curve@1",
         RefineExitCurve,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="detached-full-depth-task-loss-curve",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2794,7 +3157,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/refine-exit-training@1",
         RefineExitTraining,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="quality-constrained-task-loss-hazard",
         artifact_policy="runtime_only",
         config_builder=_fields(
@@ -2811,7 +3174,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/operable-tensor-port-spec@3",
         PortSpec,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="logical-tensor-shape-and-folded-view-spec",
         constructible=False,
         config_builder=lambda component: {
@@ -2829,7 +3192,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/operable-tensor-port@2",
         OperableTensorPort,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="stable-runtime-owned-default-or-external-backing",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2841,7 +3204,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/operable-tensor-snapshot@2",
         PortSnapshot,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="resolved-pre-step-backing",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2855,7 +3218,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/shared-canvas@3",
         SharedCanvas,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="world-shaped-masked-overlay",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2869,7 +3232,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/shared-canvas-fold@3",
         SharedCanvasFold,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="partial-fixed-map-masked-overlay",
         constructible=False,
         config_builder=lambda _component: {},
@@ -2878,7 +3241,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-field-spec@2",
         TensorOperationFieldSpec,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-synchronous-operation-field",
         constructible=False,
         config_builder=lambda component: component.contract(),
@@ -2887,7 +3250,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-edit-instruction@3",
         TensorEditInstruction,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="complete-hard-operation-field",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2896,7 +3259,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-edit-formula@3",
         TensorEditFormula,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="synchronous-pre-state-operation-field",
         constructible=False,
         config_builder=lambda _component: {
@@ -2911,7 +3274,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-edit-result@3",
         TensorEditResult,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="functional-next-backing",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2926,7 +3289,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-edit-surrogate@3",
         TensorEditSurrogate,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="exact-hard-forward-continuous-backward",
         constructible=False,
         config_builder=lambda component: {"temperature": component.temperature},
@@ -2938,7 +3301,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-query@4",
         TensorOperationQuery,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-complete-world-and-backing-projection",
         constructible=False,
         config_builder=lambda component: component.operation_query_contract(),
@@ -2947,7 +3310,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-bank@3",
         TensorOperationBank,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="concat-native-complete-operation-fields",
         constructible=False,
         config_builder=lambda component: component.operation_bank_contract(),
@@ -2959,7 +3322,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-decision@3",
         TensorOperationDecision,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="hard-instruction-with-training-logits",
         constructible=False,
         artifact_policy="runtime_only",
@@ -2977,7 +3340,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-selector@3",
         TensorOperationSelector,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-bank-selected-hard-edit",
         constructible=False,
         config_builder=lambda component: {
@@ -2993,7 +3356,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation@3",
         TensorOperation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="fixed-query-bank-selected-hard-transition",
         config_schema_version=2,
         constructible=False,
@@ -3015,7 +3378,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-step-result@3",
         TensorOperationStepResult,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="one-local-shadow-transition",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3029,7 +3392,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-stop@1",
         TensorOperationStopPolicy,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-post-transition-stop",
         constructible=False,
         config_builder=lambda component: {
@@ -3040,7 +3403,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-schedule@1",
         TensorOperationSchedule,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="independent-operation-depth",
         config_schema_version=2,
         constructible=False,
@@ -3057,7 +3420,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-trace@3",
         TensorOperationTrace,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="bounded-operation-axis-trace",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3069,7 +3432,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-loop@3",
         TensorOperationLoop,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="private-shadow-fresh-query-loop",
         config_schema_version=2,
         constructible=False,
@@ -3082,7 +3445,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-operation-result@3",
         TensorOperationResult,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="next-call-backing-proposal",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3095,7 +3458,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/reader-refine-schedule@1",
         ReaderRefineSchedule,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="independent-reader-depth",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3104,7 +3467,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-invocation@2",
         TensorInvocation,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="same-root-independent-reader-operation-axes",
         constructible=False,
         config_builder=lambda component: {
@@ -3122,7 +3485,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-invocation-result@2",
         TensorInvocationResult,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="independent-reader-output-and-operation-proposal",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3138,7 +3501,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-trace@3",
         RecallTraceV3,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="post-transition-neural-exit-trace",
         constructible=False,
         artifact_policy="runtime_only",
@@ -3148,7 +3511,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-route-plan@1",
         RecallRoutePlan,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_schema_version=1,
         config_builder=_fields(
@@ -3164,7 +3527,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-route-stack@1",
         RecallRouteStack,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="runtime-only",
         config_schema_version=1,
         config_builder=_route_stack_config,
@@ -3173,7 +3536,7 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-runtime@1",
         RecallRuntime,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="values-only-session",
         config_builder=_recall_runtime_config,
         dependency_builder=_recall_runtime_dependencies,
@@ -3181,33 +3544,50 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/recall-state@1",
         RecallState,
-        lifecycle=alpha,
+        lifecycle=stable,
         variant="values-only",
         state_schema_version=RECALL_STATE_SCHEMA_VERSION,
         config_builder=_recall_state_config,
     )
-    add("arti/updater@1", RecallValueUpdater, lifecycle=alpha, config_builder=_updater_config)
-    add("arti/affine-updater@1", AffineRecallValueUpdater, lifecycle=alpha, config_builder=_affine_updater_config)
-    add("arti/normalized-updater@1", NormalizedDeltaRecallValueUpdater, lifecycle=alpha, config_builder=_normalised_updater_config)
-    add("arti/stacked-updater@1", StackedRecallValueUpdater, lifecycle=alpha, config_builder=_fields("site_count", "hidden_dim", "slots", "workspace_dim", "depth", "recall_group_topk"))
-    add("arti/tensor-context@1", TensorContext, lifecycle=alpha, config_builder=_context_config, factory=TensorContext)
-    add("arti/frame-context@1", FrameContext, lifecycle=alpha, config_builder=_context_config, factory=FrameContext)
+    add("arti/updater@1", RecallValueUpdater, lifecycle=stable, config_builder=_updater_config)
+    add("arti/affine-updater@1", AffineRecallValueUpdater, lifecycle=stable, config_builder=_affine_updater_config)
+    add("arti/normalized-updater@1", NormalizedDeltaRecallValueUpdater, lifecycle=stable, config_builder=_normalised_updater_config)
+    add("arti/stacked-updater@1", StackedRecallValueUpdater, lifecycle=stable, config_builder=_fields("site_count", "hidden_dim", "slots", "workspace_dim", "depth", "recall_group_topk"))
+    add("arti/tensor-context@1", TensorContext, lifecycle=stable, config_builder=_context_config, factory=TensorContext)
+    add("arti/frame-context@1", FrameContext, lifecycle=stable, config_builder=_context_config, factory=FrameContext)
     add(
         "arti/emission-router@1",
         EmissionRouter,
-        lifecycle=alpha,
+        lifecycle=stable,
         config_builder=_default_config,
         factory=lambda **kwargs: EmissionRouter(
             kwargs.pop("config", None) or EmissionRouterConfig(**kwargs)
         ),
     )
     add("arti/membrane-router@1", MembraneVisibilityRouter, lifecycle="legacy", variant="adapter", config_builder=_default_config)
-    add("arti/layer@1", ARTILayer, lifecycle=alpha, config_builder=_default_config)
-    add("arti/latent-tensor-layer@1", ARTILatentTensorLayer, lifecycle=alpha, config_builder=_default_config)
-    add("arti/dynamic-state@1", ARTIDynamicStateLayer, lifecycle=alpha, config_builder=_default_config)
-    add("arti/phase-mixer@1", ARTIPhaseMixer, lifecycle=alpha, config_builder=_fields("hidden_dim", "operator_count"))
-    add("arti/virtual-interface@1", ARTIVirtualInterfaceMixer, lifecycle=alpha, config_builder=_fields("scale"))
-    add("arti/latent-recall-field@1", ARTILatentRecallField, lifecycle=alpha, config_builder=_fields("hidden_dim", "slots", "routing", "key_dim"))
+    add(
+        "arti/layer@2",
+        ARTILayer,
+        lifecycle=stable,
+        variant="adaptive-pulse-host",
+        config_schema_version=2,
+        aliases=("ARTILayer",),
+        config_builder=_arti_layer_config,
+        dependency_builder=_arti_layer_dependencies,
+    )
+    add(
+        "arti/classic-layer@1",
+        LegacyARTILayer,
+        lifecycle=stable,
+        variant="internal-composed-layer",
+        config_builder=_default_config,
+    )
+    add("arti/layer@1", LegacyARTILayer, lifecycle="legacy", config_builder=_default_config)
+    add("arti/latent-tensor-layer@1", ARTILatentTensorLayer, lifecycle=stable, config_builder=_default_config)
+    add("arti/dynamic-state@1", ARTIDynamicStateLayer, lifecycle=stable, config_builder=_default_config)
+    add("arti/phase-mixer@1", ARTIPhaseMixer, lifecycle=stable, config_builder=_fields("hidden_dim", "operator_count"))
+    add("arti/virtual-interface@1", ARTIVirtualInterfaceMixer, lifecycle=stable, config_builder=_fields("scale"))
+    add("arti/latent-recall-field@1", ARTILatentRecallField, lifecycle=stable, config_builder=_fields("hidden_dim", "slots", "routing", "key_dim"))
     return registry
 
 
@@ -3235,7 +3615,7 @@ def component_catalog() -> list[dict[str, Any]]:
                 "mechanism_id": f"{formula.namespace}/{formula.name}",
                 "mechanism_version": formula.version,
                 "variant": formula.provider_kind,
-                "lifecycle": "alpha" if formula.origin in {"builtin", "registered"} else "deprecated",
+                "lifecycle": "stable" if formula.origin in {"builtin", "registered"} else "deprecated",
                 "config_schema_version": 1,
                 "state_schema_version": 1,
                 "aliases": [],
@@ -3252,7 +3632,7 @@ def component_catalog() -> list[dict[str, Any]]:
                 "mechanism_id": f"{survival.namespace}/{survival.name}",
                 "mechanism_version": survival.version,
                 "variant": "survival",
-                "lifecycle": "alpha",
+                "lifecycle": "stable",
                 "config_schema_version": 1,
                 "state_schema_version": 1,
                 "aliases": [],
@@ -3784,11 +4164,218 @@ def _validate_vnext_dependency_closure(
     if _validate_tensor_operation_dependency_closure(reference, config, dependencies):
         return
 
+    if reference == "arti/linear-bank-query@1":
+        from .tensor_schema import GradientContract, TensorSchema
+
+        required = {
+            "input_schema",
+            "output_schema",
+            "retrieval_contract",
+            "normalization_contract",
+            "gradient_contract",
+            "input_dim",
+            "query_dim",
+            "bias",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("linear Bank Query fields")
+            TensorSchema.from_dict(config["input_schema"])
+            TensorSchema.from_dict(config["output_schema"])
+            gradient = GradientContract.from_dict(config["gradient_contract"])
+            if (
+                gradient.mode != "autograd"
+                or not _is_positive_int(config["input_dim"])
+                or not _is_positive_int(config["query_dim"])
+                or type(config["bias"]) is not bool
+                or not isinstance(config["retrieval_contract"], Mapping)
+                or not isinstance(config["normalization_contract"], Mapping)
+                or config["normalization_contract"].get("scope") != "bank_local"
+            ):
+                raise ValueError("linear Bank Query contract")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "LinearBankQuery config is invalid"
+            ) from exc
+        expected = sorted(
+            {"arti/gradient-contract@1", "arti/tensor-schema@1"}
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "LinearBankQuery dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/query-execution-signature@1":
+        from .bank_query import QueryExecutionSignature
+
+        try:
+            signature = QueryExecutionSignature.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "QueryExecutionSignature config is invalid"
+            ) from exc
+        expected = sorted(
+            {
+                "arti/gradient-contract@1",
+                "arti/tensor-schema@1",
+                signature.query_ref,
+            }
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "QueryExecutionSignature dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/sealed-bank-query@1":
+        from .bank_query import QueryExecutionSignature
+
+        try:
+            if not isinstance(config, Mapping) or set(config) != {"signature"}:
+                raise ValueError("sealed Bank Query fields")
+            signature = QueryExecutionSignature.from_dict(config["signature"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "SealedBankQuery config is invalid"
+            ) from exc
+        expected = sorted(
+            {"arti/query-execution-signature@1", signature.query_ref}
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "SealedBankQuery dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/bank-execution-signature@2":
+        from .terminal_abi import BankExecutionSignatureV2
+
+        try:
+            signature = BankExecutionSignatureV2.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "BankExecutionSignatureV2 config is invalid"
+            ) from exc
+        expected = sorted(
+            {
+                "arti/gradient-contract@1",
+                "arti/query-execution-signature@1",
+                "arti/shape-relation@1",
+                "arti/tensor-schema@1",
+                "arti/terminal-output-abi@1",
+                signature.program_ref,
+                signature.query_signature.query_ref,
+                signature.terminal_adapter_ref,
+                *(
+                    ()
+                    if signature.local_formula_ref is None
+                    else (signature.local_formula_ref,)
+                ),
+                *(
+                    ()
+                    if signature.local_refine_ref is None
+                    else (signature.local_refine_ref,)
+                ),
+            }
+        )
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "BankExecutionSignatureV2 dependency closure is invalid"
+            )
+        return
+
+    if reference == "arti/bank-local-refine-policy@1":
+        required = {
+            "min_steps",
+            "max_steps",
+            "state_source",
+            "exit_semantics",
+        }
+        if (
+            not isinstance(config, Mapping)
+            or set(config) != required
+            or dependencies
+            or not _is_positive_int(config["min_steps"])
+            or not _is_positive_int(config["max_steps"])
+            or config["max_steps"] < config["min_steps"]
+            or config["state_source"] != "latest-local-state"
+            or config["exit_semantics"] != "formula-request-after-min-steps"
+        ):
+            raise ComponentCompatibilityError(
+                "BankLocalRefinePolicy config is invalid"
+            )
+        return
+
+    if reference == "arti/federal-recall@2":
+        from .terminal_abi import BankExecutionSignatureV2, TerminalOutputABI
+
+        required = {
+            "terminal_abi",
+            "root_bank_ids",
+            "bank_signatures",
+            "max_levels",
+            "max_k",
+            "winner_policy",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("FederalRecall@2 fields")
+            TerminalOutputABI.from_dict(config["terminal_abi"])
+            roots = config["root_bank_ids"]
+            signatures = config["bank_signatures"]
+            if (
+                not isinstance(roots, list)
+                or not roots
+                or len(roots) != len(set(roots))
+                or any(not isinstance(root, str) or not root for root in roots)
+                or not isinstance(signatures, Mapping)
+                or not signatures
+                or any(root not in signatures for root in roots)
+                or not _is_positive_int(config["max_levels"])
+                or config["max_k"] != 1
+                or type(config["max_k"]) is not int
+                or config["winner_policy"] != "hard_one_winner"
+            ):
+                raise ValueError("FederalRecall@2 contract")
+            parsed_signatures = []
+            for bank_id, payload in signatures.items():
+                if not isinstance(bank_id, str) or not bank_id:
+                    raise ValueError("FederalRecall@2 Bank id")
+                parsed_signatures.append(BankExecutionSignatureV2.from_dict(payload))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "FederalRecall@2 config is invalid"
+            ) from exc
+        expected_set = {
+            "arti/bank-execution-signature@2",
+            "arti/sealed-bank-query@1",
+            "arti/terminal-output-abi@1",
+        }
+        for signature in parsed_signatures:
+            expected_set.update(
+                _bank_execution_signature_v2_dependencies(signature)
+            )
+        expected = sorted(expected_set)
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "FederalRecall@2 dependency closure is invalid"
+            )
+        return
+
     formula_atom_refs = {
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
         "arti/formula-atom-add@1",
         "arti/formula-atom-reduce@1",
+        "arti/formula-atom-reshape@1",
+        "arti/formula-atom-permute@1",
+        "arti/formula-atom-gather@1",
+        "arti/formula-atom-scatter@1",
+    }
+    formula_instruction_refs = formula_atom_refs | {
+        "arti/fold@2",
+        "arti/unfold@2",
     }
     if reference == "arti/formula-operand-bank@1":
         required = {
@@ -3899,11 +4486,23 @@ def _validate_vnext_dependency_closure(
             if config["binding_names"] != [binding.name for binding in program.bindings]:
                 raise ComponentCompatibilityError("Formula execution binding order is invalid")
         expected_dependencies = sorted({item.atom_ref for item in program.instructions})
-        if dependencies != expected_dependencies or not set(dependencies).issubset(formula_atom_refs):
+        if dependencies != expected_dependencies or not set(dependencies).issubset(
+            formula_instruction_refs
+        ):
             raise ComponentCompatibilityError("Formula execution dependency closure is invalid")
         return
     if reference in formula_atom_refs:
-        from .formula_v2 import AddAtom, ContractAtom, ReduceAtom, ScaleAtom, TensorType
+        from .formula_v2 import (
+            AddAtom,
+            ContractAtom,
+            GatherAtom,
+            PermuteAtom,
+            ReduceAtom,
+            ReshapeAtom,
+            ScaleAtom,
+            ScatterAtom,
+            TensorType,
+        )
 
         if not isinstance(config, Mapping) or dependencies:
             raise ComponentCompatibilityError("Formula atom config or dependency closure is invalid")
@@ -3943,7 +4542,7 @@ def _validate_vnext_dependency_closure(
                     TensorType.from_dict(config["value_type"]),
                     accumulation_dtype=config["accumulation_dtype"],
                 )
-            else:
+            elif reference == "arti/formula-atom-reduce@1":
                 required = {
                     "value_type",
                     "output_type",
@@ -3960,6 +4559,73 @@ def _validate_vnext_dependency_closure(
                 )
                 if atom.output_type.to_dict() != config["output_type"]:
                     raise ValueError("reduce output type")
+            elif reference == "arti/formula-atom-reshape@1":
+                required = {
+                    "value_type",
+                    "output_type",
+                    "output_axes",
+                    "output_sizes",
+                }
+                if set(config) != required:
+                    raise ValueError("reshape config fields")
+                atom = ReshapeAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    output_axes=config["output_axes"],
+                    output_sizes=config["output_sizes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("reshape output type")
+            elif reference == "arti/formula-atom-permute@1":
+                required = {"value_type", "output_type", "output_axes"}
+                if set(config) != required:
+                    raise ValueError("permute config fields")
+                atom = PermuteAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    output_axes=config["output_axes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("permute output type")
+            elif reference == "arti/formula-atom-gather@1":
+                required = {
+                    "value_type",
+                    "index_type",
+                    "output_type",
+                    "axis",
+                    "index_axis",
+                }
+                if set(config) != required:
+                    raise ValueError("gather config fields")
+                atom = GatherAtom(
+                    TensorType.from_dict(config["value_type"]),
+                    TensorType.from_dict(config["index_type"]),
+                    axis=config["axis"],
+                    index_axis=config["index_axis"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("gather output type")
+            elif reference == "arti/formula-atom-scatter@1":
+                required = {
+                    "base_type",
+                    "index_type",
+                    "update_type",
+                    "output_type",
+                    "axis",
+                    "index_axis",
+                    "mode",
+                }
+                if set(config) != required or config["mode"] != "replace":
+                    raise ValueError("scatter config fields")
+                atom = ScatterAtom(
+                    TensorType.from_dict(config["base_type"]),
+                    TensorType.from_dict(config["index_type"]),
+                    TensorType.from_dict(config["update_type"]),
+                    axis=config["axis"],
+                    index_axis=config["index_axis"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("scatter output type")
+            else:
+                raise ValueError("unknown Formula atom reference")
         except (TypeError, ValueError, KeyError) as exc:
             raise ComponentCompatibilityError("Formula atom config is invalid") from exc
         return

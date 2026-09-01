@@ -93,6 +93,7 @@ def save(
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch.nn.Module")
     _assert_artifact_components_portable(model)
+    _validate_sealed_bank_queries(model)
     target = _weight_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     if scope not in {"all", "trainable"}:
@@ -132,6 +133,17 @@ def _assert_artifact_components_portable(model: nn.Module) -> None:
             "arti.st cannot persist non-portable components; save the owning "
             f"constructible module instead: {joined}"
         )
+
+
+def _validate_sealed_bank_queries(model: nn.Module) -> None:
+    """Fail before writing when a mounted Query no longer matches its asset."""
+
+    from .bank_query import SealedBankQuery
+
+    for module in model.modules():
+        if isinstance(module, SealedBankQuery):
+            module.validate_runtime_state()
+            module.signature.validate_query(module.query)
 
 
 def load(

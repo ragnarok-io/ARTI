@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from arti.torch import ARTILayer
+from arti.legacy import ARTILayer
 
 
 def test_torch_backend_forward_backward_cpu():

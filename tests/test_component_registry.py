@@ -93,23 +93,23 @@ def test_artifact_scope_rejects_runtime_only_provenance() -> None:
 
 
 def test_tensor_operation_provenance_rejects_rehashed_config_and_dependency_forgery() -> None:
-    spec = arti.alpha.PortSpec(
+    spec = arti.mechanisms.PortSpec(
         canvas_tokens=4,
         tensor_shape=(2,),
         dim=3,
         tensor_to_canvas=(2, 3),
     )
-    bank = arti.alpha.TensorOperationBank(
+    bank = arti.mechanisms.TensorOperationBank(
         spec,
         candidate_count=4,
         key_dim=7,
         seed=97,
     )
-    loop = arti.alpha.TensorOperationLoop(
-        arti.alpha.TensorOperation(
+    loop = arti.mechanisms.TensorOperationLoop(
+        arti.mechanisms.TensorOperation(
             spec,
-            arti.alpha.TensorOperationSelector(spec, bank, query_seed=101),
-            surrogate=arti.alpha.TensorEditSurrogate(spec),
+            arti.mechanisms.TensorOperationSelector(spec, bank, query_seed=101),
+            surrogate=arti.mechanisms.TensorEditSurrogate(spec),
         )
     )
     provenance = component_provenance(loop)
@@ -228,9 +228,9 @@ def test_version_one_provenance_is_strictly_migrated_on_read() -> None:
 
 
 def test_reversible_runtime_record_identities_remain_registered() -> None:
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         2,
-        policy=arti.alpha.FixedTopologyPolicy(),
+        policy=arti.mechanisms.FixedTopologyPolicy(),
     )
     folded = topology.fold(torch.randn(1, 4, 3))
 
@@ -382,8 +382,8 @@ def test_per_bank_recall_artifact_round_trip_binds_partition_assembly(tmp_path) 
     restored = build(weights=(1.0, 0.5)).eval()
     arti.load(saved.weights_path, model=restored)
     torch.testing.assert_close(restored(value), expected)
-    expected_candidates = arti.alpha.query_recall_branches(model, value, max_k=4)
-    restored_candidates = arti.alpha.query_recall_branches(restored, value, max_k=4)
+    expected_candidates = arti.mechanisms.query_recall_branches(model, value, max_k=4)
+    restored_candidates = arti.mechanisms.query_recall_branches(restored, value, max_k=4)
     assert restored_candidates.partition_names == expected_candidates.partition_names
     assert (
         restored_candidates.partition_member_fingerprints
@@ -443,7 +443,7 @@ def test_per_bank_recall_artifact_round_trip_binds_partition_assembly(tmp_path) 
     ).eval()
     arti.load(zero_saved.weights_path, model=zero_restored)
     torch.testing.assert_close(zero_restored(value), zero_expected)
-    zero_candidates = arti.alpha.query_recall_branches(
+    zero_candidates = arti.mechanisms.query_recall_branches(
         zero_restored,
         value,
         max_k=4,

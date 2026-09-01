@@ -1,17 +1,17 @@
 # Reversible Topology
 
-`arti.alpha.Fold` and `arti.alpha.UnFold` are the versioned `Fold@2` and
+`arti.mechanisms.Fold` and `arti.mechanisms.UnFold` are the versioned `Fold@2` and
 `UnFold@2` operations. They change which tensor instances are exposed to an
 intermediate block without summarizing, reconstructing, duplicating, or
 discarding the other instances.
 
 ```python
 import torch
-from arti import alpha
+from arti import mechanisms
 
-topology = alpha.ReversibleTopology(
+topology = mechanisms.ReversibleTopology(
     active_count=2,
-    policy=alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+    policy=mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
 )
 fold, unfold = topology.operations()
 
@@ -59,7 +59,7 @@ assert torch.equal(result.mask, mask)
 | state | `arti/fold-state@1` | active and folded value payloads |
 
 The previously published `arti/fold@1` and `arti/unfold@1` remain separate
-alpha mechanisms for soft compaction and learned expansion. Exact references
+stable mechanisms for soft compaction and learned expansion. Exact references
 never silently migrate between these contracts.
 
 ## Topology Learning Is Bank Formula Evaluation
@@ -157,18 +157,28 @@ actually executed. Exact trained tensor hashes belong to the saved `arti.st`
 component state contract. Fold does not hash an entire mutable Bank during each
 training forward.
 
-## Validation Boundary
+## Selective Compute Evidence
 
-In the 3.0.7 alpha composition path, Fold@2 and UnFold@2 may be hosted by
-`AdaptivePulse`. The Pulse stage graph records both operations as separate
-canonical components while binding them to the same reversible-topology
-contract. Observation, Formula intervention, and selective compute may change
-which instances are active or how active values are processed; they do not
-change the recorded inverse or permit the folded payload to enter the active
-block implicitly.
+A controlled private Phase C benchmark connected the complete value path:
 
-The public contract guarantees exact transport, complete lineage, bounded
-active workspace size, explicit surrogate gradients, and fail-closed record
-validation. It does not claim task-quality improvement or training-time speedup.
-Applications should measure the complete scorer, transport, preserved-payload,
-intermediate-block, and inverse costs for their own workload.
+```text
+Fold@2 -> frozen standard PyTorch block on K instances -> UnFold@2
+```
+
+With `N=16` and `K=4`, three independent runs trained only topology Bank
+values from the final restored tensor target. Correct Banks separated from
+random, reset, shuffled, matched-wrong, cue-only, and utility-shuffled
+controls. Two independently trained Banks also improved a joint-cue target
+without joint fine-tuning, although composition did not preserve either
+Bank's isolated single-task behavior. In every run, the hard forward and
+inference block physically received only K instances, bypassed values were
+unchanged, and UnFold restored host order.
+
+Because hard lineage selection is discrete, that benchmark used a private
+counterfactual final-output gradient estimator during training. Each training
+step therefore performed the K-instance hard block call plus an N-candidate
+counterfactual block evaluation. The reported loss and real forward remained
+the hard final tensor path. This is evidence for the mechanism, not a claim of
+training-time compute savings or compatibility with cross-instance blocks.
+The full methods, controls, numbers, and limitations are recorded in
+`benchmarks/results/reversible_topology_phase_c.md`.

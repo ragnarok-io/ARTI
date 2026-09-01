@@ -4351,6 +4351,8 @@ class ARTILatentTensorLayer(nn.Module):
 class ARTILayer(ARTILatentTensorLayer):
     """Convenience constructor for the default latent tensor layer."""
 
+    _component_reference = "arti/layer@1"
+
     def __init__(
         self,
         input_dim: int,

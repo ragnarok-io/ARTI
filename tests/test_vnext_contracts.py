@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     EnvelopeRef,
     InterventionOperator,
     OffSemantics,
@@ -290,9 +290,9 @@ def test_fold_support_transport_uses_the_exact_topology_permutation() -> None:
         support(SupportKind.INTERVENED, [[False, False, True, False]], support_domain=world),
         validity=validity,
     )
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     record = topology.fold(torch.randn(1, 4, 3), validity).record
 
@@ -321,9 +321,9 @@ def test_fold_support_transport_rejects_mask_lineage_drift() -> None:
     validity = torch.tensor([[True, True, False]])
     world = domain(validity)
     supports = PulseSupports.identity(validity, world)
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[0, 1, 2]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[0, 1, 2]),
     )
     record = topology.fold(torch.randn(1, 3, 2), torch.ones_like(validity)).record
     with pytest.raises(ValueError, match="mask lineage"):
@@ -470,8 +470,8 @@ def test_training_operands_are_zero_copy_and_differentiable() -> None:
     mask = torch.ones(1, 2, dtype=torch.bool)
     values = torch.randn(1, 2, 4, requires_grad=True)
     operands = TypedOperands(operand_contract(mask), values, mask)
-    source = arti.alpha.TopologyOperandBank(slots=2, key_dim=2, factor_dim=4)
-    consumer = arti.alpha.TopologyPriorityFormula(factor_dim=4)
+    source = arti.mechanisms.TopologyOperandBank(slots=2, key_dim=2, factor_dim=4)
+    consumer = arti.mechanisms.TopologyPriorityFormula(factor_dim=4)
     consumed = operands.consume(
         consumer=consumer,
         kind=OperandKind.TOPOLOGY,
@@ -490,9 +490,9 @@ def test_training_operands_are_zero_copy_and_differentiable() -> None:
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ({"consumer": arti.alpha.UnFold(active_count=1)}, "consumer"),
+        ({"consumer": arti.mechanisms.UnFold(active_count=1)}, "consumer"),
         ({"kind": OperandKind.RECALL}, "kind"),
-        ({"source": arti.alpha.TopologyPriorityFormula(factor_dim=4)}, "source"),
+        ({"source": arti.mechanisms.TopologyPriorityFormula(factor_dim=4)}, "source"),
         ({"partition_id": "other-partition"}, "partition"),
         (
             {"domain": domain(torch.ones(1, 2, dtype=torch.bool), domain_id="other")},
@@ -510,9 +510,9 @@ def test_typed_operands_fail_closed_for_wrong_consumer_authority(
     mask = torch.ones(1, 2, dtype=torch.bool)
     operands = TypedOperands(operand_contract(mask), torch.randn(1, 2, 4), mask)
     request: dict[str, object] = {
-        "consumer": arti.alpha.TopologyPriorityFormula(factor_dim=4),
+        "consumer": arti.mechanisms.TopologyPriorityFormula(factor_dim=4),
         "kind": OperandKind.TOPOLOGY,
-        "source": arti.alpha.TopologyOperandBank(slots=2, key_dim=2, factor_dim=4),
+        "source": arti.mechanisms.TopologyOperandBank(slots=2, key_dim=2, factor_dim=4),
         "partition_id": "topology-primary",
         "domain": operands.contract.domain,
         "factor_dim": 4,
@@ -701,9 +701,9 @@ def test_fold_unfold_pair_requires_identical_topology_binding() -> None:
 
 
 def test_topology_binding_validates_the_real_fold_record() -> None:
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     record = topology.fold(torch.randn(1, 4, 3)).record
     binding = TopologyBinding(
@@ -723,9 +723,9 @@ def test_topology_binding_validates_the_real_fold_record() -> None:
 
 
 def test_pulse_executor_binds_and_runs_real_half_fold_unfold() -> None:
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[2, 0, 3, 1]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[2, 0, 3, 1]),
     )
     fold, unfold = topology.operations()
     binding = TopologyBinding(
@@ -792,9 +792,9 @@ def test_pulse_executor_binds_and_runs_real_half_fold_unfold() -> None:
 
 
 def test_contextual_half_cannot_read_outside_exposed_support() -> None:
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[0, 1, 2]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[0, 1, 2]),
     )
     fold, unfold = topology.operations()
     binding = TopologyBinding(
@@ -851,17 +851,17 @@ def test_pulse_executor_rejects_missing_or_wrong_stage_modules() -> None:
         PulseExecutor(
             graph,
             {
-                "half": arti.alpha.Fold(active_count=1),
-                "fold": arti.alpha.Fold(active_count=1),
-                "unfold": arti.alpha.UnFold(active_count=1),
+                "half": arti.mechanisms.Fold(active_count=1),
+                "fold": arti.mechanisms.Fold(active_count=1),
+                "unfold": arti.mechanisms.UnFold(active_count=1),
             },
         )
 
 
 def test_pulse_executor_rejects_module_config_drift() -> None:
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=1,
-        policy=arti.alpha.FixedTopologyPolicy(order=[0, 1]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[0, 1]),
     )
     fold, unfold = topology.operations()
     binding = TopologyBinding(

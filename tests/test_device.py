@@ -1,6 +1,6 @@
 import torch
 
-from arti import ARTILayer
+from arti.legacy import ARTILayer
 
 
 def test_layer_runs_on_available_device():

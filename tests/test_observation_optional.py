@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     AdaptiveObservation,
     BankConditionedObservationPolicy,
     EnvelopeRef,

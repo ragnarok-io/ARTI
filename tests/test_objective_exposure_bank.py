@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import ObjectiveExposureBank, ObjectiveExposureOutput
+from arti.mechanisms import ObjectiveExposureBank, ObjectiveExposureOutput
 
 
 def test_component_is_versioned_and_alpha_only() -> None:

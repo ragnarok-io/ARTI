@@ -1,733 +1,253 @@
 # ARTI
 
-**AI x RT: composable latent tensor layers for PyTorch.**
+**AI x RT: composable latent tensor dynamics for PyTorch.**
 
 ARTI is a domain-independent neural-network library for transforming hidden
-tensors at runtime. Its layers work with ordinary tensors and can optionally
-use coordinates, masks, visibility, latent recall, and compact workspaces.
+tensors at runtime. It provides versioned components for activation, compact
+workspaces, Recall, Formula execution, reversible topology, persistent tensor
+operations, and model attachment.
 
 ```text
-hidden tensor -> ARTI layer or block -> transformed latent tensor
+tensor input -> ARTI layer or mechanism -> tensor output
 ```
 
-ARTI does not define a tokenizer, task head, data schema, or business model.
-Applications remain responsible for encoding their context into tensors.
-
-Version 3.0.6 remains the **Stable Candidate** baseline. Version 3.0.10a2 is a
-prerelease for new versioned composition contracts under `arti.alpha`; it does
-not promote those components to the stable surface. See
-[Stability](STABILITY.md) and [Security](SECURITY.md).
+ARTI does not prescribe a tokenizer, task head, dataset, model family, or
+training loop. Applications decide what a tensor means; ARTI supplies reusable
+ways to observe, route, transform, remember, and compose it.
 
 ## Install
 
-Add ARTI to a project with [uv](https://docs.astral.sh/uv/):
+The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add arti-fit
-```
-
-To evaluate the current alpha line explicitly:
-
-```bash
-uv add --prerelease allow "arti-fit==3.0.10a2"
+uv add "arti-fit==3.0.11"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
 project chooses the appropriate CPU or CUDA build of PyTorch.
 
-The PyPI distribution is named `arti-fit`; the Python import remains `arti`.
-
-Optional integrations can be installed as needed:
+Optional integrations are installed only when needed:
 
 ```bash
-uv sync --extra jax
-uv sync --extra qwen
-uv sync --extra peft
-uv sync --extra sd
-uv sync --extra web
+uv add "arti-fit[jax]==3.0.11"
+uv add "arti-fit[qwen]==3.0.11"
+uv add "arti-fit[sd]==3.0.11"
+uv add "arti-fit[web]==3.0.11"
 ```
 
-The alpha browser runtime is published separately:
+The browser runtime remains a separate alpha package:
 
 ```bash
 pnpm add @arti-fit/web@alpha
 ```
 
-## What Is New In 3.0.10 Alpha
-
-`FormulaFabricV2` (`arti/formula-fabric@2`) adds a typed, bounded Formula
-program with named axes and explicit Input and Bank operands. Contract, Scale,
-Add, and Reduce atoms can express LoRA-shaped and other tensor operations
-without giving the executor an opaque task-specific primitive. A fixed Query
-can select complete operand bundles from `FormulaOperandBank` while hard
-forward routing remains explicit.
-
-Deep Recall training can use `RefineStepTraining` to capture the model's own
-detached trajectory and train its successive one-step transitions with the
-real downstream objective. `FormulaRefineExit` adds an optional
-post-transition model exit request; host `min_steps` and `max_steps` remain the
-hard bounds. Exit-controller training uses detached task-quality curves rather
-than a teacher stop sequence.
-
-The tensor-operation surface provides an always-backed `OperableTensorPort`
-whose backing is an arbitrary-rank logical tensor `[B, *tensor_shape, D]`.
-`SharedCanvasFold` exposes a bounded world-shaped Reader view while the
-parallel operation branch addresses the complete backing. Hard operation
-fields can edit ranges or sparse index maps, and concatenated operation Banks
-preserve complete members, provenance, local normalization, and explicit
-influence. Mounted backing can be replaced between calls without changing
-parameters or the model call signature. Both branches read one call-boundary
-snapshot; a proposal becomes visible only after the caller advances the port
-for a later call.
-
-These APIs remain under `arti.alpha`. This release establishes versioned
-execution, training, and lifecycle contracts; it does not claim downstream
-quality gains or physical runtime acceleration. See [Formula Fabric](docs/formula-fabric.md),
-[Flattened Refine Training](docs/flattened-refine-training.md),
-[Refine Exit](docs/refine-exit.md), and
-[Operable Tensor Port](docs/operable-tensor-port.md).
-
-## What Is New In 3.0.9 Alpha
-
-Alpha 2 keeps the Python-owned Web parity generator aligned with the
-experimental stateful API namespace. Recall semantics are unchanged from
-Alpha 1.
-
-New `arti.nn.Recall` instances use versioned `Recall@4` K-wide execution by
-default. One query preserves up to eight candidate routes, refines them as
-independent trajectories, and forwards exactly one winning trajectory. The
-forward choice is hard; a soft routing surrogate preserves useful gradients.
-Candidate states are not averaged unless
-`breadth_aggregation="route_weighted"` is explicitly requested.
-
-```python
-recall = arti.nn.Recall(dim=768, slots=64)  # K=8 when capacity permits
-y = recall(x)
-
-wide = arti.nn.Recall(dim=768, slots=64, group_topk=16, breadth=16)
-y, branches = wide(x, return_branches=True)
-y = wide(x, active_k=4)  # reduce this run's active candidate count
-```
-
-Eight is the portable default; 8-32 is the recommended starting range when
-Bank capacity and runtime budget permit. `breadth=1` keeps one trajectory, and
-`breadth_mode="mixed"` explicitly requests the historical mix-before-refine
-path. Resolving `Recall@2` or `Recall@3` also preserves those historical mixed
-semantics. The K-wide bridge is eager-only in this alpha. See
-[Batched Refine](docs/batched-refine.md).
-
-The alpha runtime also exposes bounded branch batches, Formula application,
-GPU-resident hot-page binding, explicit tensor transactions, and runtime
-checkpoint helpers. These remain optional infrastructure contracts; this
-release makes no hardware-speed or task-quality claim.
-
-## What Is New In 3.0.8 Alpha
-
-`FormulaFabric` is an alpha, fixed-capacity tensor executor for bounded Formula
-programs. It keeps routing, execution, and commit strength explicit: programs
-run through the existing Formula implementation, Bank-driven route sources can
-select operands, and iterative routing can re-query after each complete
-program as the workspace changes.
-
-`ObjectiveExposureBank` can provide bounded commit strength to a Formula
-Fabric stage using an explicit current-or-past query. It does not choose
-routes, primitives, topology, execution depth, persistence, or host commit
-authority. Future targets and losses remain outside the forward graph.
-
-Reversible `Fold` can bind a caller-owned topology source through a checked
-provenance contract, and Formula Fabric can run inside `AdaptivePulse` without
-reimplementing Formula mathematics. These APIs remain optional and alpha. See
-[Formula Fabric](docs/formula-fabric.md) for the execution contract.
-
-This prerelease makes no task-quality, hardware-speed, autonomous-memory, or
-scientific-superiority claim. The `arti.st` format remains version 1 and the
-Stable Candidate remains 3.0.6.
-
-## What Is New In 3.0.7 Alpha
-
-`arti.alpha.AdaptivePulse` (`arti/pulse@2`) is a manifest-bound composition of
-optional observation, Half, reversible Fold/UnFold, Formula intervention,
-selective compute, Bank update, and reunion aggregation stages. Disabled
-stages are true identity operations and are omitted from the component
-dependency graph.
-
-`AdaptiveObservation` provides bounded fixed, learned, or Bank-conditioned
-observation trajectories. Identity, bounded state-affine, and Fourier shift
-operators are independently selectable. Fourier observation supports eager
-training and compiled forward; compiled FFT backward is deliberately not
-claimed. See [Adaptive observation](docs/adaptive-observation.md).
-
-The vNext contracts keep value transport, support masks, typed operands,
-component provenance, and execution budgets explicit. These APIs are alpha:
-the release establishes composable tensor contracts, not a task-performance
-claim. See [Component provenance](docs/component-provenance.md) for the
-canonical identity and dependency rules.
-
-## What Is New In 3.0
-
-The 3.0.6 maintenance release adds versioned reversible topology operations
-under `arti.alpha`, alongside the target-addressable forward memory updater,
-and keeps the reversible
-pretrained-model workflow: after `fit` and `arti.st`
-export, a fresh model can reload the artifact and the workflow can `detach()`
-without losing the native model class, methods, or original trainability
-settings.
-
-`Half` now makes sampling an explicit activation option. `Half(stochastic=True)`
-(the default) samples each feature using its survival probability in both train
-and eval modes; `Half(stochastic=False)` returns the deterministic `q * x`
-path. Set `learnable=True` to train the threshold, base, and scale of the
-survival curve. The learned q curve is available through `half.survival(x)`;
-the stochastic learned path uses a straight-through estimator.
-
-`TargetBankUpdater` treats the Bank being changed as an addressable Recall
-partition. Each bounded write-refine step reads the current Bank, applies a
-Formula transition, updates the Bank, and lets the next step address the new
-state. An optional private partition may participate in the read, but only the
-target Bank is changed. The API remains alpha and is deliberately separate
-from optimizers, event logs, and task-specific training loops:
-
-```python
-from arti.alpha import TargetBankUpdater, WriteRefinePolicy
-
-updater = TargetBankUpdater(
-    hidden_dim=64,
-    slots=32,
-    target_coupling="required_after_bootstrap",
-    policy=WriteRefinePolicy.adaptive(max_steps=8, min_steps=2),
-)
-next_bank = updater(trace, bank, exposure=1.0)
-```
-
-`arti.alpha.Fold` (`arti/fold@2`) selects a fixed-size active workspace by
-reordering tensor instances and records the complete permutation. The paired
-`arti.alpha.UnFold` (`arti/unfold@2`) restores the original topology exactly;
-it never predicts or reconstructs discarded values because no values are
-discarded:
-
-```python
-from arti.alpha import Fold, UnFold
-
-fold = Fold(active_count=16)
-unfold = UnFold(active_count=16)
-state = fold(x, mask)
-state = state.replace(active=block(state.active))
-result = unfold(state)
-```
-
-Learned and Bank Formula topology policies can decide which instances enter
-the active workspace without mixing tensor values. The existing
-`arti.nn.Fold` and `arti.nn.UnFold` remain the `@1` contracts. See
-[Reversible topology](docs/reversible-topology.md).
-
-ARTI 3.0 makes the current Recall architecture the public default. Recall now
-uses a fixed query basis, host-dimensional Bank values, versioned Formula
-contracts, explicit per-Bank composition, and bounded iterative refinement.
-The package also exposes reusable Recall artifact, expert, policy, workspace,
-and value-transition primitives without coupling them to a training loop.
-
-The experimental `RecallTTTSession` API and the 2.x Formula symbols have been
-removed. They mixed optimization policy with the tensor layer and are not part
-of the 3.x replacement. Applications should compose `arti.nn.Recall`, Formula contracts,
-and explicit artifact/state APIs instead.
-
-The `arti.st` container remains version 1, but the Recall Formula contract and
-manifest schema are version 2. ARTI 3.0 deliberately rejects 2.x Formula
-contracts, manifests, and locks instead of silently interpreting them under a
-different execution contract.
-
-## Choose The Smallest Useful Surface
-
-ARTI mechanisms are independent. A project can use one tensor layer, attach
-Recall to selected model boundaries, or compose separately trained Bank assets.
-Coordinates, masks, visibility, Recall, Pulse, and the other mechanisms do not
-need to be enabled together.
-
-| Need | Start with |
-| --- | --- |
-| A normal tensor-in/tensor-out layer | `arti.nn.Layer` or `arti.nn.Recall` |
-| Salience survival or workspace compaction | `Half`, `Fold`, `UnFold`, `Pulse` |
-| Existing PyTorch/Transformers/Diffusers model | `arti.ARTI.attach(...)` or `arti.fit(...)` |
-| Independently trained Recall assets | Bank-only expert artifacts |
-| Several compatible Recall assets at once | Bank concat with per-Bank controls |
-| Ordered heterogeneous adapters | An adapter-stack manifest |
-
-## Attach At Explicit Tensor Boundaries
-
-ARTI can scan a real sample forward, select module input or output tensor
-boundaries, and preview the exact parameter cost before changing the model.
-Placement and scale remain application choices:
-
-```python
-import arti
-
-project = (
-    arti.project(model)
-    .at(
-        ["model.layers.*"],
-        exclude=["*.lm_head"],
-        positions="output",
-        scale_pattern={"model.layers.0": "small", "model.layers.*": "medium"},
-    )
-)
-
-preview = project.preview(sample_batch)  # no model mutation
-print(preview.insertion_plan.to_dict())
-project.insert()
-```
-
-This is not a model-specific patch list. ARTI temporarily packs the selected
-tensor into `[B, D]` or `[B, N, D]`, applies the configured tensor layer, and
-restores the original rank and output container.
-
-For provider-backed pretrained workflows, keep the lifecycle explicit:
-
-```python
-workflow = arti.pretrained(model, provider="transformers")
-workflow.scan(sample_batch).plan(where="mlp", scale="tiny")
-workflow.apply()
-workflow.fit(train_data)
-exported = workflow.export("arti.st")
-
-restored = arti.pretrained(fresh_model, provider="transformers")
-restored.scan(sample_batch).plan(where="mlp", scale="tiny")
-restored.apply()
-restored.load_weights(exported.saved.weights_path)
-tokens = restored.generate(**inputs)
-restored.detach()
-```
-
-`detach()` removes only the adapters owned by that workflow, restores the
-pre-attachment `requires_grad` settings, and leaves the host model's native
-API available.
-
-## Build Reusable Recall Experts
-
-A Recall expert artifact can contain only trainable Bank tensors. The host and
-shared reader are frozen and fingerprinted by an immutable contract:
-
-```python
-import arti
-import torch
-
-attached = arti.ARTI.attach(
-    model,
-    recall={"layers": "model.layers.*", "rank": 16, "slots": 32},
-)
-
-contract = attached.arti.bank_contract("qwen-recall-v1")
-attached.arti.freeze_banks()
-optimizer = torch.optim.AdamW(
-    attached.arti.parameters("expert_banks"),
-    lr=1e-3,
-)
-
-# Run the application-owned training loop, then export only the Banks.
-attached.arti.save_bank(
-    "style.recall.arti.st",
-    bank_id="style",
-    contract=contract,
-)
-```
-
-Compatible immutable experts can be rebuilt into one native Bank assembly:
-
-```python
-banks = attached.arti.banks(contract)
-banks.replace(["style.recall.arti.st", "domain.recall.arti.st"])
-print(banks.bank_ids)
-```
-
-For fit-exported adapters, the equivalent lower-level composition keeps each
-Bank independently controllable:
-
-```python
-arti.concatenate_adapter_banks(
-    model,
-    ["style.recall.arti.st", "domain.recall.arti.st"],
-    bank_names=["style", "domain"],
-    weights={"style": 2.0, "domain": 1.0},
-)
-arti.set_adapter_bank_weights(model, {"style": 1.0, "domain": 3.0})
-arti.set_adapter_bank_influences(model, {"style": 1.0, "domain": -0.5})
-```
-
-Weights change routing priors. Signed influences change write direction and
-strength. Neither operation rewrites the source artifacts. See
-[Recall artifacts](docs/recall-artifacts.md).
-
-## Compose And Run Efficiently
-
-Independent adapters can also be loaded in a hash-checked declared order:
-
-```python
-results = arti.apply_adapter_stack(model, "arti-stack.json", sample_batch=sample)
-```
-
-After attachment, runtime controls do not rewrite weights:
-
-```python
-arti.set_recall_refine_steps(model, 4)
-arti.set_adapter_scale(model, 0.75)
-compiled = arti.compile_adapter_hotpaths(model)
-```
-
-`compile_adapter_hotpaths` compiles ARTI write paths without compiling the
-host model. Eager artifacts remain portable and unchanged.
-
-## What Was New In 1.9
-
-ARTI 1.9 adds runtime control over the exact number of Recall refinement steps
-without changing or rewriting adapter weights:
-
-```python
-arti.set_recall_refine_steps(model, 6)
-arti.set_recall_refine_steps(model, 0)  # exact Recall bypass
-
-arti.set_recall_refine_schedule(model, [1, 1, 3, 3, 6, 6])
-arti.set_recall_refine_schedule(
-    model,
-    {
-        "model.layers.0": 1,
-        "model.layers.1": 3,
-        "model.layers.2": 6,
-    },
-)
-```
-
-Sequence schedules follow `model.named_modules()` registration order. Named
-schedules must cover every attached adapter exactly and are recommended for
-persistent configuration. ARTI validates the complete schedule before changing
-any layer, so an invalid depth cannot leave a partially updated model.
-
-The controls only change runtime refinement depth. They do not change adapter
-parameters, artifact format, optimizer state, or the separately versioned Web
-runtime. A positive depth cannot enable an adapter that was initialized without
-a Recall field.
-
-## What Was New In 1.8
-
-ARTI provides `arti.nn.Recall`, a standalone tensor-in/tensor-out layer with an
-extensible Formula API:
-
-```text
-current state + routed Bank factors -> Formula -> next state
-```
-
-The Bank owns trainable tensors and routing. The Formula only defines how the
-current state and a fixed, named set of factors produce the next state. This
-separation lets applications change Recall mathematics without rebuilding
-routing, serialization, masking, or iterative execution.
-
-The release includes:
-
-- canonical versioned `arti/delta@1`, `arti/affine@1`, and `arti/state@1`
-  formulas;
-- local custom formulas implemented as ordinary `torch.nn.Module` objects;
-- explicit process-local registration for trusted application formulas;
-- stable factor ordering and passive manifest metadata;
-- masked `[B, D]` and `[B, N, D]` execution, optional iterative steps, and
-  diagnostics.
-
-Recall formulas do not own optimizers, gradient policy, files, network access,
-or training schedules. Third-party formula code is never imported from an
-artifact. Each Formula can expose a pure-data contract and an instance lock;
-the lock binds the declared formula to its factor layout, hidden dimension,
-slot count, and execution backend before weights are loaded.
-
-## Use ARTI As A Layer
-
-The smallest API behaves like a normal PyTorch layer:
-
-```python
-import arti
-import torch
-
-layer = arti.nn.Layer(dim=32)
-x = torch.randn(4, 16, 32)
-mask = torch.ones(4, 16, dtype=torch.bool)
-
-out = layer(x, mask=mask)
-
-assert out.y.shape == (4, 16, 32)
-assert out.pooled.shape == (4, 32)
-print(out.diagnostics.keys())
-```
-
-For `[B, D]` inputs, ARTI treats each row as a single token and restores the
-original rank on output.
-
-Capabilities are opt-in. Enable only the structure carried by the data:
-
-```python
-recall_layer = arti.nn.Layer(dim=32, profile="recall")
-multisource = arti.nn.Layer(dim=32, profile="multisource", coord_dim=4)
-```
-
-## Use Recall As A Layer
-
-`Recall` can be inserted anywhere a shape-preserving PyTorch layer is useful:
-
-```python
-import arti
-import torch
-
-recall = arti.nn.Recall(
-    dim=64,
-    slots=32,
-    formula="arti/affine@1",
-    steps=2,
-)
-
-h = torch.randn(2, 32, 64)
-mask = torch.ones(2, 32, dtype=torch.bool)
-
-h, info = recall(h, mask=mask, return_info=True)
-
-assert h.shape == (2, 32, 64)
-print(info["recall_steps_executed"])
-```
-
-`Recall` routes trainable Bank factors and applies a versioned formula to the
-current state. Its default activation is the public `Half` policy; choose
-`activation="none"` to disable it, or use an explicit `Half(stochastic=False)`
-when a deterministic survival path is required. Module `train()` / `eval()`
-does not silently change the selected Half policy.
-Built-in formulas use canonical IDs: `arti/delta@1`, `arti/affine@1`, and
-`arti/state@1`. Legacy short names are rejected rather than silently mapped to
-a different implementation.
-
-| Formula | Bank factors | Minimum slot multiple |
-| --- | --- | --- |
-| `arti/delta@1` | `content` | 1 |
-| `arti/affine@1` | `scale`, `shift` | 2 |
-| `arti/state@1` | coarse/fine content, modulation, direction, opacity | 17 |
-
-`slots` is the total Bank slot count and must be divisible by the selected
-formula's factor count. `steps`, `min_steps`, and `tolerance` control bounded
-iterative execution. Set `activation="none"` when a Recall application should
-not use the default `Half` survival activation.
-
-### Define A Local Formula
-
-Applications can pass a trusted local `torch.nn.Module`. A custom Formula
-receives one state vector `[D]` and its ordered factors `[F, D]`, then returns
-the complete next state `[D]`:
+## Stable 3.0.11
+
+`arti.ARTILayer` is now `arti/layer@2`: a tensor-in/tensor-out host for one
+composable `AdaptivePulse` graph. An empty graph is an exact identity, so a
+layer can be inserted before an application chooses its mechanisms.
 
 ```python
 import torch
 import arti
 
+x = torch.randn(2, 16, 64)
+layer = arti.ARTILayer()
+y = layer(x)
 
-class SignedGate(torch.nn.Module):
-    factor_names = ("content", "gate")
+assert torch.equal(x, y)
+assert arti.component_ref(layer) == "arti/layer@2"
+```
 
-    def forward(
-        self,
-        state: torch.Tensor,
-        factors: torch.Tensor,
-    ) -> torch.Tensor:
-        content, gate = factors.unbind(dim=0)
-        return state + torch.tanh(gate) * content
+Build a layer from ordinary ARTI modules:
 
-
-recall = arti.nn.Recall(
-    dim=64,
-    slots=32,
-    formula=SignedGate(),
+```python
+pulse = arti.mechanisms.AdaptivePulse(
+    half=arti.Half(stochastic=False, learnable=True),
 )
-output = recall(torch.randn(2, 16, 64))
+layer = arti.ARTILayer(pulse)
+y, info = layer(x, return_info=True)
 ```
 
-Custom formulas run independently for every latent vector, so Formula-side
-reductions cannot couple batch items or tokens. Their parameters participate in
-normal autograd and `state_dict()` handling. For reusable process-local names,
-register a trusted factory explicitly with `arti.register_formula(...)`.
+The public namespaces have explicit roles:
 
-See [Custom Recall formulas](docs/custom-recall-formulas.md) for the complete
-contract, initialization rules, validation checklist, registration model, and
-portability boundaries.
+- `arti` and `arti.torch`: stable high-level PyTorch APIs.
+- `arti.nn`: practical standalone tensor layers and explicit layer profiles.
+- `arti.mechanisms`: stable, versioned composition/runtime mechanisms.
+- `arti.legacy`: the retired monolithic `ARTILayer@1`, `LayerRecall`, and
+  `StatefulRecall`, retained for historical artifact inspection.
+- `arti.experimental`: integrations that are still experimental; currently the
+  Python-first Web exporter.
 
-`Half`, `Fold`, and `Recall` remain independently usable tensor layers.
+`arti.alpha` remains a compatibility name for `arti.mechanisms`; new code should
+use the stable namespace.
 
-## Expand And Rearrange With UnFold
+## Attach To A Model
 
-`UnFold` exposes values queried from an input tensor and learns a hard,
-sample-conditioned layout while preserving every original input instance:
+Attach an AdaptivePulse-backed layer to selected tensor boundaries without
+changing the host model class:
 
 ```python
 import arti
-import torch
 
-x = torch.randn(4, 16, 64)
-unfold = arti.nn.UnFold(dim=64, exposed=8)
-y, exposed_mask = unfold(x, return_exposed_mask=True)
-
-assert y.shape == (4, 24, 64)
-assert exposed_mask.shape == (4, 24)
-```
-
-Original values may move, but they are not averaged, interpolated, projected,
-or discarded. The queried region and layout remain trainable and support masks,
-optional guide tensors, autograd, CUDA, and `arti.st` serialization. `UnFold`
-is unrelated to `torch.nn.Unfold`, which extracts image patches. See the
-[UnFold guide](docs/unfold.md).
-
-One UnFold capacity can serve different runtime workspace sizes by passing
-`target_length`. Only the required prefix of exposed query parameters is active
-for that call.
-
-## Fuse Compact Workspaces With FusionPulse
-
-`FusionPulse` is an alpha layer for combining several already compact Pulse
-workspaces. It learns feature-wise salience in their joint context, applies
-`Half`, and lets one shared `UnFold` query a fixed-size fused workspace:
-
-```python
-left = arti.nn.Pulse(k=8, dim=64)(left_fragments)
-right = arti.nn.Pulse(k=8, dim=64)(right_fragments)
-
-fusion = arti.nn.FusionPulse(k=8, dim=64)
-z = fusion.concat(left, right)
-
-assert z.shape == (left.shape[0], 8, 64)
-```
-
-Inputs may have different slot counts and the number of sources may change
-between calls. For balanced consolidation during training, request diagnostics
-and add `info["structural_loss"]` to the task loss. See the
-[FusionPulse guide](docs/fusion-pulse.md).
-
-## Attach To An Existing Model
-
-ARTI can discover and attach Recall branches without changing the model class:
-
-```python
-import arti
+pulse = arti.mechanisms.AdaptivePulse(
+    half=arti.Half(stochastic=False, learnable=True),
+)
+layer = arti.ARTILayer(pulse)
 
 model = arti.ARTI.attach(
     model,
-    recall={
-        "layers": "model.layers.*",
-        "rank": 16,
-        "slots": 8,
-    },
+    layer,
+    layers="model.layers.*",
 )
 
 print(model.arti.summary())
-model.arti.save("assistant.recall.arti.st")
+model.arti.save("assistant.arti.st")
 ```
 
-Attachment configuration supports explicit layer paths, per-layer dimensions,
-independent Recall lines, Half switches, resource previews, and reversible
-removal. Transformers, PEFT, and Diffusers are optional integration boundaries;
-the core package remains PyTorch-first.
-
-## Save And Load Weights
-
-ARTI uses SafeTensors with JSON integrity sidecars:
+Reload into a fresh host or remove the attached layers:
 
 ```python
-saved = arti.save(layer, "layer.arti.st")
-loaded = arti.load("layer.arti.st", model=fresh_layer)
-
-print(saved.weights_sha256)
-print(loaded.missing_keys, loaded.unexpected_keys)
+restored = arti.ARTI.load(fresh_model, "assistant.arti.st", layer=layer)
+restored = restored.arti.detach()
 ```
 
-ARTI 3.x uses strict versioned artifacts. Legacy `.pt` migration is outside
-the public API; export a fresh `.arti.st` artifact from a current module.
+Attachment preserves the host model type and arbitrary tensor trees. Boundary
+values are packed for ARTI execution and restored to their original rank,
+layout, dtype, and position. See [Unified Attachment](docs/unified-attachment.md).
 
-Artifact hashes detect modification relative to their lock files; they are not
-publisher signatures. Obtain models and weights from trusted sources.
+## Mechanism Map
 
-### Inspect Composite Components
+| Need | API |
+| --- | --- |
+| Same-shape survival pressure | `arti.Half` |
+| Soft learned workspace compaction | `arti.nn.Fold` |
+| Trainable learned expansion | `arti.nn.UnFold` |
+| Reversible active/folded topology | `arti.mechanisms.Fold`, `arti.mechanisms.UnFold` |
+| Compact learned pulse workspace | `arti.Pulse` |
+| Composable bounded execution graph | `arti.mechanisms.AdaptivePulse` |
+| K-wide Recall with hard winner | `arti.nn.Recall` |
+| Iterative hidden-state refinement | `arti.RecallRefiner` |
+| Typed Formula programs | `arti.mechanisms.FormulaFabricV2` |
+| Addressable forward Bank updates | `arti.mechanisms.TargetBankUpdater` |
+| Shape-autonomous Bank hierarchy | `arti.mechanisms.FederalRecall` |
+| Persistent auxiliary tensor editing | `arti.mechanisms.TensorOperationLoop` |
 
-ARTI keeps composition as ordinary PyTorch composition. The optional component
-graph records nested ARTI modules, mount paths, typed application bindings,
-shared parameter objects, and a closure fingerprint without importing code from
-an artifact:
+All mechanisms remain independently usable. Coordinates, masks, visibility,
+Observation, Recall, Formula, Fold, and tensor operations are not mandatory
+parts of one monolithic architecture.
+
+## Recall
+
+New `arti.nn.Recall` modules use `arti/recall@4`. One query can preserve K
+candidate routes, refine them independently, and forward exactly one hard
+winner. Weighted merging is opt-in.
 
 ```python
-graph = arti.component_graph(model)
-arti.validate_component_graph(graph)
-saved = arti.save(model, "model.arti.st")
+recall = arti.nn.Recall(dim=768, slots=64)  # portable default K=8
+next_state = recall(x)
+
+wide = arti.nn.Recall(dim=768, slots=64, breadth=16, group_topk=16)
+next_state, branches = wide(x, return_branches=True)
+next_state = wide(x, active_k=4)
 ```
 
-The graph is an inspectable architecture contract; it does not change tensor
-execution or require a special composite base class. Unregistered PyTorch
-modules remain opaque nodes, and legacy `arti.st` manifests without a graph
-remain loadable.
+Eight is the portable default; 8-32 is a useful starting range when Bank
+capacity and runtime budget allow. `breadth=1` executes one candidate.
 
-## Public Modules
+Runtime refine depth is explicit and may be adjusted without rewriting an
+artifact:
 
-- `arti.nn`: stable tensor modules including `Layer`, `Half`, `Fold`,
-  `UnFold`, `Pulse`, `Recall`, `RecallRefiner`, and visual workspace modules.
-- `arti.experimental`: explicitly experimental modules including
-  `LayerRecall`, `StatefulRecall`, layered Recall utilities, and Web export.
-- `arti`: complete ARTI layers, residual blocks, reference models, attachment, serialization, and diagnostics.
-- `arti.fit`: boundary scanning, planning, attachment, artifact stacks,
-  Bank composition, runtime scaling, and ARTI-only hotpath compilation.
-- Recall expert APIs: immutable contracts, Bank-only SafeTensors artifacts,
-  named assemblies, per-Bank routing weights, and signed influences.
-- `arti.torch`: backend-explicit aliases for PyTorch applications.
-- `arti.jax`: optional functional JAX subset with array-only parameter trees,
-  JIT, whole-tree gradients, and batch/VMAP-consistent single-sample APIs.
-- `arti.functional`: mask, visibility, pooling, coordinate-frame, and activation helpers.
+```python
+arti.set_recall_refine_steps(model, 10, min_steps=2, tolerance=0.003)
+arti.set_recall_refine_schedule(
+    model,
+    {
+        "model.layers.0": 2,
+        "model.layers.1": 6,
+        "model.layers.2": 12,
+    },
+)
+```
 
-Experimental and legacy APIs are identified in their docstrings and are not
-frozen at the same level as the supported core surface.
+## Formula And Federal Banks
 
-ARTI remains PyTorch-first. The JAX namespace does not provide attachment,
-training helpers, Recall, serialization, or full `ARTILayer` parity.
+Formula Fabric executes bounded, typed tensor programs with declared operands,
+shapes, route sources, and output contracts. Built-in atoms include ordinary
+tensor transforms as well as Fabric-native Fold and UnFold operations.
 
-## WebGPU Alpha
+Federal Banks can carry their own sealed Query, Formula program, local Refine
+policy, and terminal ABI. A Bank may change its tensor shape internally and
+re-query after every local step; it leaves the Bank only after producing a
+value accepted by the shared terminal contract. This separates federation
+depth from Bank-local computation depth.
 
-`arti.web.export(...)` calls the real Python module and compiles its named
-tensor inputs and outputs into a hashed artifact v2 ONNX graph. The separate
-`@arti-fit/web` package is a generic executor: it contains no Half, Fold,
-Pulse, Recall, `q`, or `mask` rules. It uses WebGPU and falls back to
-WebAssembly when `device: "auto"` is selected. See
-[WebGPU Alpha](docs/webgpu-alpha.md).
+See [Formula Fabric](docs/formula-fabric.md) and
+[Federal Contracts](docs/federal-contracts.md).
 
-The binding also provides a CPU-friendly `predict()` path, contract-aware
-tensor factories, structured errors, cancellable loading, Python-generated
-artifact-specific TypeScript clients, and a native module Worker example.
-The low-level `run()` API remains available for GPU-resident and preallocated
-tensor workflows.
+## Operable Tensors
 
-Inspectable exports flatten tensors from the module's real
-`forward(..., return_info=True)` result into Python-declared ONNX outputs.
-`module.inspect(...)` selectively retains and downloads those outputs while
-reporting device and timing metadata through an explicitly disposable result.
-JavaScript treats workspace, diagnostic, mask, and index labels as contract
-metadata; it does not implement their ARTI semantics.
+The tensor-operation API supplies a default-backed, hot-swappable auxiliary
+tensor port. Reader Refine and tensor operations consume the same call-boundary
+snapshot in parallel. Operations can address ranges or sparse index maps of an
+arbitrary-rank logical tensor; proposals become visible after the caller
+advances the port for a later invocation.
 
-Stateful Recall can be exported as paired read/update artifact v3 graphs and
-loaded with `loadArtiStateful(...)`. Model parameters remain read-only;
-mutable state is explicit, fixed-size, bounded by caller budgets, and
-non-persistent unless the application requests a snapshot.
+See [Operable Tensor Port](docs/operable-tensor-port.md).
 
-## Develop
+## Artifacts
+
+`arti.save()` and `arti.load()` store model state in SafeTensors with separate
+architecture metadata and SHA-256 locks. Component identities and artifact
+schemas are versioned independently from the package version.
+
+Recall Bank artifacts record the host, reader, Formula, optional Updater, Bank
+layout, dtype, shapes, provenance, and tensor hashes. Named compatible Banks
+can be composed without silently changing their source identity.
+
+See [Recall Artifacts](docs/recall-artifacts.md) and
+[Component Provenance](docs/component-provenance.md).
+
+## Documentation
+
+- [Stable Release Surface](docs/stable-release-surface.md)
+- [Unified Attachment](docs/unified-attachment.md)
+- [Adaptive Observation](docs/adaptive-observation.md)
+- [Reversible Topology](docs/reversible-topology.md)
+- [Formula Fabric](docs/formula-fabric.md)
+- [Federal Contracts](docs/federal-contracts.md)
+- [Batched Refine](docs/batched-refine.md)
+- [Flattened Refine Training](docs/flattened-refine-training.md)
+- [Refine Exit](docs/refine-exit.md)
+- [Operable Tensor Port](docs/operable-tensor-port.md)
+- [WebGPU Alpha](docs/webgpu-alpha.md)
+
+## Development
 
 ```bash
-git clone https://github.com/ragnarok-io/ARTI.git
-cd ARTI
-uv sync --extra dev
+uv sync --locked --extra dev
 uv run --extra dev pytest
 uv build
+uv run --extra dev python scripts/check_package.py
 ```
 
-The test suite covers tensor shapes, masks, gradients, serialization, malformed
-artifacts, public API imports, and optional backend boundaries. Contribution
-guidance is in [CONTRIBUTING.md](CONTRIBUTING.md).
+Public CI runs Python 3.10, 3.11, and 3.12, the optional JAX contract suite,
+the Python-owned Web artifact generator, and the TypeScript browser runtime.
 
-## Citation And Authorship
+## Scope
 
-ARTI was initiated and designed by [Thiocy](https://github.com/Thiocy).
-Citation metadata is provided in [CITATION.cff](CITATION.cff). The project also
-documents [authorship](AUTHORS.md) and [AI assistance](AI_ASSISTANCE.md).
+Stable means the documented component identities, tensor contracts, artifact
+formats, and composition semantics are reviewed and release-gated. It does not
+claim universal downstream superiority, a production service SLA, full JAX
+parity, or WebGPU training.
 
-## License
+ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
+[`CITATION.cff`](CITATION.cff).
 
-[MIT](LICENSE)
+## 中文简介
+
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.11
+将 `AdaptivePulse` 设为默认 `ARTILayer` 的执行图，并把经过版本化和验证的
+Recall、Formula、Fold/UnFold、Bank、Observation、TensorOperation 与
+Federal Bank 机制提升为稳定 API。应用负责张量的业务语义，ARTI 负责张量
+的观察、路由、变换、记忆与组合。

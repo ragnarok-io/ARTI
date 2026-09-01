@@ -1,9 +1,9 @@
-# Batched Refine Alpha
+# Batched Refine
 
 `arti.nn.Recall` now exposes this breadth execution through `Recall@4` by
 default. The ordinary call still returns one tensor: K trajectories execute,
 then the highest-scoring route wins. Use `return_branches=True` to inspect the
-underlying `BatchedRefineResult`, or call the alpha functions below when a host
+underlying `BatchedRefineResult`, or call the stable functions below when a host
 needs explicit scoring, publication authority, Formula/Topology composition,
 or branch persistence. Route-weighted merging remains an explicit ablation and
 is not the default Recall meaning.
@@ -158,7 +158,7 @@ Stochastic Half and training dropout require an explicit
 stable sample identity, canonical
 branch origin, stochastic phase, and absolute refine step. Replaying one plan
 does not consume the global Torch RNG and candidate-axis permutation only
-permutes the corresponding trajectories. The alpha promises replay only on
+permutes the corresponding trajectories. The contract promises replay only on
 the same backend/device family and algorithm version; it does not claim
 CPU/CUDA bit identity. Candidate route exploration and refine re-query use
 separate keyed domains, so adding Half or dropout does not consume their random
@@ -190,7 +190,7 @@ route history, stopping state, and diagnostics. The first iteration is seeded
 by its candidate route; later iterations query the Bank again from the changed
 hidden state.
 
-The current alpha aligns configured Formula routes and factors with the
+The current contract aligns configured Formula routes and factors with the
 flattened `[B*K, ...]` branch order. Global and per-sample candidate-axis
 permutation, ragged per-sample requested/effective `active_k`, independent per-branch refine
 budgets, and operation-emitted Formula/Topology traces are supported by the
@@ -200,7 +200,7 @@ branches that stop inside the refine loop.
 
 ## Optional publication authority
 
-`BranchBatchHarness` is the alpha host authority for publishing one completed
+`BranchBatchHarness` is the stable host authority for publishing one completed
 trajectory into a volatile tensor page. It accepts only factory-owned
 `BatchedRefineOverlayProposal` values rooted at one immutable snapshot. A
 frozen score receipt binds all `K` candidates to the same external target, and
@@ -214,8 +214,8 @@ The volatile authority runtime remains the portable CPU COW path. BR6.5 also
 provides an explicitly separate GPU-resident authority bridge:
 
 ```python
-executor = arti.alpha.BatchedRefineExecutor.from_resident_result(result)
-run = arti.alpha.bind_resident_branch_run(result, executor, spec, future, pool)
+executor = arti.mechanisms.BatchedRefineExecutor.from_resident_result(result)
+run = arti.mechanisms.bind_resident_branch_run(result, executor, spec, future, pool)
 score = run.score()  # only K scalar scores cross to the host
 decision = run.decide(score, idempotency_key="request-42")
 receipt = run.commit(decision)
@@ -314,7 +314,7 @@ idempotent commit receipt use the ordinary `VolatileTensorRuntime` checkpoint:
 ```python
 receipt = harness.decide(score, idempotency_key="request-42")
 snapshot = runtime.snapshot()
-arti.alpha.save_runtime_checkpoint(runtime, snapshot, "state.runtime.arti.st")
+arti.mechanisms.save_runtime_checkpoint(runtime, snapshot, "state.runtime.arti.st")
 ```
 
 A fresh same-ABI load restores only committed state. Losers, discarded runs,

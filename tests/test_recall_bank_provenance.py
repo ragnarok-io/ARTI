@@ -56,7 +56,7 @@ def _save_tiny_bank(
 def test_provenance_records_reader_formula_updater_and_layout() -> None:
     host = nn.Linear(4, 4, bias=False)
     recall = arti.Recall(4, slots=3, formula="arti/delta@1")
-    updater = arti.alpha.RecallValueUpdater(
+    updater = arti.mechanisms.RecallValueUpdater(
         hidden_dim=4,
         slots=3,
         workspace_dim=8,

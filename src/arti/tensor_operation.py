@@ -1268,6 +1268,8 @@ class TensorEditSurrogate(nn.Module):
         snapshot: PortSnapshot,
         decision: TensorOperationDecision,
         hard_edit: TensorEditResult,
+        *,
+        active: Tensor | None = None,
     ) -> TensorEditResult:
         if not isinstance(decision, TensorOperationDecision):
             raise TypeError("decision must be TensorOperationDecision")
@@ -1275,8 +1277,22 @@ class TensorEditSurrogate(nn.Module):
             raise TypeError("hard_edit must be TensorEditResult")
         batch = snapshot.value.shape[0]
         self.spec.validate_backing(snapshot.value, snapshot.mask, batch_size=batch)
+        if active is None:
+            row_active = torch.ones((batch,), dtype=torch.bool, device=snapshot.value.device)
+        else:
+            if (
+                not isinstance(active, Tensor)
+                or active.shape != (batch,)
+                or active.dtype != torch.bool
+                or active.device != snapshot.value.device
+            ):
+                raise TypeError(
+                    "active must be boolean with shape [B] on the snapshot device"
+                )
+            row_active = active
         temperature = self.temperature
-        active = torch.sigmoid(decision.active_logits / temperature)
+        active_probability = torch.sigmoid(decision.active_logits / temperature)
+        active_probability = active_probability * row_active.unsqueeze(-1)
         operation = torch.softmax(decision.operation_logits / temperature, dim=-1)
         source = torch.softmax(decision.source_logits / temperature, dim=-1)
         destination = torch.softmax(decision.destination_logits / temperature, dim=-1)
@@ -1292,7 +1308,11 @@ class TensorEditSurrogate(nn.Module):
             copy_probability.unsqueeze(-1) * copied_value
             + erase_probability.unsqueeze(-1) * self.spec.empty_value
         ) / write_probability.unsqueeze(-1)
-        assignment = active.unsqueeze(-1) * write_probability.unsqueeze(-1) * destination
+        assignment = (
+            active_probability.unsqueeze(-1)
+            * write_probability.unsqueeze(-1)
+            * destination
+        )
         total = assignment.sum(dim=1)
         normalized = assignment / total.unsqueeze(1).clamp_min(
             torch.finfo(snapshot.value.dtype).tiny
@@ -1386,7 +1406,13 @@ class TensorOperation(nn.Module):
         edit = (
             hard_edit
             if self.surrogate is None
-            else self.surrogate(canvas, snapshot, decision, hard_edit)
+            else self.surrogate(
+                canvas,
+                snapshot,
+                decision,
+                hard_edit,
+                active=active,
+            )
         )
         _require_tensor(
             torch.isfinite(edit.value).all(),

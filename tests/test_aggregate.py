@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     EnvelopeRef,
     ReunionAggregate,
     SoftFoldAggregate,
@@ -87,9 +87,9 @@ def test_aggregate_rejects_non_envelope_input() -> None:
 def test_no_intervention_fold_unfold_matches_direct_aggregate() -> None:
     torch.manual_seed(7)
     aggregate = ReunionAggregate(SoftFoldAggregate(k=2, dim=3)).eval()
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[3, 0, 4, 1, 2]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[3, 0, 4, 1, 2]),
     )
     x = torch.randn(2, 5, 3)
     mask = torch.tensor([[True, True, True, True, False], [True] * 5])
@@ -104,9 +104,9 @@ def test_no_intervention_fold_unfold_matches_direct_aggregate() -> None:
 
 def test_active_intervention_is_aggregated_only_after_reunion() -> None:
     aggregate = ReunionAggregate(SoftFoldAggregate(k=2, dim=3)).eval()
-    topology = arti.alpha.ReversibleTopology(
+    topology = arti.mechanisms.ReversibleTopology(
         active_count=2,
-        policy=arti.alpha.FixedTopologyPolicy(order=[3, 0, 4, 1, 2]),
+        policy=arti.mechanisms.FixedTopologyPolicy(order=[3, 0, 4, 1, 2]),
     )
     x = torch.randn(1, 5, 3)
     mask = torch.ones(1, 5, dtype=torch.bool)

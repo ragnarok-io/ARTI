@@ -96,7 +96,7 @@ def _state_descriptor(slots: int, hidden_dim: int) -> dict[str, Any]:
     content = {
         "ref": RECALL_STATE_COMPONENT_REF,
         "variant": "values-only",
-        "lifecycle": "alpha",
+        "lifecycle": "stable",
         "schema_version": RECALL_STATE_SCHEMA_VERSION,
         "shape": ["B", slots, hidden_dim],
         "fields": {

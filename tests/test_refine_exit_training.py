@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
 def _policy(depth: int) -> arti.AdaptiveRefinePolicy:
@@ -34,7 +34,7 @@ def _capture(
     *,
     depth: int = 3,
     breadth: int = 1,
-) -> tuple[arti.Recall, alpha.RefineRollout, alpha.RefineStepTrainingResult]:
+) -> tuple[arti.Recall, mechanisms.RefineRollout, mechanisms.RefineStepTrainingResult]:
     torch.manual_seed(4101)
     recall = arti.Recall(
         4,
@@ -44,7 +44,7 @@ def _capture(
         breadth_mode="independent",
         activation="none",
     )
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(
         recall,
         torch.randn(2, 3, 4),
@@ -59,7 +59,7 @@ def _capture(
 def test_builds_detached_canonical_token_curve() -> None:
     _recall, rollout, result = _capture(depth=4)
     task_loss = result.value.square().mean(dim=-1)
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         task_loss,
@@ -80,7 +80,7 @@ def test_builds_detached_canonical_token_curve() -> None:
 def test_curve_is_permutation_invariant_and_keeps_k_lineage() -> None:
     _recall, rollout, result = _capture(depth=3, breadth=3)
     task_loss = result.value.square().mean(dim=-1)
-    expected = alpha.RefineExitTraining.build_curve(rollout, result, task_loss)
+    expected = mechanisms.RefineExitTraining.build_curve(rollout, result, task_loss)
     order = torch.randperm(rollout.hidden_state.shape[0])
     permuted_rollout = rollout.permute(order)
     permuted_result = replace(
@@ -95,7 +95,7 @@ def test_curve_is_permutation_invariant_and_keeps_k_lineage() -> None:
         indices=result.indices.index_select(0, order),
         weights=result.weights.index_select(0, order),
     )
-    actual = alpha.RefineExitTraining.build_curve(
+    actual = mechanisms.RefineExitTraining.build_curve(
         permuted_rollout,
         permuted_result,
         task_loss.index_select(0, order),
@@ -111,14 +111,14 @@ def test_curve_rejects_partial_depth_and_ambiguous_loss_shape() -> None:
     _recall, rollout, result = _capture(depth=3)
     invalid = result.valid_token_mask.clone()
     invalid[1, 0] = False
-    with pytest.raises(alpha.RefineTrainingContractError, match="complete full depth"):
-        alpha.RefineExitTraining.build_curve(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="complete full depth"):
+        mechanisms.RefineExitTraining.build_curve(
             rollout,
             replace(result, valid_token_mask=invalid),
             torch.ones_like(invalid, dtype=torch.float32),
         )
     with pytest.raises(TypeError, match="token task_loss"):
-        alpha.RefineExitTraining.build_curve(
+        mechanisms.RefineExitTraining.build_curve(
             rollout,
             result,
             torch.ones(result.value.shape[0]),
@@ -129,14 +129,14 @@ def test_curve_rejects_partial_depth_and_ambiguous_loss_shape() -> None:
 def test_branch_hazard_matches_exact_quality_constrained_objective() -> None:
     _recall, rollout, result = _capture(depth=3)
     task_loss = torch.tensor([4.0, 2.0, 1.0, 4.0, 2.0, 1.0])
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         task_loss,
         scope="branch",
     )
-    control = alpha.RefineExitControl(_BiasLogit(), scope="branch")
-    training = alpha.RefineExitTraining(
+    control = mechanisms.RefineExitControl(_BiasLogit(), scope="branch")
+    training = mechanisms.RefineExitTraining(
         compute_weight=0.1,
         quality_tolerance=0.0,
         quality_weight=1.0,
@@ -160,8 +160,8 @@ def test_branch_hazard_matches_exact_quality_constrained_objective() -> None:
 
 def test_gradient_chooses_continue_for_bad_shallow_and_stop_for_good_shallow() -> None:
     _recall, rollout, result = _capture(depth=2)
-    control = alpha.RefineExitControl(_BiasLogit(), scope="branch")
-    training = alpha.RefineExitTraining(
+    control = mechanisms.RefineExitControl(_BiasLogit(), scope="branch")
+    training = mechanisms.RefineExitTraining(
         compute_weight=0.1,
         quality_weight=1.0,
     )
@@ -183,14 +183,14 @@ def test_gradient_chooses_continue_for_bad_shallow_and_stop_for_good_shallow() -
 
 def test_token_exit_training_detaches_recall_and_task_path() -> None:
     recall, rollout, result = _capture(depth=3)
-    control = alpha.RefineExitControl(nn.Linear(4, 1), scope="token")
-    curve = alpha.RefineExitTraining.build_curve(
+    control = mechanisms.RefineExitControl(nn.Linear(4, 1), scope="token")
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         result.value.square().mean(dim=-1),
         scope="token",
     )
-    loss = alpha.RefineExitTraining(compute_weight=0.01).loss(control, curve)
+    loss = mechanisms.RefineExitTraining(compute_weight=0.01).loss(control, curve)
     loss.total.backward()
 
     assert all(parameter.grad is None for parameter in recall.parameters())
@@ -200,14 +200,14 @@ def test_token_exit_training_detaches_recall_and_task_path() -> None:
 
 def test_min_steps_can_force_the_full_depth_without_teacher_labels() -> None:
     _recall, rollout, result = _capture(depth=4)
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         torch.arange(8, dtype=torch.float32),
         scope="branch",
     )
-    control = alpha.RefineExitControl(_BiasLogit(8.0), scope="branch")
-    loss = alpha.RefineExitTraining(compute_weight=1.0).loss(
+    control = mechanisms.RefineExitControl(_BiasLogit(8.0), scope="branch")
+    loss = mechanisms.RefineExitTraining(compute_weight=1.0).loss(
         control,
         curve,
         min_steps=4,
@@ -223,31 +223,31 @@ def test_min_steps_can_force_the_full_depth_without_teacher_labels() -> None:
 
 def test_exit_training_rejects_predicate_scope_mismatch_and_nonfinite_logits() -> None:
     _recall, rollout, result = _capture(depth=2)
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         torch.ones(result.value.shape[:2]),
     )
-    predicate = alpha.RefineExitControl(
+    predicate = mechanisms.RefineExitControl(
         nn.Identity(),
         input_kind="predicate",
         scope="token",
     )
-    with pytest.raises(alpha.RefineTrainingContractError, match="logit"):
-        alpha.RefineExitTraining().loss(predicate, curve)
-    branch = alpha.RefineExitControl(_BiasLogit(), scope="branch")
-    with pytest.raises(alpha.RefineTrainingContractError, match="scope"):
-        alpha.RefineExitTraining().loss(branch, curve)
-    nonfinite = alpha.RefineExitControl(_BiasLogit(float("nan")), scope="token")
-    with pytest.raises(alpha.RefineTrainingContractError, match="non-finite"):
-        alpha.RefineExitTraining().loss(nonfinite, curve)
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="logit"):
+        mechanisms.RefineExitTraining().loss(predicate, curve)
+    branch = mechanisms.RefineExitControl(_BiasLogit(), scope="branch")
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="scope"):
+        mechanisms.RefineExitTraining().loss(branch, curve)
+    nonfinite = mechanisms.RefineExitControl(_BiasLogit(float("nan")), scope="token")
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="non-finite"):
+        mechanisms.RefineExitTraining().loss(nonfinite, curve)
 
 
 def test_optimizer_contract_is_controller_only() -> None:
     recall, _rollout, _result = _capture(depth=2)
-    control = alpha.RefineExitControl(nn.Linear(4, 1))
+    control = mechanisms.RefineExitControl(nn.Linear(4, 1))
     controller_optimizer = torch.optim.AdamW(control.parameters(), lr=1e-3)
-    alpha.RefineExitTraining.assert_optimizer_contract(
+    mechanisms.RefineExitTraining.assert_optimizer_contract(
         recall,
         control,
         controller_optimizer,
@@ -256,18 +256,18 @@ def test_optimizer_contract_is_controller_only() -> None:
         [*control.parameters(), recall.state.recall.bank],
         lr=1e-3,
     )
-    with pytest.raises(alpha.RefineTrainingContractError, match="exactly"):
-        alpha.RefineExitTraining.assert_optimizer_contract(recall, control, mixed)
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="exactly"):
+        mechanisms.RefineExitTraining.assert_optimizer_contract(recall, control, mixed)
 
 
 def test_exit_training_components_are_alpha_runtime_contracts() -> None:
     _recall, rollout, result = _capture(depth=2)
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         torch.ones(result.value.shape[:2]),
     )
-    training = alpha.RefineExitTraining()
+    training = mechanisms.RefineExitTraining()
 
     assert arti.component_ref(training) == "arti/refine-exit-training@1"
     assert arti.component_ref(curve) == "arti/refine-exit-curve@1"
@@ -283,20 +283,20 @@ def test_exit_training_components_are_alpha_runtime_contracts() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_exit_training_cuda_backward() -> None:
     recall = arti.Recall(8, 16, activation="none").cuda()
-    step = alpha.RefineStepTraining()
+    step = mechanisms.RefineStepTraining()
     rollout = step.capture(
         recall,
         torch.randn(3, 4, 8, device="cuda"),
         policy=_policy(4),
     )
     result = step.replay(recall, rollout)
-    curve = alpha.RefineExitTraining.build_curve(
+    curve = mechanisms.RefineExitTraining.build_curve(
         rollout,
         result,
         result.value.float().square().mean(dim=-1),
     )
-    control = alpha.RefineExitControl(nn.Linear(8, 1).cuda())
-    loss = alpha.RefineExitTraining(compute_weight=0.01).loss(control, curve)
+    control = mechanisms.RefineExitControl(nn.Linear(8, 1).cuda())
+    loss = mechanisms.RefineExitTraining(compute_weight=0.01).loss(control, curve)
     loss.total.backward()
 
     assert all(parameter.grad is None for parameter in recall.parameters())

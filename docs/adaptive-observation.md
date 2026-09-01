@@ -7,17 +7,17 @@ not recursively fed into later observations.
 ```python
 import arti
 
-policy = arti.alpha.LearnedObservationPolicy(
+policy = arti.mechanisms.LearnedObservationPolicy(
     input_dim=64,
     state_dim=16,
     max_observations=8,
     min_observations=1,
 )
-operator = arti.alpha.StateAffineObservationOperator(
+operator = arti.mechanisms.StateAffineObservationOperator(
     dim=64,
     state_dim=16,
 )
-observation = arti.alpha.AdaptiveObservation(
+observation = arti.mechanisms.AdaptiveObservation(
     policy,
     operator=operator,
     executor="early_break",
@@ -58,7 +58,7 @@ substrate and uses circular boundaries; it does not recursively resample an
 earlier observation.
 
 ```python
-operator = arti.alpha.FourierShiftObservationOperator(
+operator = arti.mechanisms.FourierShiftObservationOperator(
     spatial_shape=(32, 32),
     state_mode="polar",
     compile_policy="safe_training",
@@ -77,19 +77,19 @@ release. `execution_contract()` reports these capabilities explicitly.
 ## Bank-conditioned trajectories
 
 ```python
-bank = arti.alpha.ObservationOperandBank(
+bank = arti.mechanisms.ObservationOperandBank(
     slots=32,
     key_dim=16,
     factor_dim=4,  # three state factors plus continuation
     bank_id="camera-path",
 )
-policy = arti.alpha.BankConditionedObservationPolicy(
+policy = arti.mechanisms.BankConditionedObservationPolicy(
     input_dim=64,
     state_dim=3,
     max_observations=8,
     banks=[bank],
 )
-observation = arti.alpha.AdaptiveObservation(policy, operator=operator)
+observation = arti.mechanisms.AdaptiveObservation(policy, operator=operator)
 ```
 
 The Query is fixed and deterministic. Each Bank normalizes its own routes; an

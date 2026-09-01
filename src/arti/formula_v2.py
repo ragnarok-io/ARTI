@@ -28,7 +28,9 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _COMPONENT_REF_RE = re.compile(
     r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*@[1-9][0-9]*$"
 )
-_DTYPES = frozenset({"floating", "float16", "bfloat16", "float32", "float64"})
+_DTYPES = frozenset(
+    {"floating", "float16", "bfloat16", "float32", "float64", "int64", "boolean"}
+)
 _ACCUMULATION_DTYPES = frozenset({"activation", "float32"})
 _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     "arti/formula-atom-contract@1": (
@@ -43,6 +45,30 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     "arti/formula-atom-reduce@1": (
         1,
         frozenset({"axis", "mode", "accumulation_dtype"}),
+    ),
+    "arti/formula-atom-reshape@1": (
+        1,
+        frozenset({"output_axes", "output_sizes"}),
+    ),
+    "arti/formula-atom-permute@1": (
+        1,
+        frozenset({"output_axes"}),
+    ),
+    "arti/formula-atom-gather@1": (
+        2,
+        frozenset({"axis", "index_axis"}),
+    ),
+    "arti/formula-atom-scatter@1": (
+        3,
+        frozenset({"axis", "index_axis", "mode"}),
+    ),
+    "arti/fold@2": (
+        2,
+        frozenset({"axis", "index_axis", "record_schema_ref", "state_schema_ref"}),
+    ),
+    "arti/unfold@2": (
+        3,
+        frozenset({"axis", "index_axis", "mode", "record_schema_ref"}),
     ),
 }
 
@@ -469,6 +495,29 @@ FormulaOperand = _FormulaExpr | FormulaBinding
 
 
 @dataclass(frozen=True)
+class FabricFoldState:
+    """Explicit tensor-only Fold@2 state carried through a Formula program."""
+
+    base: FormulaOperand
+    indices: FormulaOperand
+    active: _FormulaExpr
+    axis: str
+    index_axis: str
+    record_schema_ref: str = "arti/fold-record@1"
+    state_schema_ref: str = "arti/fold-state@1"
+
+    def __post_init__(self) -> None:
+        if self.record_schema_ref != "arti/fold-record@1":
+            raise FormulaSchemaError(
+                "FF2_FOLD_RECORD_SCHEMA", "Fabric Fold requires arti/fold-record@1"
+            )
+        if self.state_schema_ref != "arti/fold-state@1":
+            raise FormulaSchemaError(
+                "FF2_FOLD_STATE_SCHEMA", "Fabric Fold requires arti/fold-state@1"
+            )
+
+
+@dataclass(frozen=True)
 class FormulaSlotSpec:
     slot_id: str
     value_type: TensorType
@@ -668,6 +717,14 @@ class FormulaProgram:
             )
         binding_by_name = {binding.name: binding for binding in self.bindings}
         instruction_by_id = {item.instruction_id: item for item in self.instructions}
+        binding_slot_ids = {
+            slot.slot_id for slot in self.slots if slot.producer in {"input", "bank"}
+        }
+        if binding_slot_ids != set(binding_by_name):
+            raise FormulaProgramError(
+                "FF2_SLOT_PRODUCER",
+                "every binding must have exactly one same-named non-instruction slot",
+            )
         for slot in self.slots:
             if slot.producer in {"input", "bank"}:
                 binding = binding_by_name.get(slot.producer_id)
@@ -675,6 +732,11 @@ class FormulaProgram:
                 if binding is None or slot.slot_id != binding.name or slot.producer != expected_kind:
                     raise FormulaProgramError(
                         "FF2_SLOT_PRODUCER", f"slot {slot.slot_id!r} has an invalid binding producer"
+                    )
+                if slot.value_type != binding.value_type:
+                    raise FormulaProgramError(
+                        "FF2_BINDING_TYPE",
+                        f"slot {slot.slot_id!r} value type must exactly match its binding",
                     )
             else:
                 instruction = instruction_by_id.get(slot.producer_id)
@@ -1117,6 +1179,195 @@ def reduce_sum(
     )
 
 
+def reshape(
+    value: FormulaOperand,
+    *,
+    output_axes: Sequence[str],
+    output_sizes: Sequence[int | None],
+) -> _FormulaExpr:
+    """Repartition elements without adding learned values or reducing information."""
+
+    value_expr = _as_expr(value)
+    axes = tuple(output_axes)
+    sizes = tuple(output_sizes)
+    output_type = TensorType(
+        axes,
+        sizes,
+        dtype=value_expr.value_type.dtype,
+        domain=value_expr.value_type.domain,
+    )
+    source_static = all(size is not None for size in value_expr.value_type.sizes)
+    output_static = all(size is not None for size in sizes)
+    if source_static and output_static and math.prod(value_expr.value_type.sizes) != math.prod(sizes):
+        raise FormulaTypeError(
+            "FF2_RESHAPE_SIZE",
+            "Reshape input and output types must contain the same number of elements",
+        )
+    return _FormulaExpr(
+        output_type,
+        "arti/formula-atom-reshape@1",
+        (value_expr,),
+        (("output_axes", axes), ("output_sizes", sizes)),
+    )
+
+
+def permute(value: FormulaOperand, *, output_axes: Sequence[str]) -> _FormulaExpr:
+    """Reorder named axes while preserving every tensor element."""
+
+    value_expr = _as_expr(value)
+    axes = tuple(output_axes)
+    if len(axes) != len(set(axes)) or set(axes) != set(value_expr.value_type.axis_names):
+        raise FormulaTypeError(
+            "FF2_OUTPUT_AXES",
+            f"output_axes must be a permutation of {value_expr.value_type.axis_names}",
+        )
+    return _FormulaExpr(
+        value_expr.value_type.with_axes(axes),
+        "arti/formula-atom-permute@1",
+        (value_expr,),
+        (("output_axes", axes),),
+    )
+
+
+def gather(
+    value: FormulaOperand,
+    indices: FormulaOperand,
+    *,
+    axis: str,
+    index_axis: str,
+) -> _FormulaExpr:
+    """Gather a workset from one named axis using explicit integer indices."""
+
+    value_expr = _as_expr(value)
+    index_expr = _as_expr(indices)
+    value_type = value_expr.value_type
+    index_type = index_expr.value_type
+    _validate_index_contract(value_type, index_type, axis=axis, index_axis=index_axis)
+    output_axes = tuple(index_axis if item == axis else item for item in value_type.axis_names)
+    output_sizes = tuple(
+        index_type.size_for(index_axis) if item == axis else value_type.size_for(item)
+        for item in value_type.axis_names
+    )
+    return _FormulaExpr(
+        TensorType(
+            output_axes,
+            output_sizes,
+            dtype=value_type.dtype,
+            domain=value_type.domain,
+        ),
+        "arti/formula-atom-gather@1",
+        (value_expr, index_expr),
+        (("axis", axis), ("index_axis", index_axis)),
+    )
+
+
+def fold(
+    value: FormulaOperand,
+    indices: FormulaOperand,
+    *,
+    axis: str,
+    index_axis: str,
+) -> FabricFoldState:
+    """Create a smaller Fold@2 workset while retaining an explicit inverse record."""
+
+    value_expr = _as_expr(value)
+    index_expr = _as_expr(indices)
+    value_type = value_expr.value_type
+    index_type = index_expr.value_type
+    _validate_index_contract(
+        value_type,
+        index_type,
+        axis=axis,
+        index_axis=index_axis,
+        allow_boolean=True,
+    )
+    output_axes = tuple(index_axis if item == axis else item for item in value_type.axis_names)
+    output_sizes = tuple(
+        index_type.size_for(index_axis) if item == axis else value_type.size_for(item)
+        for item in value_type.axis_names
+    )
+    active = _FormulaExpr(
+        TensorType(
+            output_axes,
+            output_sizes,
+            dtype=value_type.dtype,
+            domain=value_type.domain,
+        ),
+        "arti/fold@2",
+        (value_expr, index_expr),
+        (
+            ("axis", axis),
+            ("index_axis", index_axis),
+            ("record_schema_ref", "arti/fold-record@1"),
+            ("state_schema_ref", "arti/fold-state@1"),
+        ),
+    )
+    return FabricFoldState(value_expr, index_expr, active, axis, index_axis)
+
+
+def unfold(state: FabricFoldState, active: FormulaOperand) -> _FormulaExpr:
+    """Apply UnFold@2 using the exact base and topology record from ``fold``."""
+
+    if not isinstance(state, FabricFoldState):
+        raise TypeError("unfold state must be FabricFoldState")
+    base_expr = _as_expr(state.base)
+    index_expr = _as_expr(state.indices)
+    active_expr = _as_expr(active)
+    _validate_index_contract(
+        base_expr.value_type,
+        index_expr.value_type,
+        axis=state.axis,
+        index_axis=state.index_axis,
+        allow_boolean=True,
+    )
+    expected_active = fold(
+        InputBinding("base", base_expr.value_type),
+        InputBinding("indices", index_expr.value_type),
+        axis=state.axis,
+        index_axis=state.index_axis,
+    ).active.value_type
+    _require_exact_type(expected_active, active_expr.value_type)
+    return _FormulaExpr(
+        base_expr.value_type,
+        "arti/unfold@2",
+        (base_expr, index_expr, active_expr),
+        (
+            ("axis", state.axis),
+            ("index_axis", state.index_axis),
+            ("mode", "replace"),
+            ("record_schema_ref", state.record_schema_ref),
+        ),
+    )
+
+
+def scatter(
+    base: FormulaOperand,
+    indices: FormulaOperand,
+    updates: FormulaOperand,
+    *,
+    axis: str,
+    index_axis: str,
+) -> _FormulaExpr:
+    """Replace unique indexed positions in a base tensor with workset values."""
+
+    base_expr = _as_expr(base)
+    index_expr = _as_expr(indices)
+    update_expr = _as_expr(updates)
+    expected_updates = gather(
+        InputBinding("base", base_expr.value_type),
+        InputBinding("indices", index_expr.value_type),
+        axis=axis,
+        index_axis=index_axis,
+    ).value_type
+    _require_exact_type(expected_updates, update_expr.value_type)
+    return _FormulaExpr(
+        base_expr.value_type,
+        "arti/formula-atom-scatter@1",
+        (base_expr, index_expr, update_expr),
+        (("axis", axis), ("index_axis", index_axis), ("mode", "replace")),
+    )
+
+
 @dataclass(frozen=True)
 class FormulaTraceV2:
     """Deterministic program diagnostics, not an attestation of Bank tensor contents."""
@@ -1364,6 +1615,151 @@ class ReduceAtom(nn.Module):
         return result
 
 
+class ReshapeAtom(nn.Module):
+    """Repartition tensor elements into an explicitly typed shape."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-reshape@1"
+
+    def __init__(
+        self,
+        value_type: TensorType,
+        *,
+        output_axes: Sequence[str],
+        output_sizes: Sequence[int | None],
+    ) -> None:
+        super().__init__()
+        expression = reshape(
+            InputBinding("value", value_type),
+            output_axes=output_axes,
+            output_sizes=output_sizes,
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.output_axes = tuple(output_axes)
+        self.output_sizes = tuple(output_sizes)
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _typed_reshape(value, self.output_type)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class PermuteAtom(nn.Module):
+    """Reorder named axes without changing tensor elements."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-permute@1"
+
+    def __init__(self, value_type: TensorType, *, output_axes: Sequence[str]) -> None:
+        super().__init__()
+        expression = permute(
+            InputBinding("value", value_type),
+            output_axes=output_axes,
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.output_axes = tuple(output_axes)
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _named_permute(value, self.value_type, self.output_axes)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class GatherAtom(nn.Module):
+    """Select a typed workset from one axis using explicit Bank-owned indices."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-gather@1"
+
+    def __init__(
+        self,
+        value_type: TensorType,
+        index_type: TensorType,
+        *,
+        axis: str,
+        index_axis: str,
+    ) -> None:
+        super().__init__()
+        expression = gather(
+            InputBinding("value", value_type),
+            InputBinding("indices", index_type),
+            axis=axis,
+            index_axis=index_axis,
+        )
+        self.value_type = value_type
+        self.index_type = index_type
+        self.output_type = expression.value_type
+        self.axis = axis
+        self.index_axis = index_axis
+
+    def forward(self, value: Tensor, indices: Tensor) -> Tensor:
+        _validate_atom_operands(
+            (value, indices),
+            (self.value_type, self.index_type),
+            require_same_dtype=False,
+        )
+        result = _named_gather(
+            value,
+            indices,
+            self.value_type,
+            self.index_type,
+            axis=self.axis,
+            index_axis=self.index_axis,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class ScatterAtom(nn.Module):
+    """Write a typed workset back into a base tensor at explicit unique indices."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-scatter@1"
+
+    def __init__(
+        self,
+        base_type: TensorType,
+        index_type: TensorType,
+        update_type: TensorType,
+        *,
+        axis: str,
+        index_axis: str,
+    ) -> None:
+        super().__init__()
+        expression = scatter(
+            InputBinding("base", base_type),
+            InputBinding("indices", index_type),
+            InputBinding("updates", update_type),
+            axis=axis,
+            index_axis=index_axis,
+        )
+        self.base_type = base_type
+        self.index_type = index_type
+        self.update_type = update_type
+        self.output_type = expression.value_type
+        self.axis = axis
+        self.index_axis = index_axis
+        self.mode = "replace"
+
+    def forward(self, base: Tensor, indices: Tensor, updates: Tensor) -> Tensor:
+        _validate_atom_operands(
+            (base, indices, updates),
+            (self.base_type, self.index_type, self.update_type),
+            require_same_dtype=False,
+        )
+        result = _named_scatter(
+            base,
+            indices,
+            updates,
+            self.base_type,
+            self.index_type,
+            axis=self.axis,
+            index_axis=self.index_axis,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
 class PreparedFormulaBindings(NamedTuple):
     """Host-admitted positional bindings for one exact Formula program."""
 
@@ -1480,11 +1876,7 @@ class FormulaFabricV2(nn.Module):
                 operands = tuple(snapshot[slot] for slot in instruction.input_slots)
                 input_types = tuple(slot_types[slot] for slot in instruction.input_slots)
                 output_type = slot_types[instruction.output_slot]
-                if len({operand.dtype for operand in operands}) != 1:
-                    raise FormulaBindingError(
-                        "FF2_RUNTIME_DTYPE_MISMATCH",
-                        f"instruction {instruction.instruction_id!r} operands have different dtypes",
-                    )
+                _validate_instruction_dtypes(instruction, operands, input_types)
                 _preflight_output_allocation(
                     output_type,
                     axis_extents,
@@ -1685,6 +2077,65 @@ def _infer_instruction_output_type(
             axis=attributes["axis"],
             accumulation_dtype=attributes["accumulation_dtype"],
         ).value_type
+    if instruction.atom_ref == "arti/formula-atom-reshape@1" and len(operand_types) == 1:
+        return reshape(
+            InputBinding("value", operand_types[0]),
+            output_axes=tuple(attributes["output_axes"]),
+            output_sizes=tuple(attributes["output_sizes"]),
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-permute@1" and len(operand_types) == 1:
+        return permute(
+            InputBinding("value", operand_types[0]),
+            output_axes=tuple(attributes["output_axes"]),
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-gather@1" and len(operand_types) == 2:
+        return gather(
+            InputBinding("value", operand_types[0]),
+            InputBinding("indices", operand_types[1]),
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-scatter@1" and len(operand_types) == 3:
+        if attributes["mode"] != "replace":
+            raise FormulaProgramError(
+                "FF2_ATOM_ATTRIBUTES", "Scatter@1 only supports mode='replace'"
+            )
+        return scatter(
+            InputBinding("base", operand_types[0]),
+            InputBinding("indices", operand_types[1]),
+            InputBinding("updates", operand_types[2]),
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        ).value_type
+    if instruction.atom_ref == "arti/fold@2" and len(operand_types) == 2:
+        if (
+            attributes["record_schema_ref"] != "arti/fold-record@1"
+            or attributes["state_schema_ref"] != "arti/fold-state@1"
+        ):
+            raise FormulaProgramError(
+                "FF2_ATOM_ATTRIBUTES", "Fold@2 runtime state schema is invalid"
+            )
+        return fold(
+            InputBinding("value", operand_types[0]),
+            InputBinding("indices", operand_types[1]),
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        ).active.value_type
+    if instruction.atom_ref == "arti/unfold@2" and len(operand_types) == 3:
+        if (
+            attributes["mode"] != "replace"
+            or attributes["record_schema_ref"] != "arti/fold-record@1"
+        ):
+            raise FormulaProgramError(
+                "FF2_ATOM_ATTRIBUTES", "UnFold@2 runtime record attributes are invalid"
+            )
+        state = fold(
+            InputBinding("base", operand_types[0]),
+            InputBinding("indices", operand_types[1]),
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        )
+        return unfold(state, InputBinding("active", operand_types[2])).value_type
     raise FormulaProgramError(
         "FF2_UNKNOWN_ATOM",
         f"atom {instruction.atom_ref!r} has an unknown signature or invalid arity",
@@ -1726,6 +2177,65 @@ def _execute_instruction(
     if instruction.atom_ref == "arti/formula-atom-reduce@1":
         axis = operand_types[0].axis_names.index(attributes["axis"])
         return _ordered_sum(operands[0], axis, attributes["accumulation_dtype"])
+    if instruction.atom_ref == "arti/formula-atom-reshape@1":
+        output_type = TensorType(
+            tuple(attributes["output_axes"]),
+            tuple(attributes["output_sizes"]),
+            dtype=operand_types[0].dtype,
+            domain=operand_types[0].domain,
+        )
+        return _typed_reshape(operands[0], output_type)
+    if instruction.atom_ref == "arti/formula-atom-permute@1":
+        return _named_permute(
+            operands[0], operand_types[0], tuple(attributes["output_axes"])
+        )
+    if instruction.atom_ref == "arti/formula-atom-gather@1":
+        return _named_gather(
+            operands[0],
+            operands[1],
+            operand_types[0],
+            operand_types[1],
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        )
+    if instruction.atom_ref == "arti/formula-atom-scatter@1":
+        if attributes["mode"] != "replace":
+            raise FormulaProgramError(
+                "FF2_ATOM_ATTRIBUTES", "Scatter@1 only supports mode='replace'"
+            )
+        return _named_scatter(
+            operands[0],
+            operands[1],
+            operands[2],
+            operand_types[0],
+            operand_types[1],
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        )
+    if instruction.atom_ref == "arti/fold@2":
+        return _named_gather(
+            operands[0],
+            operands[1],
+            operand_types[0],
+            operand_types[1],
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+        )
+    if instruction.atom_ref == "arti/unfold@2":
+        if attributes["mode"] != "replace":
+            raise FormulaProgramError(
+                "FF2_ATOM_ATTRIBUTES", "UnFold@2 only supports mode='replace'"
+            )
+        return _named_scatter(
+            operands[0],
+            operands[1],
+            operands[2],
+            operand_types[0],
+            operand_types[1],
+            axis=attributes["axis"],
+            index_axis=attributes["index_axis"],
+            operation="UnFold@2",
+        )
     raise FormulaProgramError(
         "FF2_UNKNOWN_ATOM", f"unsupported atom reference {instruction.atom_ref!r}"
     )
@@ -1783,6 +2293,127 @@ def _ordered_sum(value: Tensor, axis: int, accumulation_dtype: str) -> Tensor:
     for term in terms[1:]:
         result = result + term
     return result.to(original_dtype)
+
+
+def _typed_reshape(value: Tensor, output_type: TensorType) -> Tensor:
+    shape: list[int] = []
+    unresolved: list[int] = []
+    for index, (axis, size) in enumerate(
+        zip(output_type.axis_names, output_type.sizes, strict=True)
+    ):
+        if size is None:
+            unresolved.append(index)
+            shape.append(-1)
+        else:
+            shape.append(size)
+    if len(unresolved) > 1:
+        raise FormulaBindingError(
+            "FF2_RESHAPE_DYNAMIC",
+            "Reshape may infer at most one output axis at runtime",
+        )
+    try:
+        return value.reshape(shape)
+    except RuntimeError as exc:
+        raise FormulaBindingError(
+            "FF2_RESHAPE_SIZE",
+            "Reshape input and output contain different numbers of elements",
+        ) from exc
+
+
+def _named_permute(
+    value: Tensor,
+    value_type: TensorType,
+    output_axes: tuple[str, ...],
+) -> Tensor:
+    permutation = tuple(value_type.axis_names.index(axis) for axis in output_axes)
+    return value.permute(permutation)
+
+
+def _expanded_gather_indices(
+    value: Tensor,
+    indices: Tensor,
+    value_type: TensorType,
+    index_type: TensorType,
+    *,
+    axis: str,
+    index_axis: str,
+) -> tuple[Tensor, int]:
+    if indices.dtype != torch.int64:
+        raise FormulaBindingError("FF2_INDEX_DTYPE", "indices must use torch.int64")
+    gather_dimension = value_type.axis_names.index(axis)
+    output_axes = tuple(
+        index_axis if item == axis else item for item in value_type.axis_names
+    )
+    aligned = _align_tensor(indices, index_type.axis_names, output_axes)
+    output_shape = list(value.shape)
+    output_shape[gather_dimension] = indices.shape[
+        index_type.axis_names.index(index_axis)
+    ]
+    try:
+        expanded = aligned.expand(output_shape)
+    except RuntimeError as exc:
+        raise FormulaBindingError(
+            "FF2_INDEX_SHAPE", "indices cannot broadcast across the gathered value"
+        ) from exc
+    if bool((indices < 0).any()) or bool((indices >= value.shape[gather_dimension]).any()):
+        raise FormulaBindingError("FF2_INDEX_RANGE", "indices are outside the gathered axis")
+    return expanded, gather_dimension
+
+
+def _named_gather(
+    value: Tensor,
+    indices: Tensor,
+    value_type: TensorType,
+    index_type: TensorType,
+    *,
+    axis: str,
+    index_axis: str,
+) -> Tensor:
+    expanded, gather_dimension = _expanded_gather_indices(
+        value,
+        indices,
+        value_type,
+        index_type,
+        axis=axis,
+        index_axis=index_axis,
+    )
+    return torch.gather(value, gather_dimension, expanded)
+
+
+def _named_scatter(
+    base: Tensor,
+    indices: Tensor,
+    updates: Tensor,
+    base_type: TensorType,
+    index_type: TensorType,
+    *,
+    axis: str,
+    index_axis: str,
+    operation: str = "Scatter@1",
+) -> Tensor:
+    index_dimension = index_type.axis_names.index(index_axis)
+    ordered = indices.sort(dim=index_dimension).values
+    if ordered.shape[index_dimension] > 1:
+        left = ordered.narrow(index_dimension, 0, ordered.shape[index_dimension] - 1)
+        right = ordered.narrow(index_dimension, 1, ordered.shape[index_dimension] - 1)
+        if bool((left == right).any()):
+            raise FormulaBindingError(
+                "FF2_DUPLICATE_INDEX",
+                f"{operation} replace mode requires unique indices per workset",
+            )
+    expanded, scatter_dimension = _expanded_gather_indices(
+        base,
+        indices,
+        base_type,
+        index_type,
+        axis=axis,
+        index_axis=index_axis,
+    )
+    if tuple(updates.shape) != tuple(expanded.shape):
+        raise FormulaBindingError(
+            "FF2_UPDATE_SHAPE", "Scatter updates do not match the indexed workset"
+        )
+    return torch.scatter(base, scatter_dimension, expanded, updates)
 
 
 def _align_tensor(value: Tensor, source_axes: tuple[str, ...], target_axes: tuple[str, ...]) -> Tensor:
@@ -1848,6 +2479,125 @@ def _require_axis_extent_equal(
         )
 
 
+def _validate_index_contract(
+    value_type: TensorType,
+    index_type: TensorType,
+    *,
+    axis: str,
+    index_axis: str,
+    allow_boolean: bool = False,
+) -> None:
+    if value_type.dtype == "int64" or (value_type.dtype == "boolean" and not allow_boolean):
+        raise FormulaTypeError(
+            "FF2_VALUE_DTYPE",
+            "Gather and Scatter values must use a floating-point tensor type",
+        )
+    if index_type.dtype != "int64":
+        raise FormulaTypeError("FF2_INDEX_DTYPE", "indices must use dtype='int64'")
+    if axis not in value_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"indexed axis {axis!r} is absent")
+    if index_axis in value_type.axis_names:
+        raise FormulaTypeError(
+            "FF2_INDEX_AXIS",
+            "index_axis must be a new output axis, not an existing value axis",
+        )
+    if index_axis not in index_type.axis_names:
+        raise FormulaTypeError(
+            "FF2_INDEX_AXIS", f"index_axis {index_axis!r} is absent from indices"
+        )
+    novel_axes = tuple(
+        item for item in index_type.axis_names if item not in value_type.axis_names
+    )
+    if novel_axes != (index_axis,):
+        raise FormulaTypeError(
+            "FF2_INDEX_AXIS",
+            "indices must introduce exactly one index_axis",
+        )
+    for shared_axis in index_type.axis_names:
+        if shared_axis == index_axis:
+            continue
+        if shared_axis == axis or shared_axis not in value_type.axis_names:
+            raise FormulaTypeError(
+                "FF2_INDEX_AXIS",
+                "index axes other than index_axis must be preserved value axes",
+            )
+        _require_axis_extent_equal(value_type, shared_axis, index_type, shared_axis)
+
+
+def _validate_instruction_dtype_contract(
+    instruction: FormulaInstructionV2,
+    dtypes: tuple[torch.dtype, ...],
+    operand_types: tuple[TensorType, ...],
+) -> None:
+    atom_ref = instruction.atom_ref
+    if atom_ref in {
+        "arti/formula-atom-contract@1",
+        "arti/formula-atom-scale@1",
+        "arti/formula-atom-add@1",
+        "arti/formula-atom-reduce@1",
+    }:
+        if len(set(dtypes)) != 1:
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH",
+                f"instruction {instruction.instruction_id!r} operands have different dtypes",
+            )
+        return
+    if atom_ref in {
+        "arti/formula-atom-reshape@1",
+        "arti/formula-atom-permute@1",
+    }:
+        return
+    if atom_ref == "arti/formula-atom-gather@1":
+        if len(dtypes) != 2 or dtypes[1] != torch.int64 or operand_types[1].dtype != "int64":
+            raise FormulaBindingError(
+                "FF2_INDEX_DTYPE", "Gather indices must use torch.int64"
+            )
+        return
+    if atom_ref == "arti/formula-atom-scatter@1":
+        if (
+            len(dtypes) != 3
+            or dtypes[1] != torch.int64
+            or operand_types[1].dtype != "int64"
+            or dtypes[0] != dtypes[2]
+        ):
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH",
+                "Scatter requires matching base/update dtypes and int64 indices",
+            )
+        return
+    if atom_ref == "arti/fold@2":
+        if len(dtypes) != 2 or dtypes[1] != torch.int64 or operand_types[1].dtype != "int64":
+            raise FormulaBindingError(
+                "FF2_INDEX_DTYPE", "Fold@2 indices must use torch.int64"
+            )
+        return
+    if atom_ref == "arti/unfold@2":
+        if (
+            len(dtypes) != 3
+            or dtypes[1] != torch.int64
+            or operand_types[1].dtype != "int64"
+            or dtypes[0] != dtypes[2]
+        ):
+            raise FormulaBindingError(
+                "FF2_RUNTIME_DTYPE_MISMATCH",
+                "UnFold@2 requires matching base/active dtypes and int64 indices",
+            )
+        return
+    raise FormulaProgramError("FF2_UNKNOWN_ATOM", f"unsupported atom {atom_ref!r}")
+
+
+def _validate_instruction_dtypes(
+    instruction: FormulaInstructionV2,
+    operands: tuple[Tensor, ...],
+    operand_types: tuple[TensorType, ...],
+) -> None:
+    _validate_instruction_dtype_contract(
+        instruction,
+        tuple(operand.dtype for operand in operands),
+        operand_types,
+    )
+
+
 def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name: str) -> None:
     if not isinstance(value, Tensor):
         raise FormulaBindingError("FF2_BINDING_NOT_TENSOR", f"{name!r} must be a Tensor")
@@ -1865,6 +2615,8 @@ def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name
             )
     if value_type.dtype == "floating":
         valid_dtype = value.is_floating_point()
+    elif value_type.dtype == "boolean":
+        valid_dtype = value.dtype == torch.bool
     else:
         valid_dtype = str(value.dtype).removeprefix("torch.") == value_type.dtype
     if not valid_dtype:
@@ -1936,11 +2688,11 @@ def _preflight_program_shapes(
         input_shapes = tuple(slot_shapes[name] for name in instruction.input_slots)
         input_types = tuple(slot_types[name] for name in instruction.input_slots)
         input_dtypes = tuple(slot_dtypes[name] for name in instruction.input_slots)
-        if len(set(input_dtypes)) != 1:
-            raise FormulaBindingError(
-                "FF2_RUNTIME_DTYPE_MISMATCH",
-                f"instruction {instruction.instruction_id!r} operands have different dtypes",
-            )
+        _validate_instruction_dtype_contract(
+            instruction,
+            input_dtypes,
+            input_types,
+        )
         if instruction.atom_ref == "arti/formula-atom-contract@1":
             reduce_axes = tuple(tuple(pair) for pair in dict(instruction.attributes)["reduce_axes"])
             for left_axis, right_axis in reduce_axes:
@@ -1959,15 +2711,27 @@ def _preflight_program_shapes(
             name=instruction.output_slot,
         )
         attributes = dict(instruction.attributes)
-        compute_dtype = _accumulation_dtype(
-            input_dtypes[0],
-            attributes["accumulation_dtype"],
+        accumulation_dtype = attributes.get("accumulation_dtype")
+        compute_dtype = (
+            input_dtypes[0]
+            if accumulation_dtype is None
+            else _accumulation_dtype(input_dtypes[0], accumulation_dtype)
         )
         compute_element_size = torch.empty((), dtype=compute_dtype).element_size()
-        for input_slot, input_shape in zip(instruction.input_slots, input_shapes):
+        for input_slot, input_shape, input_dtype in zip(
+            instruction.input_slots,
+            input_shapes,
+            input_dtypes,
+            strict=True,
+        ):
+            working_element_size = (
+                compute_element_size
+                if accumulation_dtype is not None
+                else torch.empty((), dtype=input_dtype).element_size()
+            )
             _preflight_shape_bytes(
                 input_shape,
-                compute_element_size,
+                working_element_size,
                 program.limits,
                 name=f"{instruction.instruction_id}:{input_slot}:working",
             )
@@ -1983,9 +2747,16 @@ def _preflight_program_shapes(
         output_storage_bytes = output_elements * slot_element_sizes[
             instruction.input_slots[0]
         ]
-        working_bytes = persistent_bytes + sum(
-            math.prod(shape) * compute_element_size for shape in input_shapes
-        )
+        if accumulation_dtype is None:
+            input_working_bytes = sum(
+                math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+                for shape, dtype in zip(input_shapes, input_dtypes, strict=True)
+            )
+        else:
+            input_working_bytes = sum(
+                math.prod(shape) * compute_element_size for shape in input_shapes
+            )
+        working_bytes = persistent_bytes + input_working_bytes
         # Runtime accumulation can hold both the compute-dtype result and its
         # activation-dtype cast until the instruction returns.
         working_bytes += output_compute_bytes + output_storage_bytes
@@ -2089,7 +2860,10 @@ def _resolved_type_shape(
 
 
 def _validate_atom_operands(
-    values: tuple[Tensor, ...], value_types: tuple[TensorType, ...]
+    values: tuple[Tensor, ...],
+    value_types: tuple[TensorType, ...],
+    *,
+    require_same_dtype: bool = True,
 ) -> None:
     if len(values) != len(value_types):
         raise FormulaBindingError("FF2_ATOM_ARITY", "atom values and types have different arity")
@@ -2107,7 +2881,7 @@ def _validate_atom_operands(
             raise FormulaBindingError(
                 "FF2_DEVICE_MISMATCH", "all atom operands must use the same device"
             )
-        elif value.dtype != dtype:
+        elif require_same_dtype and value.dtype != dtype:
             raise FormulaBindingError(
                 "FF2_RUNTIME_DTYPE_MISMATCH", "all atom operands must use the same dtype"
             )
@@ -2223,6 +2997,7 @@ __all__ = [
     "FORMULA_TENSOR_TYPE_V1_SCHEMA_REF",
     "FORMULA_TRACE_V1_SCHEMA_VERSION",
     "FORMULA_TRACE_V1_SCHEMA_REF",
+    "FabricFoldState",
     "FormulaBindingError",
     "FormulaBankOperand",
     "FormulaExecutionPlanV2",
@@ -2237,15 +3012,25 @@ __all__ = [
     "FormulaTraceV2",
     "FormulaTypeError",
     "FormulaV2Error",
+    "GatherAtom",
     "InputBinding",
+    "PermuteAtom",
     "PreparedFormulaBindings",
     "ReduceAtom",
+    "ReshapeAtom",
     "ScaleAtom",
+    "ScatterAtom",
     "TensorType",
     "add",
     "build_lora_program",
     "contract",
     "dot",
+    "fold",
+    "gather",
+    "permute",
     "reduce_sum",
+    "reshape",
     "scale",
+    "scatter",
+    "unfold",
 ]

@@ -87,7 +87,7 @@ def test_layer_rejects_ambiguous_or_semantically_empty_feature_configuration() -
 
 
 def test_legacy_arti_layer_defaults_remain_available() -> None:
-    legacy = arti.ARTILayer(input_dim=8, hidden_dim=8)
+    legacy = arti.legacy.ARTILayer(input_dim=8, hidden_dim=8)
     output = legacy(torch.randn(2, 3, 8))
 
     assert output.y.shape == (2, 3, 8)

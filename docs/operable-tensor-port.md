@@ -1,6 +1,6 @@
 # Operable Tensor Port
 
-The alpha tensor-operation surface provides a stable tensor port whose backing
+The stable tensor-operation surface provides a tensor port whose backing
 can be replaced between calls without changing model parameters or graph
 structure. The port always resolves to a real tensor: its runtime-owned default
 backing or an explicitly mounted external backing.
@@ -8,17 +8,17 @@ backing or an explicitly mounted external backing.
 ```python
 import torch
 
-from arti import alpha
+from arti import mechanisms
 
-spec = alpha.PortSpec(
+spec = mechanisms.PortSpec(
     canvas_tokens=64,
     tensor_shape=(16, 16),
     dim=128,
     tensor_to_canvas=tuple(range(16)),
     folded_tensor_coordinates=tuple((0, column) for column in range(16)),
 )
-port = alpha.OperableTensorPort(spec, batch_size=1, device="cuda")
-fold = alpha.SharedCanvasFold(spec)
+port = mechanisms.OperableTensorPort(spec, batch_size=1, device="cuda")
+fold = mechanisms.SharedCanvasFold(spec)
 
 snapshot = port.resolve()
 canvas = fold(world, snapshot, world_mask=world_mask)
@@ -45,7 +45,7 @@ tensor elements up to its declared support size:
 - `ERASE` writes the declared empty value and clears that coordinate's visibility.
 
 ```python
-instruction = alpha.TensorEditInstruction(
+instruction = mechanisms.TensorEditInstruction(
     operation=torch.tensor([[1, 1, 2]], device="cuda"),
     source_plane=torch.tensor([[0, 0, -1]], device="cuda"),
     source_offset=torch.tensor([[12, 37, -1]], device="cuda"),
@@ -53,7 +53,7 @@ instruction = alpha.TensorEditInstruction(
     active=torch.tensor([[True, True, True]], device="cuda"),
 )
 
-edited = alpha.TensorEditFormula(spec)(canvas, snapshot, instruction)
+edited = mechanisms.TensorEditFormula(spec)(canvas, snapshot, instruction)
 port.advance(edited.value, edited.mask)
 ```
 
@@ -78,23 +78,23 @@ it is not limited to the Reader's folded view. All optimizer-owned selection
 and field values live in the Bank.
 
 ```python
-bank = alpha.TensorOperationBank(
+bank = mechanisms.TensorOperationBank(
     spec,
     candidate_count=32,
     key_dim=64,
 )
-selector = alpha.TensorOperationSelector(spec, bank)
-operation = alpha.TensorOperation(
+selector = mechanisms.TensorOperationSelector(spec, bank)
+operation = mechanisms.TensorOperation(
     spec,
     selector,
-    surrogate=alpha.TensorEditSurrogate(spec),
+    surrogate=mechanisms.TensorEditSurrogate(spec),
 )
-loop = alpha.TensorOperationLoop(operation)
+loop = mechanisms.TensorOperationLoop(operation)
 
 proposal = loop(
     world,
     port.resolve(),
-    schedule=alpha.TensorOperationSchedule(operation_steps=8),
+    schedule=mechanisms.TensorOperationSchedule(operation_steps=8),
     world_mask=world_mask,
 )
 
@@ -125,12 +125,12 @@ member's complete field, member ID, source Bank ID, local route normalization,
 and explicit Bank influence:
 
 ```python
-combined = alpha.TensorOperationBank.concat(
+combined = mechanisms.TensorOperationBank.concat(
     (navigation_bank, layout_bank, cleanup_bank),
     name="project-operations",
     influences=(1.0, 0.75, 1.0),
 )
-selector = alpha.TensorOperationSelector(spec, combined)
+selector = mechanisms.TensorOperationSelector(spec, combined)
 ```
 
 No operand is remixed during concatenation. The default hard route still
@@ -157,12 +157,12 @@ same call-boundary snapshot. The axes have independent schedules and do not
 feed intermediate state into each other during the current call.
 
 ```python
-invocation = alpha.TensorInvocation(spec, reader_module, loop)
+invocation = mechanisms.TensorInvocation(spec, reader_module, loop)
 result = invocation(
     world,
     port.resolve(),
-    reader_schedule=alpha.ReaderRefineSchedule(reader_steps=6),
-    operation_schedule=alpha.TensorOperationSchedule(operation_steps=12),
+    reader_schedule=mechanisms.ReaderRefineSchedule(reader_steps=6),
+    operation_schedule=mechanisms.TensorOperationSchedule(operation_steps=12),
     world_mask=world_mask,
 )
 
@@ -170,10 +170,21 @@ current_output = result.output
 next_backing = result.operation
 ```
 
-Training may supervise only the final next-call task result. Tensor differences
-between internal steps need not be treated as a stream or as labels; the core
-operation contract does not require action, route, or intermediate-state
-supervision.
+The repository includes a bounded synthetic probe that trains only the
+operation Bank and checks hard decoded edits against the deterministic Formula
+interpreter:
+
+```text
+python benchmarks/train_tensor_operation.py --device auto
+```
+
+The multi-step gate supplies only a final next-call task loss. Tensor
+differences between internal steps are not treated as a stream or as labels;
+the gate does not provide action, route, or intermediate-state supervision:
+
+```text
+python benchmarks/train_tensor_operation_final_loss.py --device auto
+```
 
 An external backing can be selected at call boundaries:
 
@@ -187,7 +198,7 @@ Detaching returns to the retained default backing. Mounting does not register
 the external tensor as a parameter or model buffer and does not merge it into
 the default state.
 
-This alpha slice establishes an arbitrary-rank logical tensor port,
+This stable slice establishes an arbitrary-rank logical tensor port,
 shared-canvas Fold, fixed-Query Bank selection, complete hard index-map fields,
 concat-native Bank composition,
 independently scheduled multi-step operation, and next-call proposal semantics.
@@ -214,6 +225,13 @@ different events, with committed checkpoints and matched `frozen`, `reset`,
 shuffled-state, and event-order controls. Reload and fork checks must begin
 from a committed root; an uncommitted proposal is not persistent state.
 
-Applications should validate long-lived lifecycle causality with committed
-checkpoints, reload, fork isolation, reset, matched controls, and bounded state
-storage. A single changed output is not evidence of downstream quality.
+The repository includes a no-training lifecycle harness that exercises 64
+calls, checkpoint/reload, fork isolation, reset, matched controls, and bounded
+state storage:
+
+```text
+python benchmarks/run_tensor_operation_lifecycle.py --device auto
+```
+
+This harness validates mechanism and lifecycle causality. It does not use a
+single generated image as evidence of downstream quality.

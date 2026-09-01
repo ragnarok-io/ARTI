@@ -1,4 +1,4 @@
-"""High-level, reversible ARTI attachment for existing PyTorch models."""
+"""High-level, reversible ARTILayer attachment for existing PyTorch models."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from typing import Any, Iterable, Mapping
 import torch
 import torch.nn as nn
 
-from .fit.insertion import get_parent_module, set_child_module
+from .adaptive_pulse import AdaptivePulse
+from .arti_layer import ARTILayer
 from .attachment_config import (
     ARTIAttachConfig,
     ARTIAttachTrainingConfig,
@@ -21,17 +22,17 @@ from .attachment_config import (
     validate_attach_lock,
     write_attach_lock,
 )
-from ._layered_recall import (
-    LayerRecall,
-    LayerRecallSpec,
-    LayerRecallStack,
-    LayerRecallWrapper,
-    LayeredRecallConfig,
-    LayeredRecallModel,
-    _infer_module_dim,
-    _runtime_path_dims,
+from .attachment_layer import (
+    AttachedARTILayer,
+    AttachedARTILayerConfig,
+    AttachedARTILayerSpec,
+    AttachedARTIModel,
+    LayerFactory,
+    _make_layer,
+    infer_module_dim,
+    runtime_path_dims,
 )
-from .recall_topology import LayeredRecallCandidate, estimate_layered_recall_cost
+from .fit.insertion import get_parent_module, set_child_module
 from .serialization import ARTILoadResult, ARTISaveResult, load as load_arti, save as save_arti
 
 
@@ -46,7 +47,7 @@ class ARTILayerInfo:
 
 @dataclass(frozen=True)
 class ARTIAttachmentSummary:
-    """Static resource estimate for a proposed or active attachment."""
+    """Static resource description for a proposed or active attachment."""
 
     layers: tuple[ARTILayerInfo, ...]
     trainable_parameters: int
@@ -68,105 +69,16 @@ class ARTIAttachmentSummary:
     def __str__(self) -> str:
         paths = ", ".join(layer.path for layer in self.layers)
         return (
-            f"ARTI Recall: {len(self.layers)} layer(s) [{paths}] | "
+            f"ARTILayer: {len(self.layers)} layer(s) [{paths}] | "
             f"{self.trainable_parameters:,} trainable parameters "
-            f"({self.parameter_fraction:.3%} of backbone) | "
-            f"{self.multiply_adds_per_token:,} multiply-adds/token"
+            f"({self.parameter_fraction:.3%} of backbone)"
         )
 
 
-class _RecallBundle(nn.Module):
-    def __init__(self, recalls: Iterable[nn.Module]) -> None:
+class _LayerBundle(nn.Module):
+    def __init__(self, layers: Iterable[ARTILayer]) -> None:
         super().__init__()
-        self.layers = nn.ModuleList(tuple(recalls))
-
-
-class ARTIBankSet:
-    """Named Recall banks rebuilt from immutable assets after every change."""
-
-    def __init__(
-        self,
-        attachment: "ARTIAttachment",
-        contract,
-        *,
-        formula=None,
-        updater: nn.Module | None = None,
-    ) -> None:
-        from .recall_bank import RecallBankAssembly, validate_recall_bank_contract
-
-        attachment._require_attached()
-        template = attachment._bundle()
-        validate_recall_bank_contract(
-            contract,
-            attachment._model,
-            template,
-            shared_config={"attachment": _config_payload(attachment.config)},
-            formula=formula,
-            updater=updater,
-        )
-        self.attachment = attachment
-        self.contract = contract
-        self.formula = formula
-        self.updater = updater
-        self._assembly = RecallBankAssembly(
-            template,
-            contract,
-            formula=formula,
-            updater=updater,
-        )
-        self._layout = None
-
-    @property
-    def bank_ids(self) -> tuple[str, ...]:
-        return self._assembly.bank_ids
-
-    @property
-    def layout(self):
-        return self._layout
-
-    def add(self, path: str | Path, *, materialize: bool = True):
-        candidate = self._assembly.fork()
-        asset = candidate.add(path)
-        self._commit(candidate, materialize=materialize)
-        return asset
-
-    def remove(self, bank_id: str, *, materialize: bool = True):
-        candidate = self._assembly.fork()
-        asset = candidate.remove(bank_id)
-        self._commit(candidate, materialize=materialize)
-        return asset
-
-    def clear(self, *, materialize: bool = True):
-        candidate = self._assembly.fork()
-        assets = candidate.clear()
-        self._commit(candidate, materialize=materialize)
-        return assets
-
-    def replace(self, paths: Iterable[str | Path], *, materialize: bool = True):
-        candidate = self._assembly.fork()
-        assets = candidate.replace(paths)
-        self._commit(candidate, materialize=materialize)
-        return assets
-
-    def materialize(self):
-        bundle, layout = self._assembly.materialize()
-        self._install(bundle, layout)
-        return layout
-
-    def _commit(self, candidate, *, materialize: bool) -> None:
-        if materialize:
-            bundle, layout = candidate.materialize()
-            self._install(bundle, layout)
-        self._assembly = candidate
-
-    def _install(self, bundle, layout) -> None:
-        if len(bundle.layers) != len(self.attachment.paths):
-            raise RuntimeError("Recall Bank assembly layer count changed")
-        for path, recall in zip(self.attachment.paths, bundle.layers, strict=True):
-            wrapper = self.attachment._layered.wrappers[path]
-            wrapper.recall = recall
-            wrapper.enabled = bool(layout.bank_ids)
-        self._layout = layout
+        self.layers = nn.ModuleList(tuple(layers))
 
 
 class ARTIAttachment:
@@ -175,21 +87,17 @@ class ARTIAttachment:
     def __init__(
         self,
         model: nn.Module,
-        layered: LayeredRecallModel,
-        config: LayeredRecallConfig,
+        attached_layers: AttachedARTIModel,
+        config: AttachedARTILayerConfig,
         prior_trainability: Mapping[str, bool],
         declaration: ARTIAttachConfig | None = None,
     ) -> None:
         self._model = model
-        self._layered = layered
+        self._layers = attached_layers
         self.config = config
         self.declaration = declaration
         self._prior_trainability = dict(prior_trainability)
         self._attached = True
-        self._recognition_modes = {
-            path: tuple(branch.recognition_mode for branch in _branches(wrapper.recall))
-            for path, wrapper in layered.wrappers.items()
-        }
 
     @property
     def attached(self) -> bool:
@@ -199,135 +107,52 @@ class ARTIAttachment:
     def paths(self) -> tuple[str, ...]:
         return self.config.paths
 
+    @property
+    def layers(self) -> Mapping[str, ARTILayer]:
+        self._require_attached()
+        return {
+            path: wrapper.layer for path, wrapper in self._layers.wrappers.items()
+        }
+
     def summary(self) -> ARTIAttachmentSummary:
         self._require_attached()
         return _summary(self._model, self.config)
 
-    def parameters(self, role: str = "all") -> Iterable[nn.Parameter]:
-        self._require_attached()
-        if role == "all":
-            return self._layered.recall_parameters()
-        if role == "expert_banks":
-            from .recall_experts import recall_bank_parameter_names
-
-            bundle = self._bundle()
-            names = set(recall_bank_parameter_names(bundle))
-            return (parameter for name, parameter in bundle.named_parameters() if name in names)
-        raise ValueError("parameter role must be 'all' or 'expert_banks'")
-
-    def freeze_banks(self) -> tuple[tuple[str, nn.Parameter], ...]:
-        """Freeze the host and shared Recall reader, leaving only banks trainable."""
-
-        from .recall_bank import freeze_for_recall_bank
+    def parameters(self) -> Iterable[nn.Parameter]:
+        """Iterate trainable parameters owned by attached ARTILayer graphs."""
 
         self._require_attached()
-        return freeze_for_recall_bank(self._model, self._bundle())
+        return self._layers.arti_parameters(trainable_only=True)
 
-    def bank_contract(
+    def set_enabled(
         self,
-        bank_id: str,
+        enabled: bool = True,
         *,
-        formula=None,
-        updater: nn.Module | None = None,
-    ):
-        """Capture the immutable host and shared-reader contract for a bank."""
+        paths: Iterable[str] | None = None,
+    ) -> None:
+        self._require_attached()
+        self._layers.set_enabled(enabled, paths=paths)
 
-        from .recall_bank import create_recall_bank_contract
+    def enable(self, *, paths: Iterable[str] | None = None) -> None:
+        self.set_enabled(True, paths=paths)
+
+    def disable(self, *, paths: Iterable[str] | None = None) -> None:
+        self.set_enabled(False, paths=paths)
+
+    def set_capture(self, enabled: bool = True) -> None:
+        """Enable or disable typed Pulse diagnostics at every attached layer."""
 
         self._require_attached()
-        return create_recall_bank_contract(
-            self._model,
-            self._bundle(),
-            bank_id=bank_id,
-            shared_config={"attachment": _config_payload(self.config)},
-            formula=formula,
-            updater=updater,
-        )
+        for wrapper in self._layers.wrappers.values():
+            wrapper.capture = bool(enabled)
+            if not enabled:
+                wrapper.clear_trace()
 
-    def save_bank(
-        self,
-        path: str | Path,
-        *,
-        bank_id: str,
-        contract,
-        formula=None,
-        updater: nn.Module | None = None,
-        training_metadata: Mapping[str, Any] | None = None,
-        private_module: nn.Module | None = None,
-        private_metadata: Mapping[str, Any] | None = None,
-    ) -> ARTISaveResult:
-        """Export current banks and an optional private tensor extension."""
-
-        from .recall_bank import save_recall_bank, validate_recall_bank_contract
-
+    def diagnostics(self):
         self._require_attached()
-        bundle = self._bundle()
-        validate_recall_bank_contract(
-            contract,
-            self._model,
-            bundle,
-            shared_config={"attachment": _config_payload(self.config)},
-            formula=formula,
-            updater=updater,
-        )
-        return save_recall_bank(
-            bundle,
-            path,
-            host=self._model,
-            bank_id=bank_id,
-            contract=contract,
-            shared_config={"attachment": _config_payload(self.config)},
-            formula=formula,
-            updater=updater,
-            training_metadata=training_metadata,
-            private_module=private_module,
-            private_metadata=private_metadata,
-        )
-
-    def banks(
-        self,
-        contract,
-        *,
-        formula=None,
-        updater: nn.Module | None = None,
-    ) -> ARTIBankSet:
-        """Create a reversible bank set from this attachment's template."""
-
-        return ARTIBankSet(self, contract, formula=formula, updater=updater)
-
-    def set_enabled(self, feature: str, enabled: bool = True, *, paths: Iterable[str] | None = None) -> None:
-        """Independently toggle Recall, Half, or recognition."""
-
-        self._require_attached()
-        selected = self.paths if paths is None else self._layered._validate_paths(tuple(paths))
-        if feature == "recall":
-            self._layered.set_enabled(enabled, paths=selected)
-            return
-        if feature not in {"half", "recognition"}:
-            raise ValueError("feature must be 'recall', 'half', or 'recognition'")
-        for path in selected:
-            for index, branch in enumerate(_branches(self._layered.wrappers[path].recall)):
-                if feature == "half":
-                    branch.use_half = bool(enabled)
-                    branch.survival = branch.survival if enabled and branch.survival.__class__.__name__ == "Half" else (
-                        _new_half(branch) if enabled else nn.Identity()
-                    )
-                else:
-                    branch.recognition_mode = self._recognition_modes[path][index] if enabled else "none"
-
-    def enable(self, feature: str = "recall", *, paths: Iterable[str] | None = None) -> None:
-        self.set_enabled(feature, True, paths=paths)
-
-    def disable(self, feature: str = "recall", *, paths: Iterable[str] | None = None) -> None:
-        self.set_enabled(feature, False, paths=paths)
-
-    def diagnostics(self) -> dict[str, dict[str, torch.Tensor]]:
-        self._require_attached()
-        return self._layered.diagnostics()
+        return self._layers.diagnostics()
 
     def doctor(self):
-        """Inspect placement, dtype, freezing, and wrapper compatibility."""
-
         from .attachment_hub import attachment_doctor
 
         self._require_attached()
@@ -341,8 +166,6 @@ class ARTIAttachment:
         revision: str | None = None,
         training_session: Any | None = None,
     ):
-        """Write a Hub-compatible ARTI bundle without base model weights."""
-
         from .attachment_hub import save_attachment_pretrained
 
         self._require_attached()
@@ -363,27 +186,28 @@ class ARTIAttachment:
         training_state: Any | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> ARTISaveResult:
-        """Save only attached Recall weights and topology as ``*.recall.arti.st``."""
+        """Save attached ARTILayer state without host model parameters."""
 
         self._require_attached()
         target = Path(path)
-        if not target.name.endswith(".recall.arti.st"):
-            raise ValueError("attachment artifacts must end in '.recall.arti.st'")
-        bundle = self._bundle()
+        if not target.name.endswith(".arti.st"):
+            raise ValueError("attachment artifacts must end in '.arti.st'")
         extra = dict(metadata or {})
         if "unified_attachment" in extra:
             raise ValueError("attachment metadata cannot override unified_attachment")
         artifact_metadata = {
             "unified_attachment": {
-                "version": 1,
+                "version": 2,
                 "config": _config_payload(self.config),
-                "declaration": None if self.declaration is None else self.declaration.to_dict(include_source=True),
+                "declaration": None
+                if self.declaration is None
+                else self.declaration.to_dict(include_source=True),
                 "host_structure": _host_structure_fingerprint(self._model),
             },
             **extra,
         }
         return save_arti(
-            bundle,
+            self._bundle(),
             target,
             config=artifact_metadata,
             scope="all",
@@ -401,22 +225,19 @@ class ARTIAttachment:
         scheduler: Any | None = None,
         load_checkpoint: bool = False,
     ) -> ARTILoadResult:
-        """Restore a compatible attachment artifact into this model."""
-
         self._require_attached()
         inspected = load_arti(path, load_resources=False, load_checkpoint=False)
         metadata = _attachment_metadata(inspected.manifest)
         if _config_from_payload(metadata["config"]) != self.config:
-            raise ValueError("Recall artifact topology does not match this attachment")
+            raise ValueError("ARTILayer artifact topology does not match this attachment")
         if metadata["host_structure"] != _host_structure_fingerprint(self._model):
-            raise ValueError("Recall artifact host structure does not match this model")
-        device = map_location or _model_device(self._model)
+            raise ValueError("ARTILayer artifact host structure does not match this model")
         return load_arti(
             path,
             model=self._bundle(),
             optimizer=optimizer,
             scheduler=scheduler,
-            map_location=device,
+            map_location=map_location or _model_device(self._model),
             load_resources=False,
             load_checkpoint=load_checkpoint,
         )
@@ -434,13 +255,14 @@ class ARTIAttachment:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         resume_from_checkpoint: str | Path | bool | None = None,
-        trainable: str = "all",
     ):
-        """Create a Torch, Transformers, or Accelerate training session."""
-
         from .attachment_training import ARTITrainingSession
 
-        base = self.declaration.training if self.declaration is not None else ARTIAttachTrainingConfig()
+        base = (
+            self.declaration.training
+            if self.declaration is not None
+            else ARTIAttachTrainingConfig()
+        )
         config = ARTIAttachTrainingConfig(
             engine=engine or base.engine,
             objective=base.objective if callable(objective) or objective is None else str(objective),
@@ -454,50 +276,40 @@ class ARTIAttachment:
             if corruption_probability is None
             else corruption_probability,
         )
-        session = ARTITrainingSession(
+        return ARTITrainingSession(
             self,
             config=config,
             objective=objective,
             optimizer=optimizer,
             scheduler=scheduler,
             resume_from_checkpoint=resume_from_checkpoint,
-            trainable=trainable,
         )
-        return session
 
     def write_lock(self, path: str | Path) -> Path:
-        if self.declaration is None:
-            declaration = ARTIAttachConfig(recall=_config_payload(self.config))
-        else:
-            declaration = self.declaration
+        declaration = self.declaration or ARTIAttachConfig(layer={"layers": list(self.paths)})
         return write_attach_lock(
             path,
             config=declaration,
-            resolved_recall=_config_payload(self.config),
+            resolved_layer=_config_payload(self.config),
             host_structure=_host_structure_fingerprint(self._model),
         )
 
     def validate_lock(self, path: str | Path) -> dict[str, Any]:
-        if self.declaration is None:
-            declaration = ARTIAttachConfig(recall=_config_payload(self.config))
-        else:
-            declaration = self.declaration
+        declaration = self.declaration or ARTIAttachConfig(layer={"layers": list(self.paths)})
         return validate_attach_lock(
             path,
             config=declaration,
-            resolved_recall=_config_payload(self.config),
+            resolved_layer=_config_payload(self.config),
             host_structure=_host_structure_fingerprint(self._model),
         )
 
     def detach(self) -> nn.Module:
-        """Remove every inserted branch and restore original trainability."""
-
         self._require_attached()
-        for path in self.paths:
+        for path in reversed(self.paths):
             parent, leaf = get_parent_module(self._model, path)
             wrapper = _child(parent, leaf)
-            if not isinstance(wrapper, LayerRecallWrapper):
-                raise RuntimeError(f"attached layer {path!r} was replaced outside ARTI")
+            if not isinstance(wrapper, AttachedARTILayer):
+                raise RuntimeError(f"layer {path!r} no longer contains its ARTI attachment")
             set_child_module(parent, leaf, wrapper.base)
         for name, parameter in self._model.named_parameters():
             if name in self._prior_trainability:
@@ -506,8 +318,8 @@ class ARTIAttachment:
         self._attached = False
         return self._model
 
-    def _bundle(self) -> _RecallBundle:
-        return _RecallBundle(self._layered.wrappers[path].recall for path in self.paths)
+    def _bundle(self) -> _LayerBundle:
+        return _LayerBundle(self._layers.wrappers[path].layer for path in self.paths)
 
     def _require_attached(self) -> None:
         if not self._attached:
@@ -515,50 +327,88 @@ class ARTIAttachment:
 
 
 class ARTI:
-    """Developer-friendly entry point for attaching ARTI to an existing model."""
+    """Attach AdaptivePulse-backed ARTILayer instances to an existing model."""
 
     @staticmethod
-    def discover(model: nn.Module, layers: str | Iterable[str] | None = None) -> tuple[ARTILayerInfo, ...]:
+    def discover(
+        model: nn.Module,
+        layers: str | Iterable[str] | None = None,
+    ) -> tuple[ARTILayerInfo, ...]:
         return discover_layers(model, layers)
 
     @staticmethod
     def preview(
         model: nn.Module,
-        recall: bool | Mapping[str, Any] | LayeredRecallConfig = True,
+        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
         *,
+        layers: str | Iterable[str] | None = None,
+        freeze_backbone: bool = True,
         sample_batch: Any | None = None,
     ) -> ARTIAttachmentSummary:
-        config = _resolve_config(model, recall, sample_batch=sample_batch)
-        return _summary(model, config, sample_batch=sample_batch)
+        resolved = _resolve_config(
+            model,
+            layers=layers,
+            freeze_backbone=freeze_backbone,
+            sample_batch=sample_batch,
+        )
+        return _summary(model, resolved, layer=layer)
 
     @staticmethod
     def attach(
         model: nn.Module,
-        recall: bool | Mapping[str, Any] | LayeredRecallConfig = True,
+        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
         *,
+        layers: str | Iterable[str] | None = None,
+        freeze_backbone: bool = True,
         config: str | Path | ARTIAttachConfig | None = None,
         sample_batch: Any | None = None,
     ) -> nn.Module:
-        """Attach Recall in place and return the original model object."""
+        """Attach ARTILayer@2 in place and return the original model object."""
 
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
         if hasattr(model, "arti"):
             raise ValueError("model already has an ARTI attachment")
         declaration = None
+        batch_axis = None
+        feature_axis = None
         if config is not None:
-            if recall is not True:
-                raise ValueError("pass either recall=... or config=..., not both")
+            if layers is not None or freeze_backbone is not True:
+                raise ValueError("config owns layers and freeze_backbone")
             declaration = load_attach_config(config) if isinstance(config, (str, Path)) else config
-            recall = declaration.recall
-        resolved_config = _resolve_config(model, recall, sample_batch=sample_batch)
+            options = dict(declaration.layer)
+            layers = options.pop("layers", None)
+            freeze_backbone = bool(options.pop("freeze_backbone", True))
+            batch_axis = options.pop("batch_axis", None)
+            feature_axis = options.pop("feature_axis", None)
+            if options:
+                raise ValueError(f"unknown ARTILayer attachment options: {sorted(options)}")
+        resolved = _resolve_config(
+            model,
+            layers=layers,
+            freeze_backbone=freeze_backbone,
+            sample_batch=sample_batch,
+            batch_axis=batch_axis,
+            feature_axis=feature_axis,
+        )
         prior = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
         try:
-            layered = LayeredRecallModel.from_config(model, resolved_config, sample_batch=sample_batch)
+            attached_layers = AttachedARTIModel.from_config(
+                model,
+                resolved,
+                layer=layer,
+                sample_batch=sample_batch,
+            )
         except Exception:
-            _rollback_attachment(model, resolved_config.paths, prior)
+            _rollback_attachment(model, resolved.paths, prior)
             raise
-        controller = ARTIAttachment(model, layered, resolved_config, prior, declaration)
+        controller = ARTIAttachment(
+            model,
+            attached_layers,
+            attached_layers.config,
+            prior,
+            declaration,
+        )
         object.__setattr__(model, "arti", controller)
         return model
 
@@ -567,14 +417,22 @@ class ARTI:
         model: nn.Module,
         path: str | Path,
         *,
+        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
         sample_batch: Any | None = None,
         map_location: str | torch.device | None = None,
     ) -> nn.Module:
-        """Reconstruct an attachment from its artifact and restore its weights."""
+        """Reconstruct one attachment using a matching ARTILayer graph."""
 
         inspected = load_arti(path, load_resources=False, load_checkpoint=False)
         metadata = _attachment_metadata(inspected.manifest)
-        ARTI.attach(model, _config_from_payload(metadata["config"]), sample_batch=sample_batch)
+        config = _config_from_payload(metadata["config"])
+        ARTI.attach(
+            model,
+            layer,
+            layers=config.paths,
+            freeze_backbone=config.freeze_backbone,
+            sample_batch=sample_batch,
+        )
         declaration = metadata.get("declaration")
         if isinstance(declaration, Mapping):
             model.arti.declaration = attach_config_from_dict(declaration)
@@ -590,29 +448,40 @@ class ARTI:
         directory: str | Path,
         *,
         model: nn.Module | None = None,
+        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
         map_location: str | torch.device | None = None,
         model_kwargs: Mapping[str, Any] | None = None,
     ) -> nn.Module:
-        """Load a base-model reference plus its independent ARTI artifact."""
-
         from .attachment_hub import load_attachment_pretrained
 
         return load_attachment_pretrained(
             directory,
             model=model,
+            layer=layer,
             map_location=map_location,
             model_kwargs=model_kwargs,
         )
 
 
-def discover_layers(model: nn.Module, layers: str | Iterable[str] | None = None) -> tuple[ARTILayerInfo, ...]:
-    """Discover stable block-level insertion points without running the model."""
+def discover_layers(
+    model: nn.Module,
+    layers: str | Iterable[str] | None = None,
+) -> tuple[ARTILayerInfo, ...]:
+    """Discover block-level insertion points without running the model."""
 
     named = tuple((name, module) for name, module in model.named_modules() if name)
     if layers is not None:
         patterns = (layers,) if isinstance(layers, str) else tuple(layers)
-        selected = [(name, module) for name, module in named if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)]
-        missing = [pattern for pattern in patterns if not any(fnmatch.fnmatchcase(name, pattern) for name, _ in named)]
+        selected = [
+            (name, module)
+            for name, module in named
+            if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+        ]
+        missing = [
+            pattern
+            for pattern in patterns
+            if not any(fnmatch.fnmatchcase(name, pattern) for name, _ in named)
+        ]
         if missing:
             raise ValueError(f"layer patterns matched no modules: {missing}")
     else:
@@ -621,40 +490,37 @@ def discover_layers(model: nn.Module, layers: str | Iterable[str] | None = None)
             selected = [
                 (name, module)
                 for name, module in named
-                if name.count(".") == 0 and _infer_module_dim(module) is not None and _is_shape_preserving(module)
+                if name.count(".") == 0
+                and infer_module_dim(module) is not None
+                and _is_shape_preserving(module)
             ]
     if not selected:
-        raise ValueError("no compatible layers discovered; pass recall={'layers': 'path.or.glob'}")
-    # A pattern may match both a block and its descendants. Keep the shallowest match.
+        raise ValueError("no compatible layers discovered; pass layers='path.or.glob'")
     paths: list[tuple[str, nn.Module]] = []
     for name, module in selected:
         if not any(name.startswith(parent + ".") for parent, _ in paths):
             paths.append((name, module))
-    return tuple(ARTILayerInfo(name, _infer_attachment_dim(model, module), type(module).__name__) for name, module in paths)
+    return tuple(
+        ARTILayerInfo(name, _infer_attachment_dim(model, module), type(module).__name__)
+        for name, module in paths
+    )
 
 
 def _resolve_config(
     model: nn.Module,
-    recall: bool | Mapping[str, Any] | LayeredRecallConfig,
     *,
+    layers: str | Iterable[str] | None,
+    freeze_backbone: bool,
     sample_batch: Any | None,
-) -> LayeredRecallConfig:
-    if recall is False:
-        raise ValueError("recall=False creates no attachment; leave the model unchanged instead")
-    if isinstance(recall, LayeredRecallConfig):
-        return recall
-    options = {} if recall is True else dict(recall)
-    if options.pop("enabled", True) is False:
-        raise ValueError("recall enabled=False creates no attachment; leave the model unchanged instead")
-    layer_selector = options.pop("layers", options.pop("layer_paths", None))
-    discovered = discover_layers(model, layer_selector)
-    batch_axis = options.get("batch_axis")
-    feature_axis = options.get("feature_axis")
+    batch_axis: int | Mapping[str, int] | None = None,
+    feature_axis: int | Mapping[str, int] | None = None,
+) -> AttachedARTILayerConfig:
+    discovered = discover_layers(model, layers)
     dims = {item.path: item.dim for item in discovered if item.dim is not None}
     unresolved = tuple(item.path for item in discovered if item.dim is None)
     if unresolved and sample_batch is not None:
         dims.update(
-            _runtime_path_dims(
+            runtime_path_dims(
                 model,
                 unresolved,
                 sample_batch,
@@ -664,115 +530,102 @@ def _resolve_config(
         )
     unknown = tuple(path for path in unresolved if path not in dims)
     if unknown:
-        raise ValueError(f"cannot infer hidden dimensions for {unknown}; pass sample_batch or explicit LayeredRecallConfig")
-    allowed = {"rank", "slots", "half", "use_half", "recognition", "recognition_mode", "recognition_threshold", "recognition_temperature", "copies", "combine", "batch_axis", "feature_axis", "freeze_backbone"}
-    extra = set(options) - allowed
-    if extra:
-        raise ValueError(f"unknown Recall attachment options: {sorted(extra)}")
-    rank = options.get("rank", 16)
-    slots = options.get("slots", 8)
-    use_half = options.get("half", options.get("use_half", True))
-    recognition = options.get("recognition", options.get("recognition_mode", "none"))
-    if recognition is False:
-        recognition = "none"
-    elif recognition is True:
-        recognition = "alignment"
-    specs = tuple(
-        LayerRecallSpec(
-            item.path,
-            dim=dims[item.path],
-            rank=int(_path_option(rank, item.path)),
-            slots=int(_path_option(slots, item.path)),
-            use_half=bool(_path_option(use_half, item.path)),
-            recognition_mode=str(_path_option(recognition, item.path)),
-            recognition_threshold=float(_path_option(options.get("recognition_threshold", 0.5), item.path)),
-            recognition_temperature=float(_path_option(options.get("recognition_temperature", 0.1), item.path)),
-            copies=int(_path_option(options.get("copies", 1), item.path)),
-            combine=str(_path_option(options.get("combine", "sum"), item.path)),
-            batch_axis=None
-            if batch_axis is None
-            else int(_path_option(batch_axis, item.path)),
-            feature_axis=None
-            if feature_axis is None
-            else int(_path_option(feature_axis, item.path)),
-        )
-        for item in discovered
+        raise ValueError(f"cannot infer hidden dimensions for {unknown}; pass sample_batch")
+    return AttachedARTILayerConfig(
+        tuple(
+            AttachedARTILayerSpec(
+                item.path,
+                dim=dims[item.path],
+                batch_axis=None
+                if batch_axis is None
+                else int(_path_option(batch_axis, item.path)),
+                feature_axis=None
+                if feature_axis is None
+                else int(_path_option(feature_axis, item.path)),
+            )
+            for item in discovered
+        ),
+        freeze_backbone=bool(freeze_backbone),
     )
-    return LayeredRecallConfig(layers=specs, freeze_backbone=bool(options.get("freeze_backbone", True)))
 
 
-def _summary(model: nn.Module, config: LayeredRecallConfig, *, sample_batch: Any | None = None) -> ARTIAttachmentSummary:
-    infos = []
-    dims = {}
+def _summary(
+    model: nn.Module,
+    config: AttachedARTILayerConfig,
+    *,
+    layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+) -> ARTIAttachmentSummary:
+    wrappers = {
+        path: module
+        for path, module in model.named_modules()
+        if isinstance(module, AttachedARTILayer)
+    }
+    infos: list[ARTILayerInfo] = []
+    trainable = 0
+    parameter_bytes = 0
+    layer_parameter_ids: set[int] = set()
     for spec in config.layers:
-        dim = spec.dim
-        if dim is None:
-            module = dict(model.named_modules()).get(spec.path)
-            dim = _infer_module_dim(module) if module is not None else None
         module = dict(model.named_modules()).get(spec.path)
-        if isinstance(module, LayerRecallWrapper):
-            module = module.base
-        infos.append(ARTILayerInfo(spec.path, dim, type(module).__name__))
-        if dim is not None:
-            dims[spec.path] = dim
-    unresolved = tuple(info.path for info in infos if info.dim is None)
-    if unresolved and sample_batch is not None:
-        dims.update(_runtime_path_dims(model, unresolved, sample_batch))
-        infos = [ARTILayerInfo(info.path, dims.get(info.path), info.module_type) for info in infos]
-    cost = estimate_layered_recall_cost(LayeredRecallCandidate("attachment", config), layer_dims=dims)
-    total = sum(parameter.numel() for parameter in model.parameters())
-    backbone = total - cost.parameters if hasattr(model, "arti") else total
-    dtype_bytes = max((parameter.element_size() for parameter in model.parameters() if parameter.is_floating_point()), default=4)
+        wrapper = wrappers.get(spec.path)
+        if wrapper is not None:
+            module = wrapper.base
+            instance = wrapper.layer
+        else:
+            instance = _make_layer(layer, spec)
+        infos.append(ARTILayerInfo(spec.path, spec.dim, type(module).__name__))
+        for parameter in instance.parameters():
+            layer_parameter_ids.add(id(parameter))
+            if parameter.requires_grad:
+                trainable += parameter.numel()
+                parameter_bytes += parameter.numel() * parameter.element_size()
+    backbone = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if id(parameter) not in layer_parameter_ids
+    )
     return ARTIAttachmentSummary(
         layers=tuple(infos),
-        trainable_parameters=cost.parameters,
+        trainable_parameters=trainable,
         backbone_parameters=backbone,
-        parameter_fraction=cost.parameters / max(backbone, 1),
-        multiply_adds_per_token=cost.token_multiply_adds,
-        estimated_parameter_bytes=cost.parameters * dtype_bytes,
+        parameter_fraction=trainable / max(backbone, 1),
+        multiply_adds_per_token=0,
+        estimated_parameter_bytes=parameter_bytes,
     )
 
 
-def _config_payload(config: LayeredRecallConfig) -> dict[str, Any]:
-    return {"freeze_backbone": config.freeze_backbone, "layers": [asdict(spec) for spec in config.layers]}
+def _config_payload(config: AttachedARTILayerConfig) -> dict[str, Any]:
+    return {
+        "freeze_backbone": config.freeze_backbone,
+        "layers": [asdict(spec) for spec in config.layers],
+    }
 
 
-def _config_from_payload(payload: Mapping[str, Any]) -> LayeredRecallConfig:
-    return LayeredRecallConfig(
-        layers=tuple(LayerRecallSpec(**item) for item in payload["layers"]),
+def _config_from_payload(payload: Mapping[str, Any]) -> AttachedARTILayerConfig:
+    return AttachedARTILayerConfig(
+        tuple(AttachedARTILayerSpec(**item) for item in payload["layers"]),
         freeze_backbone=bool(payload.get("freeze_backbone", True)),
     )
 
 
 def _attachment_metadata(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     metadata = manifest.get("architecture", {}).get("config", {}).get("unified_attachment")
-    if not isinstance(metadata, Mapping) or metadata.get("version") != 1:
-        raise ValueError("artifact is not an ARTI unified Recall attachment")
+    if not isinstance(metadata, Mapping) or metadata.get("version") != 2:
+        raise ValueError("artifact is not an ARTILayer@2 attachment")
     return metadata
 
 
-def _branches(recall: LayerRecall | LayerRecallStack) -> tuple[LayerRecall, ...]:
-    return tuple(recall.branches) if isinstance(recall, LayerRecallStack) else (recall,)
-
-
-def _new_half(branch: LayerRecall) -> nn.Module:
-    from .nn import Half
-
-    return Half().to(device=branch.bank.device, dtype=branch.bank.dtype)
-
-
-def _child(parent: nn.Module, leaf: str) -> nn.Module:
-    return parent[int(leaf)] if leaf.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)) else getattr(parent, leaf)
-
-
-def _rollback_attachment(model: nn.Module, paths: Iterable[str], prior: Mapping[str, bool]) -> None:
+def _rollback_attachment(
+    model: nn.Module,
+    paths: Iterable[str],
+    prior: Mapping[str, bool],
+) -> None:
     for path in paths:
         try:
             parent, leaf = get_parent_module(model, path)
             current = _child(parent, leaf)
         except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             continue
-        if isinstance(current, LayerRecallWrapper):
+        if isinstance(current, AttachedARTILayer):
             set_child_module(parent, leaf, current.base)
     for name, parameter in model.named_parameters():
         if name in prior:
@@ -808,20 +661,20 @@ def _path_option(value: Any, path: str) -> Any:
 
 
 def _is_shape_preserving(module: nn.Module) -> bool:
-    if isinstance(module, nn.Linear):
-        return module.in_features == module.out_features
-    return True
+    return not isinstance(module, nn.Linear) or module.in_features == module.out_features
 
 
 def _is_transformer_block(name: str, module: nn.Module) -> bool:
     cls = type(module).__name__.lower()
-    block_class = any(token in cls for token in ("decoderlayer", "encoderlayer", "transformerblock")) or cls.endswith("block")
+    block_class = any(
+        token in cls for token in ("decoderlayer", "encoderlayer", "transformerblock")
+    ) or cls.endswith("block")
     indexed_layer = ".layers." in f".{name}." and name.rsplit(".", 1)[-1].isdigit()
     return block_class or indexed_layer
 
 
 def _infer_attachment_dim(model: nn.Module, module: nn.Module) -> int | None:
-    direct = _infer_module_dim(module)
+    direct = infer_module_dim(module)
     if direct is not None:
         return direct
     config = getattr(model, "config", None)
@@ -834,10 +687,24 @@ def _infer_attachment_dim(model: nn.Module, module: nn.Module) -> int | None:
         if isinstance(child, nn.Linear) and child.in_features == child.out_features:
             candidates.append(child.out_features)
         else:
-            value = _infer_module_dim(child)
+            value = infer_module_dim(child)
             if value is not None:
                 candidates.append(value)
     return max(set(candidates), key=candidates.count) if candidates else None
 
 
-__all__ = ["ARTI", "ARTIAttachment", "ARTIAttachmentSummary", "ARTILayerInfo", "discover_layers"]
+def _child(parent: nn.Module, leaf: str) -> nn.Module:
+    if leaf.isdigit() and isinstance(parent, (nn.Sequential, nn.ModuleList)):
+        return parent[int(leaf)]
+    return getattr(parent, leaf)
+
+
+__all__ = [
+    "ARTI",
+    "ARTIAttachment",
+    "ARTIAttachmentSummary",
+    "ARTILayerInfo",
+    "AttachedARTILayerConfig",
+    "AttachedARTILayerSpec",
+    "discover_layers",
+]

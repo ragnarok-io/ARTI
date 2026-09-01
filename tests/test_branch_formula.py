@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from arti import alpha
+from arti import mechanisms
 from arti.tensor_transaction import TensorTransactionContractError
 
 
@@ -13,30 +13,30 @@ STATE = "2" * 64
 ABI = "3" * 64
 
 
-def program() -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def program() -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=1,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
     )
 
 
-def route() -> alpha.FormulaRoutePlan:
+def route() -> mechanisms.FormulaRoutePlan:
     weights = torch.zeros(1, 1, 1, 2, 3)
     weights[..., 0, 0] = 1
     weights[..., 1, 1] = 1
     enabled = torch.ones(1, 1, 1, dtype=torch.bool)
-    return alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    return mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
-def workspace() -> alpha.ActiveWorkspace:
+def workspace() -> mechanisms.ActiveWorkspace:
     value = torch.tensor([[[2.0], [3.0], [0.0]]])
     support = torch.ones(1, 3, dtype=torch.bool)
-    return alpha.ActiveWorkspace(value, support, support, support)
+    return mechanisms.ActiveWorkspace(value, support, support, support)
 
 
-def runtime() -> alpha.VolatileTensorRuntime:
-    return alpha.VolatileTensorRuntime(
+def runtime() -> mechanisms.VolatileTensorRuntime:
+    return mechanisms.VolatileTensorRuntime(
         {"state": workspace().value},
         world_id="formula-branch-world",
         store_instance_id="formula-branch-store",
@@ -46,10 +46,10 @@ def runtime() -> alpha.VolatileTensorRuntime:
 
 
 def binding(
-    store: alpha.VolatileTensorRuntime,
-    snapshot: alpha.TensorSnapshot,
-) -> alpha.BoundTensorRead:
-    return alpha.bind_external_tensor(
+    store: mechanisms.VolatileTensorRuntime,
+    snapshot: mechanisms.TensorSnapshot,
+) -> mechanisms.BoundTensorRead:
+    return mechanisms.bind_external_tensor(
         store,
         snapshot,
         "state",
@@ -57,7 +57,7 @@ def binding(
         partition_id="main",
         logical_id="formula-workspace",
         role="formula-state",
-        authority=alpha.TensorAuthority.READ_WRITE,
+        authority=mechanisms.TensorAuthority.READ_WRITE,
         component_ref="arti/formula-fabric-compute@1",
         component_config_fingerprint=CONFIG,
         state_schema_ref="arti/formula-workspace@1",
@@ -67,10 +67,10 @@ def binding(
 
 
 def proposal(
-    bound: alpha.BoundTensorRead,
+    bound: mechanisms.BoundTensorRead,
     value: torch.Tensor,
-) -> alpha.ExternalTensorProposal:
-    return alpha.ExternalTensorProposal(
+) -> mechanisms.ExternalTensorProposal:
+    return mechanisms.ExternalTensorProposal(
         bound.binding,
         value,
         producer_ref="arti/formula-fabric-compute@1",
@@ -84,29 +84,29 @@ def setup():
     snapshot = store.snapshot()
     source = workspace()
     fixed_route = route()
-    compute = alpha.FormulaFabricCompute(
-        alpha.FormulaCommitBlend(alpha.FormulaFabric(program())),
+    compute = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(program())),
         active_count=3,
     )
     future = torch.tensor([[[2.0], [3.0], [5.0]]])
-    spec = alpha.BranchBatchSpec.from_snapshot(
+    spec = mechanisms.BranchBatchSpec.from_snapshot(
         snapshot,
         run_id="formula-k2",
         branch_ids=("left", "right"),
         executor_ref="arti/formula-fabric-compute@1",
         program_fingerprint=program().fingerprint,
-        route_fingerprint=alpha.formula_route_fingerprint(fixed_route),
-        input_fingerprint=alpha.workspace_fingerprint(source),
-        rng_fingerprint=alpha.deterministic_formula_rng_fingerprint(),
-        future_tape_fingerprint=alpha.tensor_content_fingerprint(future),
-        budgets=(alpha.BranchBudget(2, 2), alpha.BranchBudget(2, 2)),
+        route_fingerprint=mechanisms.formula_route_fingerprint(fixed_route),
+        input_fingerprint=mechanisms.workspace_fingerprint(source),
+        rng_fingerprint=mechanisms.deterministic_formula_rng_fingerprint(),
+        future_tape_fingerprint=mechanisms.tensor_content_fingerprint(future),
+        budgets=(mechanisms.BranchBudget(2, 2), mechanisms.BranchBudget(2, 2)),
     )
     return store, snapshot, source, fixed_route, compute, future, spec
 
 
 def test_fixed_formula_execution_derives_real_trace_and_step_lineage() -> None:
     _store, _snapshot, source, fixed_route, compute, _future, spec = setup()
-    result = alpha.execute_fixed_formula_branch(
+    result = mechanisms.execute_fixed_formula_branch(
         compute,
         source,
         fixed_route,
@@ -130,7 +130,7 @@ def test_fixed_formula_execution_derives_real_trace_and_step_lineage() -> None:
 
 def test_same_future_scores_real_candidates_before_explicit_host_commit() -> None:
     store, snapshot, source, fixed_route, compute, future, spec = setup()
-    left = alpha.execute_fixed_formula_branch(
+    left = mechanisms.execute_fixed_formula_branch(
         compute,
         source,
         fixed_route,
@@ -139,7 +139,7 @@ def test_same_future_scores_real_candidates_before_explicit_host_commit() -> Non
         steps=2,
         factors=torch.ones(1, 1, 1),
     )
-    right = alpha.execute_fixed_formula_branch(
+    right = mechanisms.execute_fixed_formula_branch(
         compute,
         source,
         fixed_route,
@@ -148,28 +148,28 @@ def test_same_future_scores_real_candidates_before_explicit_host_commit() -> Non
         steps=2,
         factors=torch.zeros(1, 1, 1),
     )
-    score = alpha.score_formula_branches((left, right), future, spec)
+    score = mechanisms.score_formula_branches((left, right), future, spec)
     assert score.scores[0] == 0.0
     assert score.scores[1] > 0.0
 
     bound = binding(store, snapshot)
-    harness = alpha.K2BranchHarness(store, snapshot, spec)
+    harness = mechanisms.K2BranchHarness(store, snapshot, spec)
     harness.propose(left.overlay(spec, (proposal(bound, left.workspace.value),)))
     harness.propose(right.overlay(spec, (proposal(bound, right.workspace.value),)))
     assert store.snapshot().root_id == snapshot.root_id
-    receipt = alpha.select_scored_formula_branch(
+    receipt = mechanisms.select_scored_formula_branch(
         harness,
         score,
         idempotency_key="host-selected-left",
     )
-    assert receipt.status is alpha.BranchRunStatus.COMMITTED
+    assert receipt.status is mechanisms.BranchRunStatus.COMMITTED
     torch.testing.assert_close(store.read(store.snapshot(), "state").value, future)
 
 
 def test_future_is_score_only_and_cannot_be_substituted() -> None:
     _store, _snapshot, source, fixed_route, compute, future, spec = setup()
     candidates = tuple(
-        alpha.execute_fixed_formula_branch(
+        mechanisms.execute_fixed_formula_branch(
             compute,
             source,
             fixed_route,
@@ -181,12 +181,12 @@ def test_future_is_score_only_and_cannot_be_substituted() -> None:
         for branch_id, factor in (("left", 1.0), ("right", 0.0))
     )
     with pytest.raises(TensorTransactionContractError, match="future tensor"):
-        alpha.score_formula_branches(candidates, future + 1, spec)
+        mechanisms.score_formula_branches(candidates, future + 1, spec)
 
 
 def test_nonfinite_future_and_forged_receipts_fail_closed() -> None:
     _store, _snapshot, source, fixed_route, compute, _future, spec = setup()
-    left = alpha.execute_fixed_formula_branch(
+    left = mechanisms.execute_fixed_formula_branch(
         compute,
         source,
         fixed_route,
@@ -196,7 +196,7 @@ def test_nonfinite_future_and_forged_receipts_fail_closed() -> None:
         factors=torch.ones(1, 1, 1),
     )
     with pytest.raises(TensorTransactionContractError, match="must come from"):
-        alpha.FormulaBranchExecution(
+        mechanisms.FormulaBranchExecution(
             branch_id=left.branch_id,
             spec_fingerprint=left.spec_fingerprint,
             workspace=left.workspace,
@@ -208,7 +208,7 @@ def test_nonfinite_future_and_forged_receipts_fail_closed() -> None:
             _factory_token=object(),
         )
     with pytest.raises(TensorTransactionContractError, match="must come from"):
-        alpha.FrozenMSEScoreReceipt(
+        mechanisms.FrozenMSEScoreReceipt(
             spec_fingerprint=spec.fingerprint,
             candidate_execution_fingerprints=("1" * 64, "2" * 64),
             candidate_output_fingerprints=("3" * 64, "4" * 64),
@@ -218,20 +218,20 @@ def test_nonfinite_future_and_forged_receipts_fail_closed() -> None:
         )
 
     nonfinite = torch.full_like(source.value, float("nan"))
-    nonfinite_spec = alpha.BranchBatchSpec.from_snapshot(
+    nonfinite_spec = mechanisms.BranchBatchSpec.from_snapshot(
         _snapshot,
         run_id="nonfinite-future",
         branch_ids=("left", "right"),
         executor_ref="arti/formula-fabric-compute@1",
         program_fingerprint=program().fingerprint,
-        route_fingerprint=alpha.formula_route_fingerprint(fixed_route),
-        input_fingerprint=alpha.workspace_fingerprint(source),
-        rng_fingerprint=alpha.deterministic_formula_rng_fingerprint(),
-        future_tape_fingerprint=alpha.tensor_content_fingerprint(nonfinite),
-        budgets=(alpha.BranchBudget(2, 2), alpha.BranchBudget(2, 2)),
+        route_fingerprint=mechanisms.formula_route_fingerprint(fixed_route),
+        input_fingerprint=mechanisms.workspace_fingerprint(source),
+        rng_fingerprint=mechanisms.deterministic_formula_rng_fingerprint(),
+        future_tape_fingerprint=mechanisms.tensor_content_fingerprint(nonfinite),
+        budgets=(mechanisms.BranchBudget(2, 2), mechanisms.BranchBudget(2, 2)),
     )
     candidates = tuple(
-        alpha.execute_fixed_formula_branch(
+        mechanisms.execute_fixed_formula_branch(
             compute,
             source,
             fixed_route,
@@ -243,12 +243,12 @@ def test_nonfinite_future_and_forged_receipts_fail_closed() -> None:
         for branch_id, factor in (("left", 1.0), ("right", 0.0))
     )
     with pytest.raises(TensorTransactionContractError, match="finite"):
-        alpha.score_formula_branches(candidates, nonfinite, nonfinite_spec)
+        mechanisms.score_formula_branches(candidates, nonfinite, nonfinite_spec)
 
 
 def test_formula_overlay_rejects_candidate_not_produced_by_execution() -> None:
     store, snapshot, source, fixed_route, compute, _future, spec = setup()
-    result = alpha.execute_fixed_formula_branch(
+    result = mechanisms.execute_fixed_formula_branch(
         compute,
         source,
         fixed_route,
@@ -264,7 +264,7 @@ def test_formula_overlay_rejects_candidate_not_produced_by_execution() -> None:
 
 def test_execution_rejects_non_hard_or_unbound_route() -> None:
     _store, _snapshot, source, fixed_route, compute, _future, spec = setup()
-    soft_route = alpha.FormulaRoutePlan(
+    soft_route = mechanisms.FormulaRoutePlan(
         fixed_route.weights,
         fixed_route.valid_mask,
         fixed_route.fire_mask,
@@ -272,7 +272,7 @@ def test_execution_rejects_non_hard_or_unbound_route() -> None:
         estimator="straight-through",
     )
     with pytest.raises(TensorTransactionContractError, match="fixed hard"):
-        alpha.execute_fixed_formula_branch(
+        mechanisms.execute_fixed_formula_branch(
             compute,
             source,
             soft_route,

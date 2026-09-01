@@ -1,0 +1,191 @@
+# Shape-autonomous Bank contracts
+
+ARTI Core is tensor-native, but it does not impose one global same-shape TITO
+rule. Same-shape remains a convenient `arti.fit()` attachment profile. A
+standalone ARTI component owns its input schema, output schema, shape relation,
+and gradient contract.
+
+The stable vFederal surface starts with data contracts rather than a second Recall
+implementation:
+
+```python
+import arti
+from arti import mechanisms
+
+local_input = mechanisms.TensorSchema(
+    dtype="float32",
+    device_class="any",
+    dimensions=("B", 17, 64),
+    semantic_axes=("batch", "slot", "feature"),
+)
+
+terminal = mechanisms.TerminalOutputABI(
+    fields=(
+        mechanisms.TerminalField(
+            "value",
+            mechanisms.TensorSchema(
+                dtype="float32",
+                device_class="any",
+                dimensions=("B", "T", 32),
+                semantic_axes=("batch", "token", "feature"),
+            ),
+            "terminal-value",
+        ),
+        mechanisms.TerminalField(
+            "validity",
+            mechanisms.TensorSchema(
+                dtype="boolean",
+                device_class="any",
+                dimensions=("B",),
+                semantic_axes=("batch",),
+            ),
+            "terminal-validity",
+        ),
+        mechanisms.TerminalField(
+            "score",
+            mechanisms.TensorSchema(
+                dtype="float32",
+                device_class="any",
+                dimensions=("B",),
+                semantic_axes=("batch",),
+            ),
+            "terminal-score",
+        ),
+    ),
+    factor_order=(),
+    validity_contract="all positions are valid",
+    packing_contract="one named dense tensor",
+    score_contract="score supplied by the caller",
+    consumer_contract="consumer accepts the named value field",
+    gradient_contract=mechanisms.GradientContract.autograd(),
+)
+```
+
+The generic ABI may describe other structured outputs. `FederalRecall@1`
+specifically requires exactly one `terminal-score` field and one
+`terminal-validity` field so hard winner selection has explicit semantics.
+
+`BankExecutionSignature` binds an autonomous Bank program to one exact terminal
+ABI fingerprint. Two Banks may use different ranks, lengths, feature sizes,
+Formula programs, Fold/UnFold layouts, or Refine policies. They can participate
+in one federation only when their explicit terminal adapters produce the same
+named ABI.
+
+The signature also requires a fixed, deterministic, non-trainable Query and
+Bank-local normalization. A Federation-wide softmax is not part of this
+contract. Flat Bank concatenation is only a later execution optimization for
+compatible signatures, not the definition of federation.
+
+`ShapeRelation` expressions are declarative contract text in this stage. They
+are fingerprinted and inspected, but are not evaluated as code or used as an
+implicit tensor adapter.
+
+`FederalRecall@1` is the eager reference coordinator for these contracts. It
+dispatches each autonomous Bank independently, validates every explicit child
+tensor against the child input schema, keeps at most one global `K` paths, and
+selects one valid terminal record. Runtime paths are returned only through
+`FederalTrace@1`; they are not Bank state or persisted artifacts.
+
+The first reference batches terminal fields only when their declared tensors
+can be explicitly concatenated on the batch axis. Ragged terminal ABIs require
+their own offsets/packing fields and a later matching backend; the coordinator
+never inserts padding, projection, reshape, broadcast, or device conversion.
+
+The reference coordinator deliberately does not promise heterogeneous kernel
+fusion, compiled execution, physical savings, or distributed execution. Those
+are backend work after terminal parity, not part of the vFederal definition.
+
+## Bank-owned Query assets
+
+`FederalRecall@2` is the first serial reference path for a Bank that owns its
+Query. A Query may be trained with its Bank, selected on validation data, then
+sealed and saved as a Bank asset. Sealing fixes the registered implementation,
+configuration, parameter/buffer roles, tensor values, schemas, retrieval
+contract, normalization contract, and gradient contract. Query parameters no
+longer receive gradients, while autograd may still cross the Query into its
+input.
+
+```python
+sealed_query = mechanisms.seal_bank_query(trained_query)
+mechanisms.save_bank_query(sealed_query, "vision-query.arti.st")
+
+query = mechanisms.load_bank_query(
+    "vision-query.arti.st",
+    MyRegisteredQuery(...),
+)
+```
+
+Custom Query classes must inherit `mechanisms.BankQuery` and have a component
+registration before sealing. The registration supplies the canonical artifact
+identity; an unregistered Python subclass is intentionally runtime-only.
+
+```python
+arti.register_component(
+    "example/my-bank-query@1",
+    component_type=MyBankQuery,
+    lifecycle="stable",
+    constructible=False,
+    config_builder=lambda query: query.contract_config(),
+    dependency_builder=lambda _query: (
+        "arti/gradient-contract@1",
+        "arti/tensor-schema@1",
+    ),
+)
+```
+
+A `BankOwnedQueryProgram` is constructed in two phases. First create the full
+program state. Then derive its signature from the registered program and bind
+it. This prevents callers from inventing program configuration or state-schema
+fingerprints.
+
+```python
+class MyBank(mechanisms.BankOwnedQueryProgram):
+    def __init__(self, query, terminal_abi):
+        super().__init__(bank_id="vision", query=query)
+        self.local_formula = MyFormula(...)
+        signature = mechanisms.BankExecutionSignatureV2.from_program(
+            self,
+            input_schema=query.signature.input_schema,
+            output_schema=terminal_value_schema,
+            shape_relation=mechanisms.ShapeRelation.arbitrary_to_terminal(
+                "the local adapter produces the terminal ABI"
+            ),
+            query_signature=query.signature,
+            local_normalization_contract=query.signature.normalization_contract,
+            local_formula_ref="example/my-formula@1",
+            local_refine_ref="arti/refine-policy@2",
+            terminal_adapter_ref="example/my-terminal-adapter@1",
+            terminal_abi_ref="arti/terminal-output-abi@1",
+            terminal_abi_fingerprint=terminal_abi.fingerprint,
+            score_contract="one Bank-local terminal score",
+            gradient_contract=mechanisms.GradientContract.autograd(),
+        )
+        self.bind_signature(signature)
+```
+
+The Bank program and terminal adapter references must also be registered for a
+portable Federation artifact. `FederalRecall@2` currently enforces serial
+`K=1` execution. Every self-transition or child transition invokes the
+destination Bank's sealed Query on the latest value. The coordinator never
+applies a Federation-wide softmax. The declared normalization remains the
+responsibility of the Bank-local program; with `K=1`, no cross-Bank probability
+mass is introduced by the coordinator.
+
+The v2 implementation is still an eager reference. It makes no batching,
+compiled-routing, mixed-precision, hot-mount, or throughput claim.
+
+## Acceptance experiment
+
+The deterministic traversal benchmark creates eight autonomous Banks with
+different ranks, input dimensions, value dimensions, and local layouts. A
+correct terminal value may require 1, 2, 4, or 8 child transitions:
+
+```text
+uv run --extra dev python benchmarks/federal_path_traversal.py
+```
+
+It compares full fixed-K re-query with K=1, one-shot, frozen-query, shuffled
+child links, and a homogeneous-layout control. The benchmark also trains only
+the explicit terminal adapters and checks that fixed Query tensors receive no
+gradient. Results and runtime-only traces are written under
+`.artifacts/federal-path-traversal-v1/`.

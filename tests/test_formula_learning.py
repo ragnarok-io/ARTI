@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
 def _make_bank(
@@ -19,8 +19,8 @@ def _make_bank(
     output_dim: int = 3,
     rank: int = 2,
     member_ids: tuple[str, ...] | None = None,
-) -> alpha.FormulaOperandBank:
-    return alpha.FormulaOperandBank(
+) -> mechanisms.FormulaOperandBank:
+    return mechanisms.FormulaOperandBank(
         keys=torch.randn(members, key_dim, dtype=torch.float64),
         operands={
             "A": torch.randn(members, rank, input_dim, dtype=torch.float64),
@@ -39,7 +39,7 @@ def test_hard_formula_route_is_one_hot_forward_with_explicit_surrogate() -> None
         dtype=torch.float64,
         requires_grad=True,
     )
-    selection = alpha.hard_formula_route(logits, estimator="straight-through")
+    selection = mechanisms.hard_formula_route(logits, estimator="straight-through")
 
     assert selection.estimator == "straight-through"
     assert selection.hard_indices.tolist() == [1, 0]
@@ -49,7 +49,7 @@ def test_hard_formula_route_is_one_hot_forward_with_explicit_surrogate() -> None
     assert torch.isfinite(logits.grad).all()
     assert torch.count_nonzero(logits.grad) > 0
 
-    hard = alpha.hard_formula_route(logits.detach(), estimator="hard")
+    hard = mechanisms.hard_formula_route(logits.detach(), estimator="hard")
     assert not hard.route.requires_grad
     assert torch.equal(hard.route, selection.route.detach())
 
@@ -60,7 +60,7 @@ def test_formula_operand_bank_ties_follow_stable_member_identity() -> None:
         [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=torch.float64
     )
     member_ids = ("zeta", "alpha", "other")
-    bank = alpha.FormulaOperandBank(
+    bank = mechanisms.FormulaOperandBank(
         keys=keys,
         operands={"value": torch.randn(3, 2, dtype=torch.float64)},
         member_ids=member_ids,
@@ -69,7 +69,7 @@ def test_formula_operand_bank_ties_follow_stable_member_identity() -> None:
     assert bank.member_ids[int(original.hard_indices.item())] == "alpha"
 
     permutation = torch.tensor([2, 0, 1])
-    permuted = alpha.FormulaOperandBank(
+    permuted = mechanisms.FormulaOperandBank(
         keys=keys[permutation],
         operands={"value": bank.operands["value"].detach()[permutation]},
         member_ids=tuple(member_ids[index] for index in permutation.tolist()),
@@ -81,7 +81,7 @@ def test_formula_operand_bank_ties_follow_stable_member_identity() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_formula_operand_bank_constructed_on_cuda_routes_without_device_drift() -> None:
     keys = torch.tensor([[1.0, 0.0], [1.0, 0.0]], device="cuda")
-    bank = alpha.FormulaOperandBank(
+    bank = mechanisms.FormulaOperandBank(
         keys=keys,
         operands={"value": torch.randn(2, 3, device="cuda")},
         member_ids=("zeta", "alpha"),
@@ -102,7 +102,7 @@ def test_routed_lora_program_matches_selected_bundle_and_gradients() -> None:
         output_dim=output_dim,
         rank=rank,
     )
-    program = alpha.build_routed_lora_program(
+    program = mechanisms.build_routed_lora_program(
         input_dim=input_dim,
         output_dim=output_dim,
         rank=rank,
@@ -112,7 +112,7 @@ def test_routed_lora_program_matches_selected_bundle_and_gradients() -> None:
         member_ids=bank.member_ids,
         dtype="float64",
     )
-    fabric = alpha.FormulaFabricV2(program)
+    fabric = mechanisms.FormulaFabricV2(program)
     query = torch.randn(6, bank.key_dim, dtype=torch.float64, requires_grad=True)
     x = torch.randn(6, 3, input_dim, dtype=torch.float64, requires_grad=True)
     base = torch.randn(6, 3, output_dim, dtype=torch.float64, requires_grad=True)
@@ -154,7 +154,7 @@ def test_routed_lora_program_matches_selected_bundle_and_gradients() -> None:
 
 
 def test_routed_lora_recipe_records_explicit_accumulation_policy() -> None:
-    program = alpha.build_routed_lora_program(
+    program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -177,7 +177,7 @@ def test_routed_lora_recipe_records_explicit_accumulation_policy() -> None:
 def test_formula_operand_bank_permutation_preserves_route_and_output() -> None:
     torch.manual_seed(9202)
     bank = _make_bank()
-    program = alpha.build_routed_lora_program(
+    program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -192,11 +192,11 @@ def test_formula_operand_bank_permutation_preserves_route_and_output() -> None:
     base = torch.randn(5, 2, 3, dtype=torch.float64)
 
     def run(
-        operand_bank: alpha.FormulaOperandBank,
-        formula_program: alpha.FormulaProgram,
+        operand_bank: mechanisms.FormulaOperandBank,
+        formula_program: mechanisms.FormulaProgram,
     ) -> tuple[torch.Tensor, tuple[str, ...]]:
         selection = operand_bank.route(query, estimator="hard")
-        value = alpha.FormulaFabricV2(formula_program)(
+        value = mechanisms.FormulaFabricV2(formula_program)(
             inputs={"x": x, "base": base, "formula.route": selection.route},
             banks=operand_bank.bind(formula_program),
         ).values[0]
@@ -206,7 +206,7 @@ def test_formula_operand_bank_permutation_preserves_route_and_output() -> None:
     original_value, original_identity = run(bank, program)
     permutation = torch.tensor([2, 0, 3, 1])
     permuted_ids = tuple(bank.member_ids[index] for index in permutation.tolist())
-    permuted_bank = alpha.FormulaOperandBank(
+    permuted_bank = mechanisms.FormulaOperandBank(
         keys=bank.keys.detach()[permutation],
         operands={
             name: value.detach()[permutation] for name, value in bank.operands.items()
@@ -215,7 +215,7 @@ def test_formula_operand_bank_permutation_preserves_route_and_output() -> None:
         bundle_id=bank.bundle_id,
         member_ids=permuted_ids,
     )
-    permuted_program = alpha.build_routed_lora_program(
+    permuted_program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -234,7 +234,7 @@ def test_formula_operand_bank_permutation_preserves_route_and_output() -> None:
 
 def test_formula_operand_bank_binding_is_fail_closed_and_versioned() -> None:
     bank = _make_bank()
-    program = alpha.build_routed_lora_program(
+    program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -259,7 +259,7 @@ def test_formula_operand_bank_binding_is_fail_closed_and_versioned() -> None:
     with pytest.raises(arti.ComponentCompatibilityError, match="config is invalid"):
         arti.validate_component_provenance(forged)
 
-    wrong_program = alpha.build_routed_lora_program(
+    wrong_program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -268,10 +268,10 @@ def test_formula_operand_bank_binding_is_fail_closed_and_versioned() -> None:
         bundle_id="other",
         dtype="float64",
     )
-    with pytest.raises(alpha.FormulaBindingError, match="does not match"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="does not match"):
         bank.bind(wrong_program)
 
-    fingerprinted_program = alpha.build_routed_lora_program(
+    fingerprinted_program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -282,18 +282,18 @@ def test_formula_operand_bank_binding_is_fail_closed_and_versioned() -> None:
         asset_fingerprint="a" * 64,
         dtype="float64",
     )
-    with pytest.raises(alpha.FormulaBindingError, match="does not match"):
+    with pytest.raises(mechanisms.FormulaBindingError, match="does not match"):
         bank.bind(fingerprinted_program)
 
     with pytest.raises(ValueError, match="canonical component reference"):
-        alpha.FormulaOperandBank(
+        mechanisms.FormulaOperandBank(
             keys=torch.randn(2, 3),
             operands={"A": torch.randn(2, 4)},
             source_ref="not-canonical",
         )
 
     with pytest.raises(ValueError, match="candidate axis"):
-        alpha.FormulaOperandBank(
+        mechanisms.FormulaOperandBank(
             keys=torch.randn(3, 4),
             operands={"A": torch.randn(2, 5)},
         )
@@ -342,7 +342,7 @@ def test_formula_operand_bank_state_roundtrip_does_not_own_query() -> None:
 def test_formula_execution_plan_cuda_inductor_matches_eager_and_gradients() -> None:
     torch.manual_seed(9203)
     bank = _make_bank().cuda()
-    program = alpha.build_routed_lora_program(
+    program = mechanisms.build_routed_lora_program(
         input_dim=5,
         output_dim=3,
         rank=2,
@@ -352,7 +352,7 @@ def test_formula_execution_plan_cuda_inductor_matches_eager_and_gradients() -> N
         member_ids=bank.member_ids,
         dtype="float64",
     )
-    fabric = alpha.FormulaFabricV2(program).cuda()
+    fabric = mechanisms.FormulaFabricV2(program).cuda()
     query = torch.randn(6, bank.key_dim, device="cuda", dtype=torch.float64)
     x = torch.randn(6, 3, 5, device="cuda", dtype=torch.float64, requires_grad=True)
     base = torch.randn(6, 3, 3, device="cuda", dtype=torch.float64, requires_grad=True)

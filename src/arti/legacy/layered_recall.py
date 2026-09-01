@@ -1,4 +1,4 @@
-"""Compatibility-free import path for layered Recall experiments."""
+"""Legacy import path for the retired layered Recall experiment API."""
 
 from .._layered_recall import (
     LayerRecall,

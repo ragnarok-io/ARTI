@@ -1,3 +1,3 @@
 """Version metadata for ARTI."""
 
-__version__ = "3.0.10a2"
+__version__ = "3.0.11"

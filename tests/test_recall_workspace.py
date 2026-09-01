@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from arti.experimental import LayerRecall
+from arti.legacy import LayerRecall
 from arti.nn import Fold, Half, UnFold
 from arti.recall_workspace import RecallWorkspace
 

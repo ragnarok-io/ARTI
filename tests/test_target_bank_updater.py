@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import arti
-from arti.alpha import TargetBankUpdater, WriteRefinePolicy
+from arti.mechanisms import TargetBankUpdater, WriteRefinePolicy
 from arti.recall_refine import RefineBudget, RefineStop
 
 

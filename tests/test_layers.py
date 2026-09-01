@@ -3,7 +3,8 @@ import copy
 import pytest
 import torch
 
-from arti import ARTIConfig, ARTILayer, ARTIOutput, RefinePolicy
+from arti import ARTIConfig, ARTIOutput, RefinePolicy
+from arti.legacy import ARTILayer
 from arti.config import STATE_RECALL_COMPOSITION_FACTOR
 from arti.functional import apply_coord_frame_inverse, masked_mean
 from arti.init import init_arti_module

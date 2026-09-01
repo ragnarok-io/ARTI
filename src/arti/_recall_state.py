@@ -1304,6 +1304,7 @@ class _RecallWorkspaceBlock(nn.Module):
             use_recall=recall_steps > 0,
             use_virtual_recall=False,
         )
+        self.layer._component_reference = "arti/classic-layer@1"
         if self.layer.state.recall is not None:
             with torch.no_grad():
                 self.layer.state.recall.bank.zero_()

@@ -7,37 +7,37 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
-def _program() -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def _program() -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=2,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
         domain="objective-formula-control",
     )
 
 
-def _route(value: torch.Tensor) -> alpha.FormulaRoutePlan:
+def _route(value: torch.Tensor) -> mechanisms.FormulaRoutePlan:
     weights = value.new_zeros(value.shape[0], 1, 1, 2, 4)
     weights[:, 0, 0, 0, 0] = 1
     weights[:, 0, 0, 1, 1] = 1
     enabled = torch.ones(
         value.shape[0], 1, 1, dtype=torch.bool, device=value.device
     )
-    return alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    return mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
-def _workspace(value: torch.Tensor) -> alpha.ActiveWorkspace:
+def _workspace(value: torch.Tensor) -> mechanisms.ActiveWorkspace:
     support = torch.ones(value.shape[:-1], dtype=torch.bool, device=value.device)
     intervened = torch.zeros_like(support)
     intervened[:, 2] = True
-    return alpha.ActiveWorkspace(value, support, support, intervened)
+    return mechanisms.ActiveWorkspace(value, support, support, intervened)
 
 
-def _objective() -> alpha.ObjectiveExposureBank:
-    objective = alpha.ObjectiveExposureBank(
+def _objective() -> mechanisms.ObjectiveExposureBank:
+    objective = mechanisms.ObjectiveExposureBank(
         slots=2,
         query_dim=2,
         key_layout="circle",
@@ -49,19 +49,19 @@ def _objective() -> alpha.ObjectiveExposureBank:
     return objective
 
 
-def _controlled() -> alpha.ObjectiveFormulaFabricCompute:
-    compute = alpha.FormulaFabricCompute(
-        alpha.FormulaCommitBlend(alpha.FormulaFabric(_program())),
+def _controlled() -> mechanisms.ObjectiveFormulaFabricCompute:
+    compute = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(_program())),
         active_count=3,
     )
-    return alpha.ObjectiveFormulaFabricCompute(compute, _objective())
+    return mechanisms.ObjectiveFormulaFabricCompute(compute, _objective())
 
 
-def _routed_controlled() -> alpha.ObjectiveFormulaFabricCompute:
+def _routed_controlled() -> mechanisms.ObjectiveFormulaFabricCompute:
     program = _program()
     policies = []
     for seed in (31, 32):
-        bank = alpha.TypedTopologyOperandBank(
+        bank = mechanisms.TypedTopologyOperandBank(
             slots=4,
             key_dim=4,
             factor_dim=1,
@@ -70,7 +70,7 @@ def _routed_controlled() -> alpha.ObjectiveFormulaFabricCompute:
             bank_id=f"objective-formula-{seed}",
         )
         policies.append(
-            alpha.TypedBankFormulaTopologyPolicy(
+            mechanisms.TypedBankFormulaTopologyPolicy(
                 2,
                 [bank],
                 key_dim=4,
@@ -80,26 +80,26 @@ def _routed_controlled() -> alpha.ObjectiveFormulaFabricCompute:
         )
     candidate = torch.zeros(1, 1, 2, 4, dtype=torch.bool)
     candidate[..., :2] = True
-    source = alpha.BankFormulaRouteSource(
+    source = mechanisms.BankFormulaRouteSource(
         program,
         policies,
         active_count=3,
         candidate_mask=candidate,
     )
-    compute = alpha.FormulaFabricCompute(
-        alpha.FormulaCommitBlend(alpha.FormulaFabric(program)),
+    compute = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(program)),
         active_count=3,
     )
-    return alpha.ObjectiveFormulaFabricCompute(
-        alpha.RoutedFormulaFabricCompute(compute, source),
+    return mechanisms.ObjectiveFormulaFabricCompute(
+        mechanisms.RoutedFormulaFabricCompute(compute, source),
         _objective(),
     )
 
 
-def _pulse() -> alpha.AdaptivePulse:
-    topology = alpha.ReversibleTopology(active_count=3)
+def _pulse() -> mechanisms.AdaptivePulse:
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    return alpha.AdaptivePulse(
+    return mechanisms.AdaptivePulse(
         fold=fold,
         selective_compute=_controlled(),
         unfold=unfold,
@@ -189,7 +189,7 @@ def test_control_admits_total_cost_before_objective_execution() -> None:
     controlled = _controlled()
     value = torch.randn(2, 3, 2)
     workspace = _workspace(value)
-    controlled.limits = alpha.ContractLimits(max_operation_bytes=1)
+    controlled.limits = mechanisms.ContractLimits(max_operation_bytes=1)
 
     with mock.patch.object(
         controlled.objective, "forward", side_effect=AssertionError("executed")
@@ -219,7 +219,7 @@ def test_control_has_no_future_input_and_pulse_requires_explicit_query() -> None
             compute_factors=torch.ones(2, 1, 1),
         )
     with pytest.raises(ValueError, match="Objective-controlled compute"):
-        alpha.AdaptivePulse().run_tensor(value, objective_query=torch.randn(2, 2))
+        mechanisms.AdaptivePulse().run_tensor(value, objective_query=torch.randn(2, 2))
 
 
 def test_control_runs_as_an_optional_pulse_compute_stage() -> None:
@@ -238,7 +238,7 @@ def test_control_runs_as_an_optional_pulse_compute_stage() -> None:
     )
 
     assert isinstance(
-        result.diagnostics.compute, alpha.ObjectiveFormulaFabricComputeInfo
+        result.diagnostics.compute, mechanisms.ObjectiveFormulaFabricComputeInfo
     )
     assert result.value.shape == value.shape
     assert not torch.equal(result.value[0, 2], result.value[1, 2])
@@ -307,18 +307,18 @@ def test_control_cuda_fullgraph(dtype: torch.dtype) -> None:
     mask = torch.ones(8, 3, dtype=torch.bool, device="cuda")
     intervened = torch.zeros_like(mask)
     intervened[:, 2] = True
-    domain = alpha.SupportDomain.for_tensor(
+    domain = mechanisms.SupportDomain.for_tensor(
         mask,
         domain_id="objective-fullgraph",
         owner_ref="arti/pulse@2",
         partition_id="world",
         transition_id="compiled",
     )
-    world = alpha.TensorEnvelope(alpha.EnvelopeRef.WORLD, value, mask, domain)
-    supports = alpha.PulseSupports(
-        alpha.SupportMask(alpha.SupportKind.OBSERVED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.EXPOSED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.INTERVENED, intervened, domain),
+    world = mechanisms.TensorEnvelope(mechanisms.EnvelopeRef.WORLD, value, mask, domain)
+    supports = mechanisms.PulseSupports(
+        mechanisms.SupportMask(mechanisms.SupportKind.OBSERVED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.EXPOSED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.INTERVENED, intervened, domain),
         validity=mask,
     )
     formula_before = {
@@ -335,7 +335,7 @@ def test_control_cuda_fullgraph(dtype: torch.dtype) -> None:
     result.value.float().square().mean().backward()
 
     assert isinstance(
-        result.diagnostics.compute, alpha.ObjectiveFormulaFabricComputeInfo
+        result.diagnostics.compute, mechanisms.ObjectiveFormulaFabricComputeInfo
     )
     assert pulse.selective_compute.objective.values.grad is not None
     assert torch.isfinite(pulse.selective_compute.objective.values.grad).all()

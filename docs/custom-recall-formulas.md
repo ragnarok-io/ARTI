@@ -100,17 +100,16 @@ The lock contains no module, optimizer, or tensor values. It is therefore
 safe to version separately from `state_dict` weights and to reject stale or
 mis-sized bank artifacts early.
 
-The Formula contract and lock schema are version 2 in ARTI 3.0. Old 2.x
-contracts are intentionally rejected rather than silently reinterpreted.
+The Formula contract and lock schema are version 2 in ARTI 3.x. Version 1
+payloads are rejected rather than silently reinterpreted.
 
 `execution.vectorization` is conservative by default: `scalar_vmap` preserves
 the original Formula ABI, while `batched` opts into the flat hot path
-`[M, D] + [M, F, D] -> [M, D]`. A batched Formula must be row-independent:
-changing one batch/token row must not change any other row. The validator
-probes this invariant before the Formula is admitted. `supported_dtypes` is
-also enforced at runtime; `accumulation_dtype`, `deterministic`, and
-`supports_autograd` remain explicit execution-contract declarations rather
-than hidden conversions.
+`[M, D] + [M, F, D] -> [M, D]`. The latter is useful for `torch.compile` and
+future Triton work, but it is only used when the Formula declares it and the
+validator has exercised that ABI. `supported_dtypes`, `accumulation_dtype`,
+`deterministic`, and `supports_autograd` are admission metadata, not hidden
+runtime conversions.
 
 Process-local factories may be registered with an exact identity:
 
@@ -126,3 +125,15 @@ separately authorized artifact policy.
 `RecallRefiner` accepts only a module declaring `output_semantics="next_state"`.
 It computes `next_state - state`, optionally applies `Half`, and repeats the
 update. Residual or undeclared producers are rejected rather than guessed.
+
+## Forward Updater
+
+The forward Updater is intentionally separate from retired TTT sessions:
+
+```python
+updater = arti.mechanisms.RecallValueUpdater(hidden_dim=768, slots=32)
+next_bank = updater(trace, previous_bank, mask=mask)
+```
+
+It is the stable state-transition primitive. Persistence and training
+protocols remain caller-owned and are not implicit Formula behavior.

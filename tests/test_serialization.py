@@ -1,6 +1,6 @@
 import torch
 
-from arti import ARTILayer
+from arti.legacy import ARTILayer
 
 
 def test_state_dict_serialization_round_trip(tmp_path):

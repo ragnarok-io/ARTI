@@ -11,26 +11,28 @@ import torch.nn as nn
 from safetensors import safe_open
 
 import arti
-from arti import ARTILayer, LiteralSequenceDecoder
+from arti import ARTILayer, Half, LiteralSequenceDecoder
+from arti.mechanisms import AdaptivePulse
 
 
 def core_layer() -> ARTILayer:
-    return ARTILayer(input_dim=6, hidden_dim=8, coord_dim=2, dropout=0.0).eval()
+    return ARTILayer(
+        AdaptivePulse(half=Half(stochastic=False, learnable=True))
+    ).eval()
 
 
 def test_arti_st_core_layer_round_trip_preserves_output(tmp_path: Path) -> None:
     torch.manual_seed(3)
     model = core_layer()
     x = torch.randn(2, 4, 6)
-    coord = torch.randn(2, 4, 2)
     torch.manual_seed(31)
-    expected = model(x, coord=coord).y.detach()
+    expected = model(x).detach()
 
     saved = arti.save(model, tmp_path / "arti.st")
     restored = core_layer()
     loaded = arti.load(saved.weights_path, model=restored)
     torch.manual_seed(31)
-    actual = restored(x, coord=coord).y.detach()
+    actual = restored(x).detach()
 
     assert torch.allclose(actual, expected)
     assert loaded.model is restored
@@ -93,10 +95,10 @@ def test_arti_st_sha256_detects_weight_corruption(tmp_path: Path) -> None:
         raise AssertionError("corrupted arti.st should fail integrity validation")
 
 
-def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Path) -> None:
+def test_arti_st_manifest_hash_and_incompatible_version_are_checked(tmp_path: Path) -> None:
     saved = arti.save(nn.Linear(4, 3), tmp_path / "arti.st")
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
-    manifest["package_version"] = "3.99.0"
+    manifest["package_version"] = "0.99.0"
     saved.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
     lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
@@ -107,7 +109,7 @@ def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Pa
     try:
         arti.load(saved.weights_path)
     except ValueError as exc:
-        assert "newer than ARTI" in str(exc)
+        assert "incompatible with ARTI" in str(exc)
     else:
         raise AssertionError("future alpha package should fail compatibility validation")
 

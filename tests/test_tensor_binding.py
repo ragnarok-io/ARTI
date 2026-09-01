@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 from arti.tensor_transaction import TensorOwnershipError, TensorTransactionContractError
 
 
@@ -14,8 +14,8 @@ STATE = "2" * 64
 ABI = "3" * 64
 
 
-def runtime(initial: dict[str, torch.Tensor]) -> alpha.VolatileTensorRuntime:
-    return alpha.VolatileTensorRuntime(
+def runtime(initial: dict[str, torch.Tensor]) -> mechanisms.VolatileTensorRuntime:
+    return mechanisms.VolatileTensorRuntime(
         initial,
         world_id="binding-world",
         store_instance_id="binding-store",
@@ -25,16 +25,16 @@ def runtime(initial: dict[str, torch.Tensor]) -> alpha.VolatileTensorRuntime:
 
 
 def bind(
-    store: alpha.VolatileTensorRuntime,
-    snapshot: alpha.TensorSnapshot,
+    store: mechanisms.VolatileTensorRuntime,
+    snapshot: mechanisms.TensorSnapshot,
     key: str,
     *,
     component_ref: str,
     schema_ref: str,
     role: str,
-    authority: alpha.TensorAuthority = alpha.TensorAuthority.READ_WRITE,
-) -> alpha.BoundTensorRead:
-    return alpha.bind_external_tensor(
+    authority: mechanisms.TensorAuthority = mechanisms.TensorAuthority.READ_WRITE,
+) -> mechanisms.BoundTensorRead:
+    return mechanisms.bind_external_tensor(
         store,
         snapshot,
         key,
@@ -52,13 +52,13 @@ def bind(
 
 
 def proposal(
-    bound: alpha.BoundTensorRead,
+    bound: mechanisms.BoundTensorRead,
     value: torch.Tensor,
     *,
     component_ref: str,
-    semantics: alpha.ProposalSemantics = alpha.ProposalSemantics.COMPLETE_NEXT_STATE,
-) -> alpha.ExternalTensorProposal:
-    return alpha.ExternalTensorProposal(
+    semantics: mechanisms.ProposalSemantics = mechanisms.ProposalSemantics.COMPLETE_NEXT_STATE,
+) -> mechanisms.ExternalTensorProposal:
+    return mechanisms.ExternalTensorProposal(
         bound.binding,
         value,
         producer_ref=component_ref,
@@ -99,13 +99,13 @@ def test_formula_arena_publishes_once_while_ssa_versions_remain_local() -> None:
         schema_ref="arti/formula-arena-ssa@1",
         role="formula-ssa",
     )
-    program = alpha.FormulaFabricProgram(
+    program = mechanisms.FormulaFabricProgram(
         arena_capacity=2,
         feature_dim=1,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.IDENTITY, 1),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.IDENTITY, 1),),),
     )
-    fabric = alpha.FormulaFabric(program)
-    state = alpha.FormulaArenaState(
+    fabric = mechanisms.FormulaFabric(program)
+    state = mechanisms.FormulaArenaState(
         value_b.read.value,
         mask_b.read.value,
         ssa_b.read.value,
@@ -113,7 +113,7 @@ def test_formula_arena_publishes_once_while_ssa_versions_remain_local() -> None:
     weights = torch.zeros(1, 1, 1, 1, 2)
     weights[..., 0] = 1
     enabled = torch.ones(1, 1, 1, dtype=torch.bool)
-    result = fabric(state, alpha.FormulaRoutePlan(weights, enabled, enabled, enabled))
+    result = fabric(state, mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled))
     assert result.state.version[0, 1].item() == 1
 
     tx = store.begin(snapshot, transaction_id="formula", branch_id="main")
@@ -122,7 +122,7 @@ def test_formula_arena_publishes_once_while_ssa_versions_remain_local() -> None:
         (mask_b, result.state.mask),
         (ssa_b, result.state.version),
     ):
-        alpha.stage_external_proposal(
+        mechanisms.stage_external_proposal(
             tx,
             proposal(bound, candidate, component_ref=component_ref),
         )
@@ -145,11 +145,11 @@ def test_target_bank_updater_returns_candidate_and_host_alone_commits() -> None:
         schema_ref="arti/target-bank-state@1",
         role="target-bank",
     )
-    updater = alpha.TargetBankUpdater(
+    updater = mechanisms.TargetBankUpdater(
         hidden_dim=2,
         slots=3,
         target_coupling="required_after_bootstrap",
-        policy=alpha.WriteRefinePolicy.fixed(3),
+        policy=mechanisms.WriteRefinePolicy.fixed(3),
     )
     candidate = updater(torch.ones(2, 2), bound.read.value)
     assert store.snapshot().epoch == snapshot.epoch
@@ -157,7 +157,7 @@ def test_target_bank_updater_returns_candidate_and_host_alone_commits() -> None:
         proposal(bound, candidate, component_ref=component_ref)
 
     tx = store.begin(snapshot, transaction_id="updater", branch_id="main")
-    alpha.stage_external_proposal(
+    mechanisms.stage_external_proposal(
         tx,
         proposal(bound, candidate.detach(), component_ref=component_ref),
     )
@@ -177,7 +177,7 @@ def test_fold_address_binding_keeps_logical_ids_separate_from_permutation() -> N
         schema_ref="arti/fold-source@1",
         role="fold-source",
     )
-    record = alpha.FoldRecord(
+    record = mechanisms.FoldRecord(
         permutation=torch.tensor([[2, 0, 1]]),
         original_mask=torch.ones(1, 3, dtype=torch.bool),
         original_shape=source.shape,
@@ -185,7 +185,7 @@ def test_fold_address_binding_keeps_logical_ids_separate_from_permutation() -> N
         active_count=1,
         topology_config_fingerprint=CONFIG,
     )
-    binding = alpha.FoldAddressBinding.from_record(
+    binding = mechanisms.FoldAddressBinding.from_record(
         bound.binding,
         record,
         logical_ids=("item-0", "item-1", "item-2"),
@@ -196,7 +196,7 @@ def test_fold_address_binding_keeps_logical_ids_separate_from_permutation() -> N
     assert binding.transported_logical_ids == (("item-2", "item-0", "item-1"),)
     binding.validate_record(record)
 
-    other = alpha.FoldRecord(
+    other = mechanisms.FoldRecord(
         permutation=torch.tensor([[1, 2, 0]]),
         original_mask=torch.ones(1, 3, dtype=torch.bool),
         original_shape=source.shape,
@@ -223,16 +223,16 @@ def test_delta_stale_binding_and_foreign_component_fail_closed() -> None:
         bound,
         torch.ones(1, 2),
         component_ref="arti/target-bank-updater@2",
-        semantics=alpha.ProposalSemantics.DELTA,
+        semantics=mechanisms.ProposalSemantics.DELTA,
     )
     tx = store.begin(snapshot, transaction_id="delta", branch_id="main")
     with pytest.raises(TensorTransactionContractError, match="complete_next_state"):
-        alpha.stage_external_proposal(tx, delta)
+        mechanisms.stage_external_proposal(tx, delta)
 
     with pytest.raises(TensorTransactionContractError, match="bound component"):
         proposal(bound, torch.ones(1, 2), component_ref="arti/formula-fabric@1")
     with pytest.raises(TensorTransactionContractError, match="state fingerprint"):
-        alpha.ExternalTensorProposal(
+        mechanisms.ExternalTensorProposal(
             bound.binding,
             torch.ones(1, 2),
             producer_ref="arti/target-bank-updater@2",
@@ -241,7 +241,7 @@ def test_delta_stale_binding_and_foreign_component_fail_closed() -> None:
         )
 
     first = store.begin(snapshot, transaction_id="first", branch_id="main")
-    alpha.stage_external_proposal(
+    mechanisms.stage_external_proposal(
         first,
         proposal(bound, torch.ones(1, 2), component_ref="arti/target-bank-updater@2"),
     )
@@ -249,7 +249,7 @@ def test_delta_stale_binding_and_foreign_component_fail_closed() -> None:
     current = store.snapshot()
     stale_tx = store.begin(current, transaction_id="stale", branch_id="main")
     with pytest.raises(TensorTransactionContractError, match="transaction snapshot"):
-        alpha.stage_external_proposal(
+        mechanisms.stage_external_proposal(
             stale_tx,
             proposal(bound, torch.ones(1, 2), component_ref="arti/target-bank-updater@2"),
         )
@@ -276,7 +276,7 @@ def test_proposal_owns_value_and_is_immutable() -> None:
     tx = store.begin(store.snapshot(), transaction_id="mutated", branch_id="main")
     item._value.add_(1)
     with pytest.raises(TensorTransactionContractError, match="candidate was mutated"):
-        alpha.stage_external_proposal(tx, item)
+        mechanisms.stage_external_proposal(tx, item)
 
 
 def test_external_proposal_rejects_nonfinite_candidate() -> None:
@@ -308,11 +308,11 @@ def test_read_only_binding_cannot_stage_a_proposal() -> None:
         component_ref="arti/target-bank-updater@2",
         schema_ref="arti/target-bank-state@1",
         role="target-bank",
-        authority=alpha.TensorAuthority.READ_ONLY,
+        authority=mechanisms.TensorAuthority.READ_ONLY,
     )
     tx = store.begin(snapshot, transaction_id="read-only", branch_id="main")
     with pytest.raises(TensorTransactionContractError, match="write authority"):
-        alpha.stage_external_proposal(
+        mechanisms.stage_external_proposal(
             tx,
             proposal(bound, torch.ones(1, 2), component_ref="arti/target-bank-updater@2"),
         )
@@ -321,5 +321,5 @@ def test_read_only_binding_cannot_stage_a_proposal() -> None:
 def test_binding_surface_is_alpha_only() -> None:
     assert not hasattr(arti, "ExternalTensorBinding")
     assert not hasattr(arti.nn, "ExternalTensorBinding")
-    assert alpha.ExternalTensorBinding._runtime_contract_ref == "arti/external-binding@1"
-    assert alpha.FoldAddressBinding._runtime_contract_ref == "arti/fold-address-binding@1"
+    assert mechanisms.ExternalTensorBinding._runtime_contract_ref == "arti/external-binding@1"
+    assert mechanisms.FoldAddressBinding._runtime_contract_ref == "arti/fold-address-binding@1"

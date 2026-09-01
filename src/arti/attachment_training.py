@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 from .attachment_config import ARTIAttachTrainingConfig
-from ._layered_recall import layered_recall_trajectory_loss
+from .fit.scanner import run_model
 
 try:
     from transformers import TrainerCallback as _TrainerCallback
@@ -21,7 +21,7 @@ except ImportError:
     _TrainerCallback = object
 
 
-TRANSFORMERS_ARTIFACT = "model.recall.arti.st"
+TRANSFORMERS_ARTIFACT = "model.arti.st"
 
 
 class ARTICheckpointCallback(_TrainerCallback):
@@ -69,24 +69,16 @@ class ARTITrainingSession:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         resume_from_checkpoint: str | Path | bool | None = None,
-        trainable: str = "all",
     ) -> None:
         self.attachment = attachment
         self.model = attachment._model
         self.config = config
         self.objective = resolve_attachment_objective(objective or config.objective, corruption_probability=config.corruption_probability)
-        if trainable not in {"all", "expert_banks"}:
-            raise ValueError("trainable must be 'all' or 'expert_banks'")
-        if trainable == "expert_banks" and config.engine != "torch":
-            raise ValueError("expert_banks training currently requires the torch engine")
-        self.trainable = trainable
-        self._expert_guard = None
-        self._expert_frozen_snapshot: tuple[tuple[Tensor, Tensor], ...] = ()
-        if trainable == "expert_banks":
-            attachment.freeze_banks()
-            self._expert_guard = attachment.bank_contract("arti.internal.training-guard")
-            self._expert_frozen_snapshot = _capture_expert_frozen_state(self.model, attachment._bundle())
-        parameters = list(attachment.parameters(role=trainable))
+        parameters = list(attachment.parameters())
+        if not parameters:
+            raise ValueError(
+                "attached ARTILayer graph has no trainable parameters; configure a trainable Pulse stage"
+            )
         if optimizer is not None and _optimizer_parameter_ids(optimizer) != {id(parameter) for parameter in parameters}:
             raise ValueError("optimizer parameters must exactly match the selected ARTI trainable role")
         self.optimizer = optimizer or torch.optim.AdamW(parameters, lr=config.learning_rate)
@@ -109,20 +101,12 @@ class ARTITrainingSession:
         target_steps = self.config.steps if steps is None else int(steps)
         if target_steps <= 0:
             raise ValueError("steps must be positive")
-        try:
-            if self.config.engine == "transformers":
-                self._fit_transformers(train_data, target_steps, trainer_kwargs)
-            elif self.config.engine == "accelerate":
-                self._fit_accelerate(train_data, target_steps)
-            else:
-                self._fit_torch(train_data, target_steps)
-            if self._expert_guard is not None:
-                current_guard = self.attachment.bank_contract("arti.internal.training-guard")
-                if current_guard != self._expert_guard:
-                    raise RuntimeError("expert-bank training changed the frozen host or shared Recall reader")
-        except Exception:
-            _restore_frozen_state(self._expert_frozen_snapshot)
-            raise
+        if self.config.engine == "transformers":
+            self._fit_transformers(train_data, target_steps, trainer_kwargs)
+        elif self.config.engine == "accelerate":
+            self._fit_accelerate(train_data, target_steps)
+        else:
+            self._fit_torch(train_data, target_steps)
         saved = None
         if checkpoint_path is not None:
             saved = self.save_checkpoint(checkpoint_path)
@@ -165,7 +149,7 @@ class ARTITrainingSession:
     def _fit_torch(self, train_data: Iterable[Any], steps: int) -> None:
         iterator = _cycling(train_data)
         accumulation = self.config.gradient_accumulation_steps
-        self.model.eval() if self.trainable == "expert_banks" else self.model.train()
+        self.model.train()
         parameter = next(self.model.parameters(), torch.empty(0))
         use_scaler = self.config.mixed_precision == "fp16" and parameter.device.type == "cuda"
         scaler = torch.amp.GradScaler("cuda", enabled=True) if use_scaler else None
@@ -327,16 +311,16 @@ def resolve_attachment_objective(
 ) -> AttachmentObjective:
     if callable(objective):
         return objective
-    if objective == "recall_alignment":
-        return lambda model, batch, attachment: recall_alignment_objective(
+    if objective == "tensor_alignment":
+        return lambda model, batch, attachment: tensor_alignment_objective(
             attachment, batch, corruption_probability=corruption_probability
         )
     if objective == "model_loss":
         return model_loss_objective
-    raise ValueError("objective must be 'recall_alignment', 'model_loss', or a callable")
+    raise ValueError("objective must be 'tensor_alignment', 'model_loss', or a callable")
 
 
-def recall_alignment_objective(
+def tensor_alignment_objective(
     attachment: "ARTIAttachment",
     batch: Any,
     *,
@@ -354,13 +338,54 @@ def recall_alignment_objective(
         mask = None
     if corrupt is None:
         corrupt = _corrupt_floating(clean, corruption_probability)
-    return layered_recall_trajectory_loss(
-        attachment._layered,
-        clean,
-        corrupt,
-        unseen_inputs=unseen,
-        mask=mask,
-    ).loss
+    wrappers = attachment._layers.wrappers
+    previous = {
+        path: (wrapper.enabled, wrapper.capture)
+        for path, wrapper in wrappers.items()
+    }
+    try:
+        for wrapper in wrappers.values():
+            wrapper.enabled = False
+            wrapper.capture = True
+            wrapper.clear_trace()
+        run_model(attachment._model, clean)
+        clean_targets = {
+            path: _required_trace(wrapper.last_pre, path, "clean").detach()
+            for path, wrapper in wrappers.items()
+        }
+        for wrapper in wrappers.values():
+            wrapper.enabled = True
+            wrapper.clear_trace()
+        run_model(attachment._model, corrupt)
+        losses = []
+        for path, wrapper in wrappers.items():
+            post = _required_trace(wrapper.last_post, path, "corrupt")
+            error = (post - clean_targets[path]).square().mean(dim=-1)
+            local_mask = _alignment_mask(error, mask)
+            losses.append(
+                (error * local_mask.to(error.dtype)).sum()
+                / local_mask.sum().clamp_min(1)
+            )
+        loss = torch.stack(losses).mean()
+        if unseen is not None:
+            for wrapper in wrappers.values():
+                wrapper.clear_trace()
+            run_model(attachment._model, unseen)
+            unseen_loss = torch.stack(
+                [
+                    _required_trace(wrapper.last_delta, path, "unseen")
+                    .square()
+                    .mean()
+                    for path, wrapper in wrappers.items()
+                ]
+            ).mean()
+            loss = loss + 0.25 * unseen_loss
+        return loss
+    finally:
+        for path, wrapper in wrappers.items():
+            wrapper.enabled, wrapper.capture = previous[path]
+            if not wrapper.capture:
+                wrapper.clear_trace()
 
 
 def model_loss_objective(model: torch.nn.Module, batch: Any, _attachment: "ARTIAttachment" | None = None) -> Tensor:
@@ -419,24 +444,18 @@ def _optimizer_parameter_ids(optimizer: torch.optim.Optimizer) -> set[int]:
     }
 
 
-def _capture_expert_frozen_state(model: torch.nn.Module, expert: torch.nn.Module) -> tuple[tuple[Tensor, Tensor], ...]:
-    bank_ids = {
-        id(parameter)
-        for name, parameter in expert.named_parameters()
-        if name == "bank" or name.endswith(".bank")
-    }
-    shared_parameter_ids = {id(parameter) for parameter in expert.parameters()} - bank_ids
-    selected: list[Tensor] = []
-    selected.extend(parameter for parameter in model.parameters() if id(parameter) in shared_parameter_ids)
-    selected.extend(model.buffers())
-    unique = {id(tensor): tensor for tensor in selected}
-    return tuple((tensor, tensor.detach().clone()) for tensor in unique.values())
+def _required_trace(value: Tensor | None, path: str, kind: str) -> Tensor:
+    if value is None:
+        raise RuntimeError(f"layer {path!r} did not capture a {kind} tensor")
+    return value
 
 
-def _restore_frozen_state(snapshot: tuple[tuple[Tensor, Tensor], ...]) -> None:
-    with torch.no_grad():
-        for tensor, value in snapshot:
-            tensor.copy_(value.to(tensor))
+def _alignment_mask(error: Tensor, mask: Tensor | None) -> Tensor:
+    if mask is None:
+        return torch.ones_like(error, dtype=torch.bool)
+    if tuple(mask.shape) != tuple(error.shape):
+        raise ValueError(f"mask must have shape {tuple(error.shape)}")
+    return mask.to(device=error.device, dtype=torch.bool)
 
 
 __all__ = [
@@ -445,6 +464,6 @@ __all__ = [
     "ARTICheckpointCallback",
     "AttachmentObjective",
     "model_loss_objective",
-    "recall_alignment_objective",
+    "tensor_alignment_objective",
     "resolve_attachment_objective",
 ]

@@ -227,6 +227,7 @@ class ARTIResidualBlock(nn.Module):
                 fallback_context=fallback_context,
                 fallback_slots=fallback_slots,
             )
+            self.layer._component_reference = "arti/classic-layer@1"
             self.out = (
                 ARTIHostBridge(
                     resolved_hidden_dim,
@@ -264,6 +265,7 @@ class ARTISequenceBlock(nn.Module):
     def __init__(self, dim: int, coord_dim: int = 0, hidden_dim: int | None = None, dropout: float = 0.0) -> None:
         super().__init__()
         self.layer = ARTILayer(input_dim=dim, hidden_dim=hidden_dim, coord_dim=coord_dim, dropout=dropout)
+        self.layer._component_reference = "arti/classic-layer@1"
 
     def forward(self, x: Tensor, **kwargs: Tensor) -> ARTIOutput:
         return self.layer(x, **kwargs)
@@ -275,6 +277,7 @@ class ARTIPooledBlock(nn.Module):
     def __init__(self, dim: int, coord_dim: int = 0, hidden_dim: int | None = None, dropout: float = 0.0) -> None:
         super().__init__()
         self.layer = ARTILayer(input_dim=dim, hidden_dim=hidden_dim, coord_dim=coord_dim, dropout=dropout)
+        self.layer._component_reference = "arti/classic-layer@1"
 
     def forward(self, x: Tensor, **kwargs: Tensor) -> Tensor:
         return self.layer(x, **kwargs).pooled

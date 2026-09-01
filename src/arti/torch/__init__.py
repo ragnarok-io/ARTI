@@ -6,9 +6,10 @@ explicit and to leave room for future ``arti.jax`` modules.
 """
 
 from ..blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
-from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTIBankSet, ARTILayerInfo, discover_layers
+from ..attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTILayerInfo, discover_layers
+from ..attachment_layer import AttachedARTILayerConfig, AttachedARTILayerSpec
 from ..attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
-from ..attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, recall_alignment_objective, resolve_attachment_objective
+from ..attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, resolve_attachment_objective, tensor_alignment_objective
 from ..attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from ..config import ARTIConfig
 from ..component_registry import (
@@ -57,11 +58,11 @@ from ..functional import (
     masked_softmax,
     restore_input_rank,
 )
+from ..arti_layer import ARTILayer
 from ..layers import (
     ARTIDynamicStateLayer,
     ARTILatentRecallField,
     ARTILatentTensorLayer,
-    ARTILayer,
     ARTIPhaseMixer,
     ARTIVirtualInterfaceMixer,
 )
@@ -149,7 +150,8 @@ __all__ = [
     "ARTIAttachTrainingConfig",
     "ARTIAttachment",
     "ARTIAttachmentSummary",
-    "ARTIBankSet",
+    "AttachedARTILayerConfig",
+    "AttachedARTILayerSpec",
     "ARTILayerInfo",
     "discover_layers",
     "load_attach_config",
@@ -164,7 +166,7 @@ __all__ = [
     "ARTIHubSaveResult",
     "save_attachment_pretrained",
     "load_attachment_pretrained",
-    "recall_alignment_objective",
+    "tensor_alignment_objective",
     "model_loss_objective",
     "resolve_attachment_objective",
     "ARTIConfig",

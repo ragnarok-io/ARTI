@@ -5,7 +5,7 @@ import torch
 from unittest.mock import patch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 from arti.recall_formula import FactorSpec, RecallFormulaContract
 from arti.recall_experts import canonical_tensor_state_sha256
 
@@ -62,7 +62,7 @@ class _ProgramTaggedFormula(torch.nn.Module):
 
 
 def test_refine_training_components_are_alpha_runtime_contracts() -> None:
-    trainer = alpha.RefineStepTraining(max_snapshot_staleness=2)
+    trainer = mechanisms.RefineStepTraining(max_snapshot_staleness=2)
     recall = arti.Recall(4, 8, breadth=1, activation="none")
     rollout = trainer.capture(
         recall,
@@ -84,7 +84,7 @@ def test_refine_training_components_are_alpha_runtime_contracts() -> None:
 def test_capture_flattens_detached_adjacent_states_and_masks() -> None:
     torch.manual_seed(3101)
     recall = arti.Recall(4, 8, breadth=1, activation="none")
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     x = torch.randn(2, 3, 4, requires_grad=True)
     mask = torch.tensor([[True, True, False], [True, False, False]])
 
@@ -121,8 +121,8 @@ def test_capture_requires_fixed_depth_sampling() -> None:
         relative_tolerance=1e-4,
     )
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="fixed depth"):
-        alpha.RefineStepTraining().capture(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="fixed depth"):
+        mechanisms.RefineStepTraining().capture(
             recall,
             torch.randn(1, 2, 4),
             policy=adaptive,
@@ -132,8 +132,8 @@ def test_capture_requires_fixed_depth_sampling() -> None:
 def test_capture_rejects_stochastic_recall_until_rng_identity_is_supported() -> None:
     recall = arti.Recall(4, 8)
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="deterministic"):
-        alpha.RefineStepTraining().capture(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="deterministic"):
+        mechanisms.RefineStepTraining().capture(
             recall,
             torch.randn(1, 2, 4),
             policy=_policy(2),
@@ -143,7 +143,7 @@ def test_capture_rejects_stochastic_recall_until_rng_identity_is_supported() -> 
 def test_replay_is_one_step_permutation_equivalent_and_freshly_queried() -> None:
     torch.manual_seed(3102)
     recall = arti.Recall(4, 12, breadth=1, activation="none")
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(
         recall,
         torch.randn(2, 2, 4),
@@ -180,9 +180,9 @@ def test_replay_is_one_step_permutation_equivalent_and_freshly_queried() -> None
 def test_query_is_fixed_excluded_from_optimizer_and_unchanged_by_training() -> None:
     torch.manual_seed(3103)
     recall = arti.Recall(4, 8, breadth=1, activation="none")
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     forbidden = torch.optim.SGD(recall.parameters(), lr=0.01)
-    with pytest.raises(alpha.RefineTrainingContractError, match="optimizer"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="optimizer"):
         trainer.assert_optimizer_contract(recall, forbidden)
 
     optimizer = torch.optim.SGD([recall.state.recall.bank], lr=0.05)
@@ -212,7 +212,7 @@ def test_real_downstream_classification_loss_trains_bank_not_query() -> None:
     task_head = torch.nn.Linear(4, 3, bias=False)
     task_head.requires_grad_(False)
     labels = torch.tensor([0, 2])
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(recall, torch.randn(2, 2, 4), policy=_policy(3))
     result = trainer.replay(recall, rollout)
     logits = task_head(result.value.mean(dim=1))
@@ -228,9 +228,9 @@ def test_real_downstream_classification_loss_trains_bank_not_query() -> None:
 
 
 def test_loss_is_balanced_per_trajectory_branch_and_source_sample() -> None:
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     valid = torch.ones(8, 1, dtype=torch.bool)
-    result = alpha.RefineStepTrainingResult(
+    result = mechanisms.RefineStepTrainingResult(
         value=torch.zeros(8, 1, 2),
         valid_token_mask=valid,
         trajectory_id=torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]),
@@ -256,8 +256,8 @@ def test_loss_is_balanced_per_trajectory_branch_and_source_sample() -> None:
 
 
 def test_loss_rejects_mixed_sample_identity_inside_one_trajectory() -> None:
-    with pytest.raises(alpha.RefineTrainingContractError, match="canonical sample"):
-        alpha.RefineStepTrainingResult(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="canonical sample"):
+        mechanisms.RefineStepTrainingResult(
             value=torch.zeros(2, 1, 2),
             valid_token_mask=torch.ones(2, 1, dtype=torch.bool),
             trajectory_id=torch.zeros(2, dtype=torch.int64),
@@ -273,7 +273,7 @@ def test_loss_rejects_mixed_sample_identity_inside_one_trajectory() -> None:
 
 
 def test_loss_rejects_partial_surviving_branch_sets() -> None:
-    result = alpha.RefineStepTrainingResult(
+    result = mechanisms.RefineStepTrainingResult(
         value=torch.zeros(2, 1, 2),
         valid_token_mask=torch.tensor([[True], [False]]),
         trajectory_id=torch.tensor([0, 1]),
@@ -287,12 +287,12 @@ def test_loss_rejects_partial_surviving_branch_sets() -> None:
         weights=torch.empty(2, 1, 0),
     )
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="partial set"):
-        alpha.RefineStepTraining().reduce_task_loss(torch.ones(2), result)
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="partial set"):
+        mechanisms.RefineStepTraining().reduce_task_loss(torch.ones(2), result)
 
 
 def test_loss_masks_nonfinite_padding_and_rejects_nonfinite_live_values() -> None:
-    result = alpha.RefineStepTrainingResult(
+    result = mechanisms.RefineStepTrainingResult(
         value=torch.zeros(1, 2, 2),
         valid_token_mask=torch.tensor([[True, False]]),
         trajectory_id=torch.zeros(1, dtype=torch.int64),
@@ -306,17 +306,17 @@ def test_loss_masks_nonfinite_padding_and_rejects_nonfinite_live_values() -> Non
         weights=torch.empty(1, 2, 0),
     )
     padded_nan = torch.tensor([[1.0, float("nan")]])
-    loss = alpha.RefineStepTraining().reduce_task_loss(padded_nan, result)
+    loss = mechanisms.RefineStepTraining().reduce_task_loss(padded_nan, result)
     torch.testing.assert_close(loss.total, torch.tensor(1.0))
 
     live_nan = padded_nan.clone()
     live_nan[0, 0] = float("nan")
-    with pytest.raises(alpha.RefineTrainingContractError, match="non-finite"):
-        alpha.RefineStepTraining().reduce_task_loss(live_nan, result)
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="non-finite"):
+        mechanisms.RefineStepTraining().reduce_task_loss(live_nan, result)
 
 
 def test_loss_rejects_partial_depth_and_masks_invalid_row_nan_before_reduction() -> None:
-    result = alpha.RefineStepTrainingResult(
+    result = mechanisms.RefineStepTrainingResult(
         value=torch.zeros(2, 1, 2),
         valid_token_mask=torch.tensor([[True], [False]]),
         trajectory_id=torch.zeros(2, dtype=torch.int64),
@@ -330,14 +330,14 @@ def test_loss_rejects_partial_depth_and_masks_invalid_row_nan_before_reduction()
         weights=torch.empty(2, 1, 0),
     )
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="partial set"):
-        alpha.RefineStepTraining().reduce_task_loss(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="partial set"):
+        mechanisms.RefineStepTraining().reduce_task_loss(
             torch.tensor([1.0, float("nan")]), result
         )
 
 
 def test_loss_gives_a_fully_inactive_source_sample_zero_weight() -> None:
-    result = alpha.RefineStepTrainingResult(
+    result = mechanisms.RefineStepTrainingResult(
         value=torch.zeros(2, 1, 2),
         valid_token_mask=torch.tensor([[True], [False]]),
         trajectory_id=torch.tensor([0, 1]),
@@ -351,7 +351,7 @@ def test_loss_gives_a_fully_inactive_source_sample_zero_weight() -> None:
         weights=torch.empty(2, 1, 0),
     )
 
-    loss = alpha.RefineStepTraining().reduce_task_loss(
+    loss = mechanisms.RefineStepTraining().reduce_task_loss(
         torch.tensor([1.0, float("nan")]), result
     )
     torch.testing.assert_close(loss.total, torch.tensor(1.0))
@@ -360,7 +360,7 @@ def test_loss_gives_a_fully_inactive_source_sample_zero_weight() -> None:
 
 def test_snapshot_staleness_and_query_mutation_fail_closed() -> None:
     recall = arti.Recall(4, 8, breadth=1, activation="none")
-    trainer = alpha.RefineStepTraining(max_snapshot_staleness=1)
+    trainer = mechanisms.RefineStepTraining(max_snapshot_staleness=1)
     rollout = trainer.capture(
         recall,
         torch.randn(1, 2, 4),
@@ -369,12 +369,12 @@ def test_snapshot_staleness_and_query_mutation_fail_closed() -> None:
     )
     with torch.no_grad():
         recall.state.recall.bank.add_(0.01)
-    with pytest.raises(alpha.RefineTrainingContractError, match="same-generation"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="same-generation"):
         trainer.replay(recall, rollout, current_generation=4)
     trainer.replay(recall, rollout, current_generation=5)
     with torch.no_grad():
         recall.state.recall.query.weight.add_(0.01)
-    with pytest.raises(alpha.RefineTrainingContractError, match="fixed Query changed"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="fixed Query changed"):
         trainer.replay(recall, rollout, current_generation=5)
 
 
@@ -387,7 +387,7 @@ def test_k_wide_replay_rejects_cross_generation_candidate_identity() -> None:
         breadth_mode="independent",
         activation="none",
     )
-    trainer = alpha.RefineStepTraining(max_snapshot_staleness=1)
+    trainer = mechanisms.RefineStepTraining(max_snapshot_staleness=1)
     rollout = trainer.capture(
         recall,
         torch.randn(1, 2, 4),
@@ -396,7 +396,7 @@ def test_k_wide_replay_rejects_cross_generation_candidate_identity() -> None:
         snapshot_generation=7,
     )
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="exact capture generation"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="exact capture generation"):
         trainer.replay(recall, rollout, current_generation=8)
 
 
@@ -407,22 +407,22 @@ def test_formula_program_and_execution_mode_are_snapshot_bound() -> None:
         formula=_ProgramTaggedFormula("a" * 64),
         activation="none",
     )
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(recall, torch.randn(1, 2, 4), policy=_policy(2))
     recall.state.recall.formula.program = _Program("b" * 64)
-    with pytest.raises(alpha.RefineTrainingContractError, match="execution configuration"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="execution configuration"):
         trainer.replay(recall, rollout)
 
     recall = arti.Recall(4, 8, activation="none")
     rollout = trainer.capture(recall, torch.randn(1, 2, 4), policy=_policy(2))
     recall.eval()
-    with pytest.raises(alpha.RefineTrainingContractError, match="execution configuration"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="execution configuration"):
         trainer.replay(recall, rollout)
 
 
 def test_nonfinite_and_uncommitted_transitions_are_never_supervised() -> None:
     recall = arti.Recall(4, 8, formula=_NonfiniteFormula(), activation="none")
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(
         recall,
         torch.randn(1, 2, 4),
@@ -434,7 +434,7 @@ def test_nonfinite_and_uncommitted_transitions_are_never_supervised() -> None:
     assert not rollout.valid_token_mask.any()
     result = trainer.replay(recall, rollout)
     torch.testing.assert_close(result.value, rollout.hidden_state)
-    with pytest.raises(alpha.RefineTrainingContractError, match="no live"):
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="no live"):
         trainer.reduce_task_loss(
             torch.ones(result.value.shape[:2]),
             result,
@@ -450,7 +450,7 @@ def test_nonfinite_transition_is_excluded_even_when_runtime_commits_it() -> None
         relative_tolerance=1e-12,
         check_finite=False,
     )
-    rollout = alpha.RefineStepTraining().capture(
+    rollout = mechanisms.RefineStepTraining().capture(
         recall,
         torch.randn(1, 2, 4),
         policy=policy,
@@ -466,8 +466,8 @@ def test_capture_rejects_trainable_query() -> None:
     recall = arti.Recall(4, 8, breadth=1)
     recall.state.recall.query.weight.requires_grad_(True)
 
-    with pytest.raises(alpha.RefineTrainingContractError, match="fixed Query"):
-        alpha.RefineStepTraining().capture(
+    with pytest.raises(mechanisms.RefineTrainingContractError, match="fixed Query"):
+        mechanisms.RefineStepTraining().capture(
             recall,
             torch.randn(1, 2, 4),
             policy=_policy(2),
@@ -484,7 +484,7 @@ def test_k_wide_rollout_preserves_branch_lineage_and_requeries() -> None:
         breadth_mode="independent",
         activation="none",
     )
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(
         recall,
         torch.randn(2, 2, 4),
@@ -520,7 +520,7 @@ def test_k_wide_rollout_preserves_branch_lineage_and_requeries() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_refine_step_training_cuda_backward() -> None:
     recall = arti.Recall(8, 16, breadth=1, activation="none").cuda()
-    trainer = alpha.RefineStepTraining()
+    trainer = mechanisms.RefineStepTraining()
     rollout = trainer.capture(
         recall,
         torch.randn(2, 3, 8, device="cuda"),

@@ -4,31 +4,31 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
-def _program(dim: int = 2) -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def _program(dim: int = 2) -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=4,
         feature_dim=dim,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
         domain="formula-commit-blend",
     )
 
 
-def _route(value: torch.Tensor) -> alpha.FormulaRoutePlan:
+def _route(value: torch.Tensor) -> mechanisms.FormulaRoutePlan:
     weights = value.new_zeros(value.shape[0], 1, 1, 2, 4)
     weights[:, 0, 0, 0, 0] = 1
     weights[:, 0, 0, 1, 1] = 1
     enabled = torch.ones(
         value.shape[0], 1, 1, dtype=torch.bool, device=value.device
     )
-    return alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    return mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
-def _state(value: torch.Tensor) -> alpha.FormulaArenaState:
+def _state(value: torch.Tensor) -> mechanisms.FormulaArenaState:
     mask = torch.ones(value.shape[:2], dtype=torch.bool, device=value.device)
-    return alpha.FormulaArenaState.from_tensor(
+    return mechanisms.FormulaArenaState.from_tensor(
         value,
         mask,
         capacity=4,
@@ -36,8 +36,8 @@ def _state(value: torch.Tensor) -> alpha.FormulaArenaState:
     )
 
 
-def _blend(dim: int = 2) -> alpha.FormulaCommitBlend:
-    return alpha.FormulaCommitBlend(alpha.FormulaFabric(_program(dim)))
+def _blend(dim: int = 2) -> mechanisms.FormulaCommitBlend:
+    return mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(_program(dim)))
 
 
 def test_zero_and_one_commit_weights_match_boundaries() -> None:
@@ -122,10 +122,10 @@ def test_non_tensor_commit_weights_fail_with_contract_error() -> None:
 
 
 def test_formula_commit_blend_runs_inside_pulse() -> None:
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    compute = alpha.FormulaFabricCompute(_blend(), active_count=3)
-    pulse = alpha.AdaptivePulse(fold=fold, selective_compute=compute, unfold=unfold)
+    compute = mechanisms.FormulaFabricCompute(_blend(), active_count=3)
+    pulse = mechanisms.AdaptivePulse(fold=fold, selective_compute=compute, unfold=unfold)
     value = torch.tensor([[[1.0, 2.0], [3.0, 5.0], [9.0, 11.0]]])
 
     result = pulse.run_tensor(
@@ -139,22 +139,22 @@ def test_formula_commit_blend_runs_inside_pulse() -> None:
         result.value[:, 2],
         0.5 * value[:, 2] + 0.5 * (value[:, 0] + value[:, 1]),
     )
-    assert isinstance(result.diagnostics.compute, alpha.FormulaCommitBlendTrace)
+    assert isinstance(result.diagnostics.compute, mechanisms.FormulaCommitBlendTrace)
 
 
 def test_formula_commit_blend_counts_factors_in_operation_budget() -> None:
-    limits = alpha.ContractLimits(max_operation_bytes=504)
-    plain = alpha.FormulaFabricCompute(
-        alpha.FormulaFabric(_program(), limits=limits),
+    limits = mechanisms.ContractLimits(max_operation_bytes=504)
+    plain = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaFabric(_program(), limits=limits),
         active_count=3,
     )
-    blended = alpha.FormulaFabricCompute(
-        alpha.FormulaCommitBlend(alpha.FormulaFabric(_program(), limits=limits)),
+    blended = mechanisms.FormulaFabricCompute(
+        mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(_program(), limits=limits)),
         active_count=3,
     )
     value = torch.tensor([[[1.0, 2.0], [3.0, 5.0], [9.0, 11.0]]])
     support = torch.ones(1, 3, dtype=torch.bool)
-    workspace = alpha.ActiveWorkspace(
+    workspace = mechanisms.ActiveWorkspace(
         value,
         support,
         support,
@@ -171,15 +171,15 @@ def test_formula_commit_blend_counts_factors_in_operation_budget() -> None:
 
 
 def test_direct_formula_commit_blend_counts_factors_in_operation_budget() -> None:
-    limits = alpha.ContractLimits(max_operation_bytes=504)
-    fabric = alpha.FormulaFabric(_program(), limits=limits)
+    limits = mechanisms.ContractLimits(max_operation_bytes=504)
+    fabric = mechanisms.FormulaFabric(_program(), limits=limits)
     value = torch.tensor([[[1.0, 2.0], [3.0, 5.0], [9.0, 11.0]]])
     state = _state(value)
     route = _route(value)
 
     fabric(state, route)
     with pytest.raises(ValueError, match="max_operation_bytes"):
-        alpha.FormulaCommitBlend(fabric)(
+        mechanisms.FormulaCommitBlend(fabric)(
             state,
             route,
             value.new_full((1, 1, 1), 0.5),
@@ -190,7 +190,7 @@ def test_bank_routed_formula_commit_blend_uses_compute_factors() -> None:
     program = _program()
     policies = []
     for seed in (31, 32):
-        bank = alpha.TypedTopologyOperandBank(
+        bank = mechanisms.TypedTopologyOperandBank(
             slots=4,
             key_dim=4,
             factor_dim=1,
@@ -199,7 +199,7 @@ def test_bank_routed_formula_commit_blend_uses_compute_factors() -> None:
             bank_id=f"commit-blend-{seed}",
         )
         policies.append(
-            alpha.TypedBankFormulaTopologyPolicy(
+            mechanisms.TypedBankFormulaTopologyPolicy(
                 2,
                 [bank],
                 key_dim=4,
@@ -209,19 +209,19 @@ def test_bank_routed_formula_commit_blend_uses_compute_factors() -> None:
         )
     candidate = torch.zeros(1, 1, 2, 4, dtype=torch.bool)
     candidate[..., :2] = True
-    route_source = alpha.BankFormulaRouteSource(
+    route_source = mechanisms.BankFormulaRouteSource(
         program,
         policies,
         active_count=3,
         candidate_mask=candidate,
     )
-    routed = alpha.RoutedFormulaFabricCompute(
-        alpha.FormulaFabricCompute(_blend(), active_count=3),
+    routed = mechanisms.RoutedFormulaFabricCompute(
+        mechanisms.FormulaFabricCompute(_blend(), active_count=3),
         route_source,
     )
     value = torch.tensor([[[1.0, 2.0], [3.0, 5.0], [9.0, 11.0]]])
     support = torch.ones(1, 3, dtype=torch.bool)
-    workspace = alpha.ActiveWorkspace(
+    workspace = mechanisms.ActiveWorkspace(
         value,
         support,
         support,
@@ -236,17 +236,17 @@ def test_bank_routed_formula_commit_blend_uses_compute_factors() -> None:
 
     assert updated.value.shape == value.shape
     assert info.route_origin == "bank-formula"
-    assert isinstance(info.trace, alpha.FormulaCommitBlendTrace)
+    assert isinstance(info.trace, mechanisms.FormulaCommitBlendTrace)
 
 
 def test_formula_commit_blend_arti_st_round_trip(tmp_path) -> None:
-    source_topology = alpha.ReversibleTopology(active_count=3)
+    source_topology = mechanisms.ReversibleTopology(active_count=3)
     source_fold, source_unfold = source_topology.operations()
-    source = alpha.AdaptivePulse(
+    source = mechanisms.AdaptivePulse(
         fold=source_fold,
-        selective_compute=alpha.FormulaFabricCompute(_blend(), active_count=3),
+        selective_compute=mechanisms.FormulaFabricCompute(_blend(), active_count=3),
         unfold=source_unfold,
-        aggregate=alpha.ReunionAggregate(alpha.SoftFoldAggregate(k=3, dim=2)),
+        aggregate=mechanisms.ReunionAggregate(mechanisms.SoftFoldAggregate(k=3, dim=2)),
     ).eval()
     value = torch.randn(2, 3, 2)
     route = _route(value)
@@ -259,13 +259,13 @@ def test_formula_commit_blend_arti_st_round_trip(tmp_path) -> None:
     ).value
 
     saved = arti.save(source, tmp_path / "formula-commit-blend.arti.st")
-    target_topology = alpha.ReversibleTopology(active_count=3)
+    target_topology = mechanisms.ReversibleTopology(active_count=3)
     target_fold, target_unfold = target_topology.operations()
-    target = alpha.AdaptivePulse(
+    target = mechanisms.AdaptivePulse(
         fold=target_fold,
-        selective_compute=alpha.FormulaFabricCompute(_blend(), active_count=3),
+        selective_compute=mechanisms.FormulaFabricCompute(_blend(), active_count=3),
         unfold=target_unfold,
-        aggregate=alpha.ReunionAggregate(alpha.SoftFoldAggregate(k=3, dim=2)),
+        aggregate=mechanisms.ReunionAggregate(mechanisms.SoftFoldAggregate(k=3, dim=2)),
     ).eval()
     loaded = arti.load(saved.weights_path, model=target)
     actual = target.run_tensor(
@@ -286,11 +286,11 @@ def test_formula_commit_blend_arti_st_round_trip(tmp_path) -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_formula_commit_blend_pulse_cuda_fullgraph(dtype: torch.dtype) -> None:
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     fold, unfold = topology.operations()
-    pulse = alpha.AdaptivePulse(
+    pulse = mechanisms.AdaptivePulse(
         fold=fold,
-        selective_compute=alpha.FormulaFabricCompute(_blend(), active_count=3),
+        selective_compute=mechanisms.FormulaFabricCompute(_blend(), active_count=3),
         unfold=unfold,
     ).cuda().to(dtype).train()
     compiled = torch.compile(pulse, backend="inductor", fullgraph=True)
@@ -301,18 +301,18 @@ def test_formula_commit_blend_pulse_cuda_fullgraph(dtype: torch.dtype) -> None:
     intervened = torch.tensor(
         [[False, False, True], [False, False, True]], device="cuda"
     )
-    domain = alpha.SupportDomain.for_tensor(
+    domain = mechanisms.SupportDomain.for_tensor(
         mask,
         domain_id="formula-commit-blend",
         owner_ref="arti/pulse@2",
         partition_id="world",
         transition_id="compiled",
     )
-    world = alpha.TensorEnvelope(alpha.EnvelopeRef.WORLD, value, mask, domain)
-    supports = alpha.PulseSupports(
-        alpha.SupportMask(alpha.SupportKind.OBSERVED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.EXPOSED, mask, domain),
-        alpha.SupportMask(alpha.SupportKind.INTERVENED, intervened, domain),
+    world = mechanisms.TensorEnvelope(mechanisms.EnvelopeRef.WORLD, value, mask, domain)
+    supports = mechanisms.PulseSupports(
+        mechanisms.SupportMask(mechanisms.SupportKind.OBSERVED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.EXPOSED, mask, domain),
+        mechanisms.SupportMask(mechanisms.SupportKind.INTERVENED, intervened, domain),
         validity=mask,
     )
 

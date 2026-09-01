@@ -3,40 +3,40 @@ from __future__ import annotations
 import pytest
 import torch
 
-from arti import alpha
+from arti import mechanisms
 
 
-def _program(dim: int) -> alpha.FormulaFabricProgram:
-    return alpha.FormulaFabricProgram(
+def _program(dim: int) -> mechanisms.FormulaFabricProgram:
+    return mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=dim,
         steps=(
-            (alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 0),),
+            (mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 0),),
         ),
         domain="topology-active",
     )
 
 
-def _route(value: torch.Tensor) -> alpha.FormulaRoutePlan:
+def _route(value: torch.Tensor) -> mechanisms.FormulaRoutePlan:
     weights = value.new_zeros((value.shape[0], 1, 1, 2, 3))
     weights[:, 0, 0, 0, 1] = 1
     weights[:, 0, 0, 1, 2] = 1
     enabled = torch.ones(
         value.shape[0], 1, 1, dtype=torch.bool, device=value.device
     )
-    return alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    return mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
 
 
 def _run(value: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    topology = alpha.ReversibleTopology(active_count=3)
+    topology = mechanisms.ReversibleTopology(active_count=3)
     folded = topology.fold(value, mask)
-    arena = alpha.FormulaArenaState(
+    arena = mechanisms.FormulaArenaState(
         folded.active,
         folded.active_mask,
         torch.zeros_like(folded.active_mask, dtype=torch.int64),
         "topology-active",
     )
-    fabric = alpha.FormulaFabric(_program(value.shape[-1])).to(value.device)
+    fabric = mechanisms.FormulaFabric(_program(value.shape[-1])).to(value.device)
     result = fabric(arena, _route(arena.value))
     restored = topology.unfold(folded.replace(active=result.state.value))
     return restored.value, folded.record.active_index

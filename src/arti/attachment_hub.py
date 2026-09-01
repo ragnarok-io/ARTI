@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 HUB_MANIFEST = "arti-hub.json"
 HUB_FORMAT = "arti.hf.bundle"
 HUB_VERSION = 1
-DEFAULT_ARTIFACT = "model.recall.arti.st"
+DEFAULT_ARTIFACT = "model.arti.st"
 DEFAULT_CONFIG = "arti-attach.toml"
 DEFAULT_LOCK = "arti.attach.lock.json"
 BASE_WEIGHT_NAMES = {
@@ -99,7 +99,7 @@ def save_attachment_pretrained(
     else:
         from .attachment_config import ARTIAttachConfig
 
-        write_attach_config(config_path, ARTIAttachConfig(recall=_portable_recall(attachment.config)))
+        write_attach_config(config_path, ARTIAttachConfig(layer=_portable_layer(attachment.config)))
     lock_path = attachment.write_lock(target / DEFAULT_LOCK)
     manifest = {
         "format": HUB_FORMAT,
@@ -121,6 +121,7 @@ def load_attachment_pretrained(
     directory: str | Path,
     *,
     model: nn.Module | None = None,
+    layer: Any | None = None,
     map_location: str | torch.device | None = None,
     model_kwargs: Mapping[str, Any] | None = None,
 ) -> nn.Module:
@@ -144,7 +145,7 @@ def load_attachment_pretrained(
     from .attachment import ARTI
 
     artifact = target / manifest["artifact"]["file"]
-    loaded = ARTI.load(model, artifact, map_location=map_location)
+    loaded = ARTI.load(model, artifact, layer=layer, map_location=map_location)
     loaded.arti._pretrained_directory = target.resolve()
     loaded.arti._resume_artifact = artifact.resolve()
     return loaded
@@ -152,25 +153,33 @@ def load_attachment_pretrained(
 
 def attachment_doctor(attachment: "ARTIAttachment") -> ARTIDoctorReport:
     issues: list[str] = []
-    wrappers = attachment._layered.wrappers
+    wrappers = attachment._layers.wrappers
     if tuple(wrappers) != attachment.paths:
         issues.append("resolved layer paths no longer match attached wrappers")
     devices = tuple(sorted({str(parameter.device) for parameter in attachment.parameters()}))
     dtypes = tuple(sorted({str(parameter.dtype) for parameter in attachment.parameters()}))
     if len(devices) > 1:
-        issues.append("Recall parameters span multiple devices")
+        issues.append("ARTILayer parameters span multiple devices")
     if len(dtypes) > 1:
-        issues.append("Recall parameters use mixed dtypes")
-    recall_ids = {id(parameter) for parameter in attachment.parameters()}
-    backbone = [parameter for parameter in attachment._model.parameters() if id(parameter) not in recall_ids]
+        issues.append("ARTILayer parameters use mixed dtypes")
+    layer_parameter_ids = {id(parameter) for parameter in attachment.parameters()}
+    backbone = [
+        parameter
+        for parameter in attachment._model.parameters()
+        if id(parameter) not in layer_parameter_ids
+    ]
     frozen = all(not parameter.requires_grad for parameter in backbone)
     if attachment.config.freeze_backbone and not frozen:
         issues.append("configuration freezes the backbone but trainable backbone parameters were found")
     for path, wrapper in wrappers.items():
         reference = next((parameter for parameter in wrapper.base.parameters() if parameter.is_floating_point()), None)
-        recall = next(wrapper.recall.parameters(), None)
-        if reference is not None and recall is not None and reference.device != recall.device:
-            issues.append(f"layer {path} base and Recall devices differ")
+        layer_parameter = next(wrapper.layer.parameters(), None)
+        if (
+            reference is not None
+            and layer_parameter is not None
+            and reference.device != layer_parameter.device
+        ):
+            issues.append(f"layer {path} base and ARTILayer devices differ")
     model = attachment._model
     distributed = _distributed_wrapper(model)
     gradient_checkpointing = bool(getattr(model, "is_gradient_checkpointing", False))
@@ -215,15 +224,26 @@ def _infer_base_source(model: nn.Module) -> str:
     return "" if source in {None, ""} else str(source)
 
 
-def _portable_recall(config: Any) -> dict[str, Any]:
-    return {
+def _portable_layer(config: Any) -> dict[str, Any]:
+    result = {
         "layers": list(config.paths),
-        "rank": {layer.path: layer.rank for layer in config.layers},
-        "slots": {layer.path: layer.slots for layer in config.layers},
-        "half": {layer.path: layer.use_half for layer in config.layers},
-        "recognition": {layer.path: layer.recognition_mode for layer in config.layers},
         "freeze_backbone": config.freeze_backbone,
     }
+    batch_axis = {
+        layer.path: layer.batch_axis
+        for layer in config.layers
+        if layer.batch_axis is not None
+    }
+    feature_axis = {
+        layer.path: layer.feature_axis
+        for layer in config.layers
+        if layer.feature_axis is not None
+    }
+    if batch_axis:
+        result["batch_axis"] = batch_axis
+    if feature_axis:
+        result["feature_axis"] = feature_axis
+    return result
 
 
 def _reject_base_weights(directory: Path) -> None:

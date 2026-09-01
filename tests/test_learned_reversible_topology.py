@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import arti
-from arti import alpha
+from arti import mechanisms
 
 
 def _markers(batch: int = 2, length: int = 8, dim: int = 4) -> torch.Tensor:
@@ -16,14 +16,14 @@ def _markers(batch: int = 2, length: int = 8, dim: int = 4) -> torch.Tensor:
 def _permutation(
     policy: torch.nn.Module, x: torch.Tensor, mask: torch.Tensor, active_count: int
 ) -> torch.Tensor:
-    return alpha.ReversibleTopology(active_count, policy=policy).fold(
+    return mechanisms.ReversibleTopology(active_count, policy=policy).fold(
         x, mask
     ).record.permutation
 
 
 def test_stable_priority_partition_is_valid_first_and_stable() -> None:
-    operator = alpha.StablePriorityPartition()
-    action = alpha.TopologyAction(torch.tensor([[1.0, 3.0, 3.0, 100.0]]))
+    operator = mechanisms.StablePriorityPartition()
+    action = mechanisms.TopologyAction(torch.tensor([[1.0, 3.0, 3.0, 100.0]]))
     mask = torch.tensor([[True, True, True, False]])
 
     permutation = operator(action, mask)
@@ -34,8 +34,8 @@ def test_stable_priority_partition_is_valid_first_and_stable() -> None:
 def test_surrogate_gradient_promotes_more_useful_instances() -> None:
     scores = torch.zeros(1, 4, requires_grad=True)
     values = torch.tensor([[[4.0], [3.0], [2.0], [1.0]]])
-    action = alpha.TopologyAction(scores)
-    assignment = alpha.SoftTopKTopologySurrogate()(
+    action = mechanisms.TopologyAction(scores)
+    assignment = mechanisms.SoftTopKTopologySurrogate()(
         action, torch.ones(1, 4, dtype=torch.bool), 2
     )
     soft_active = torch.einsum("bkn,bnd->bkd", assignment, values)
@@ -53,8 +53,8 @@ def test_surrogate_swap_direction_agrees_with_hard_top_k() -> None:
     scores = torch.randn(2048, 16, generator=generator, requires_grad=True)
     utility = torch.randn(2048, 16, generator=generator)
     mask = torch.ones_like(scores, dtype=torch.bool)
-    assignment = alpha.SoftTopKTopologySurrogate()(
-        alpha.TopologyAction(scores), mask, 4
+    assignment = mechanisms.SoftTopKTopologySurrogate()(
+        mechanisms.TopologyAction(scores), mask, 4
     )
     objective = torch.einsum("bkn,bn->bk", assignment, utility).sum(-1)
     gradient = torch.autograd.grad(-objective.mean(), scores)[0]
@@ -72,10 +72,10 @@ def test_surrogate_swap_direction_agrees_with_hard_top_k() -> None:
 
 
 def test_surrogate_zeroes_ranks_beyond_the_valid_instance_count() -> None:
-    action = alpha.TopologyAction(torch.tensor([[4.0, 3.0, 2.0, 1.0]]))
+    action = mechanisms.TopologyAction(torch.tensor([[4.0, 3.0, 2.0, 1.0]]))
     mask = torch.tensor([[True, True, False, False]])
 
-    assignment = alpha.SoftTopKTopologySurrogate()(action, mask, 4)
+    assignment = mechanisms.SoftTopKTopologySurrogate()(action, mask, 4)
 
     torch.testing.assert_close(assignment[:, :2].sum(-1), torch.ones(1, 2))
     assert torch.equal(assignment[:, 2:], torch.zeros(1, 2, 4))
@@ -85,8 +85,8 @@ def test_surrogate_masked_instances_have_zero_assignment_and_gradient() -> None:
     scores = torch.tensor([[1.0, 100.0, 2.0, -100.0]], requires_grad=True)
     mask = torch.tensor([[True, False, True, False]])
     utility = torch.tensor([[1.0, 1000.0, 2.0, -1000.0]])
-    assignment = alpha.SoftTopKTopologySurrogate()(
-        alpha.TopologyAction(scores), mask, 2
+    assignment = mechanisms.SoftTopKTopologySurrogate()(
+        mechanisms.TopologyAction(scores), mask, 2
     )
 
     torch.einsum("bkn,bn->", assignment, utility).backward()
@@ -96,7 +96,7 @@ def test_surrogate_masked_instances_have_zero_assignment_and_gradient() -> None:
 
 
 def test_pairwise_surrogate_has_canonical_identity_and_backward_only_contract() -> None:
-    surrogate = alpha.PairwiseRankTopologySurrogate(
+    surrogate = mechanisms.PairwiseRankTopologySurrogate(
         temperature=0.25, position_temperature=0.10
     )
 
@@ -125,10 +125,10 @@ class _ExternalTopologySource(torch.nn.Module):
         queries: torch.Tensor,
         *,
         mask: torch.Tensor,
-    ) -> alpha.TopologyProposal:
+    ) -> mechanisms.TopologyProposal:
         self.calls += 1
         scores = torch.einsum("bnd,bd->bn", keys @ self.weight, queries)
-        return alpha.TopologyProposal(alpha.TopologyAction(scores.masked_fill(~mask, -1e4)))
+        return mechanisms.TopologyProposal(mechanisms.TopologyAction(scores.masked_fill(~mask, -1e4)))
 
     def topology_contract(self) -> dict[str, object]:
         return {
@@ -139,16 +139,16 @@ class _ExternalTopologySource(torch.nn.Module):
 
 
 def test_topology_proposal_has_a_canonical_identity() -> None:
-    proposal = alpha.TopologyProposal(alpha.TopologyAction(torch.ones(1, 3)))
+    proposal = mechanisms.TopologyProposal(mechanisms.TopologyAction(torch.ones(1, 3)))
 
     assert arti.component_ref(proposal) == "arti/topology-proposal@1"
 
 
 def test_fold_from_source_invokes_source_once_and_never_passes_payload() -> None:
     source = _ExternalTopologySource()
-    fold = alpha.Fold(
+    fold = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(),
     )
     payload = _markers(batch=1, length=5, dim=3)
     keys = torch.tensor(
@@ -164,14 +164,14 @@ def test_fold_from_source_invokes_source_once_and_never_passes_payload() -> None
 
     assert source.calls == 1
     assert torch.equal(state.record.active_index, torch.tensor([[0, 2]]))
-    assert torch.equal(alpha.UnFold(active_count=2)(state).value, payload)
+    assert torch.equal(mechanisms.UnFold(active_count=2)(state).value, payload)
 
 
 def test_fold_from_source_payload_taint_cannot_change_topology_or_provenance() -> None:
     source = _ExternalTopologySource().eval()
-    fold = alpha.Fold(
+    fold = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(),
     ).eval()
     keys = torch.randn(2, 6, 3)
     query = torch.randn(2, 3)
@@ -197,13 +197,13 @@ def test_fold_from_source_binds_source_operator_and_surrogate_contracts() -> Non
     source = _ExternalTopologySource().eval()
     payload = torch.randn(1, 5, 2)
     inputs = (torch.randn(1, 5, 3), torch.randn(1, 3))
-    first = alpha.Fold(
+    first = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(position_temperature=0.10),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(position_temperature=0.10),
     ).eval().from_source(payload, source=source, source_inputs=inputs)
-    second = alpha.Fold(
+    second = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(position_temperature=0.20),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(position_temperature=0.20),
     ).eval().from_source(payload, source=source, source_inputs=inputs)
 
     assert first.record.producer_provenance_fingerprint != (
@@ -214,9 +214,9 @@ def test_fold_from_source_binds_source_operator_and_surrogate_contracts() -> Non
 def test_fold_from_source_surrogate_trains_source_without_soft_payload_gradient() -> None:
     torch.manual_seed(420)
     source = _ExternalTopologySource()
-    fold = alpha.Fold(
+    fold = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(),
     )
     payload = _markers(batch=1, length=6, dim=3).requires_grad_()
     keys = torch.randn(1, 6, 3)
@@ -253,7 +253,7 @@ def test_fold_from_source_surrogate_trains_non_owning_source_dependency() -> Non
 
         def propose(self, keys, *, mask):
             priority = torch.einsum("bnd,d->bn", keys, self.weight)
-            return alpha.TopologyProposal(alpha.TopologyAction(priority))
+            return mechanisms.TopologyProposal(mechanisms.TopologyAction(priority))
 
         def topology_contract(self):
             return {
@@ -264,9 +264,9 @@ def test_fold_from_source_surrogate_trains_non_owning_source_dependency() -> Non
 
     weight = torch.nn.Parameter(torch.tensor([1.0, -0.5, 0.25]))
     source = NonOwningSource(weight)
-    fold = alpha.Fold(
+    fold = mechanisms.Fold(
         active_count=2,
-        surrogate=alpha.PairwiseRankTopologySurrogate(),
+        surrogate=mechanisms.PairwiseRankTopologySurrogate(),
     )
     payload = _markers(batch=1, length=6, dim=3)
     keys = torch.randn(1, 6, 3)
@@ -282,7 +282,7 @@ def test_fold_from_source_surrogate_trains_non_owning_source_dependency() -> Non
 
 def test_fold_from_source_rejects_payload_alias_and_invalid_source_contract() -> None:
     source = _ExternalTopologySource()
-    fold = alpha.Fold(active_count=2)
+    fold = mechanisms.Fold(active_count=2)
     payload = torch.randn(1, 5, 3)
 
     with pytest.raises(ValueError, match="payload must not enter"):
@@ -305,7 +305,7 @@ def test_fold_from_source_rejects_payload_alias_and_invalid_source_contract() ->
 
 
 def test_nonfinite_folded_payload_cannot_pollute_hard_active_forward() -> None:
-    policy = alpha.LearnedTopologyPolicy(dim=2)
+    policy = mechanisms.LearnedTopologyPolicy(dim=2)
     with torch.no_grad():
         for parameter in policy.scorer.parameters():
             parameter.zero_()
@@ -313,17 +313,17 @@ def test_nonfinite_folded_payload_cannot_pollute_hard_active_forward() -> None:
     # Keep the non-finite lineage invalid so the scorer/operator never uses it,
     # while the backward-only carrier still sees the complete detached payload.
     mask = torch.tensor([[True, True, False]])
-    state = alpha.ReversibleTopology(2, policy=policy).fold(x, mask)
+    state = mechanisms.ReversibleTopology(2, policy=policy).fold(x, mask)
 
     assert torch.equal(state.active, x[:, :2])
 
 
 def test_no_grad_skips_the_training_surrogate_without_changing_permutation() -> None:
     torch.manual_seed(5)
-    policy = alpha.LearnedTopologyPolicy(dim=3)
+    policy = mechanisms.LearnedTopologyPolicy(dim=3)
     x = torch.randn(2, 12, 3)
     mask = torch.ones(2, 12, dtype=torch.bool)
-    topology = alpha.ReversibleTopology(4, policy=policy)
+    topology = mechanisms.ReversibleTopology(4, policy=policy)
     with torch.enable_grad():
         with_surrogate = topology.fold(x, mask)
     with torch.no_grad():
@@ -337,8 +337,8 @@ def test_no_grad_skips_the_training_surrogate_without_changing_permutation() -> 
 
 
 def test_eval_skips_the_training_surrogate_with_grad_enabled() -> None:
-    topology = alpha.ReversibleTopology(
-        4, policy=alpha.LearnedTopologyPolicy(dim=3)
+    topology = mechanisms.ReversibleTopology(
+        4, policy=mechanisms.LearnedTopologyPolicy(dim=3)
     ).eval()
     x = torch.randn(2, 12, 3)
     mask = torch.ones(2, 12, dtype=torch.bool)
@@ -351,9 +351,9 @@ def test_eval_skips_the_training_surrogate_with_grad_enabled() -> None:
 def test_learned_policy_preserves_exact_value_transport() -> None:
     torch.manual_seed(7)
     x = _markers()
-    topology = alpha.ReversibleTopology(
+    topology = mechanisms.ReversibleTopology(
         active_count=3,
-        policy=alpha.LearnedTopologyPolicy(dim=4),
+        policy=mechanisms.LearnedTopologyPolicy(dim=4),
     )
 
     state = topology.fold(x)
@@ -372,8 +372,8 @@ def test_learned_policy_preserves_exact_value_transport() -> None:
 def test_surrogate_trains_policy_without_soft_value_gradient_leakage() -> None:
     torch.manual_seed(11)
     x = _markers(batch=1, length=6, dim=3).requires_grad_()
-    policy = alpha.LearnedTopologyPolicy(dim=3, hidden_dim=12)
-    topology = alpha.ReversibleTopology(active_count=2, policy=policy)
+    policy = mechanisms.LearnedTopologyPolicy(dim=3, hidden_dim=12)
+    topology = mechanisms.ReversibleTopology(active_count=2, policy=policy)
 
     state = topology.fold(x)
     state.active.square().sum().backward()
@@ -406,15 +406,15 @@ def test_core_detaches_policy_input_even_for_a_nonconforming_custom_policy() -> 
 
         def forward(
             self, x: torch.Tensor, _mask: torch.Tensor
-        ) -> alpha.TopologyProposal:
-            return alpha.TopologyProposal(alpha.TopologyAction(x[..., 0] * self.scale))
+        ) -> mechanisms.TopologyProposal:
+            return mechanisms.TopologyProposal(mechanisms.TopologyAction(x[..., 0] * self.scale))
 
         def topology_contract(self) -> dict[str, object]:
             return {"ref": self._component_reference}
 
     x = torch.randn(1, 6, 3, requires_grad=True)
     policy = NonDetachingPolicy()
-    topology = alpha.ReversibleTopology(2, policy=policy)
+    topology = mechanisms.ReversibleTopology(2, policy=policy)
 
     state = topology.fold(x)
     state.active.square().sum().backward()
@@ -435,7 +435,7 @@ def test_learned_policy_is_permutation_equivariant_without_coordinates() -> None
     torch.manual_seed(19)
     x = torch.randn(3, 9, 5)
     mask = torch.ones(3, 9, dtype=torch.bool)
-    policy = alpha.LearnedTopologyPolicy(dim=5).eval()
+    policy = mechanisms.LearnedTopologyPolicy(dim=5).eval()
     permutation = torch.tensor([5, 1, 8, 0, 3, 7, 2, 6, 4])
     inverse = torch.argsort(permutation)
 
@@ -451,7 +451,7 @@ def test_learned_policy_is_permutation_equivariant_without_coordinates() -> None
 def test_learned_policy_train_and_eval_execute_the_same_hard_topology() -> None:
     torch.manual_seed(23)
     x = torch.randn(2, 7, 4)
-    policy = alpha.LearnedTopologyPolicy(dim=4)
+    policy = mechanisms.LearnedTopologyPolicy(dim=4)
 
     policy.train()
     train_permutation = _permutation(policy, x, torch.ones(2, 7, dtype=torch.bool), 3)
@@ -461,8 +461,8 @@ def test_learned_policy_train_and_eval_execute_the_same_hard_topology() -> None:
     assert torch.equal(train_permutation, eval_permutation)
 
 
-def _manual_bank(values: list[float], bank_id: str) -> alpha.TopologyOperandBank:
-    bank = alpha.TopologyOperandBank(
+def _manual_bank(values: list[float], bank_id: str) -> mechanisms.TopologyOperandBank:
+    bank = mechanisms.TopologyOperandBank(
         slots=2, key_dim=2, factor_dim=1, bank_id=bank_id
     )
     with torch.no_grad():
@@ -472,12 +472,12 @@ def _manual_bank(values: list[float], bank_id: str) -> alpha.TopologyOperandBank
 
 
 def _manual_bank_policy(
-    banks: list[alpha.TopologyOperandBank],
+    banks: list[mechanisms.TopologyOperandBank],
     weights: list[float] | None = None,
     *,
     diagnostics: str = "none",
-) -> alpha.BankFormulaTopologyPolicy:
-    policy = alpha.BankFormulaTopologyPolicy(
+) -> mechanisms.BankFormulaTopologyPolicy:
+    policy = mechanisms.BankFormulaTopologyPolicy(
         dim=2,
         key_dim=2,
         banks=banks,
@@ -537,10 +537,10 @@ def test_bank_diagnostics_are_opt_in() -> None:
 
 
 def test_bank_diagnostic_summary_has_a_hard_slot_budget() -> None:
-    bank = alpha.TopologyOperandBank(5, 2, bank_id="too-large-diagnostic")
+    bank = mechanisms.TopologyOperandBank(5, 2, bank_id="too-large-diagnostic")
 
     with pytest.raises(ValueError, match="diagnostic_slot_limit"):
-        alpha.BankFormulaTopologyPolicy(
+        mechanisms.BankFormulaTopologyPolicy(
             dim=2,
             key_dim=2,
             banks=[bank],
@@ -550,21 +550,21 @@ def test_bank_diagnostic_summary_has_a_hard_slot_budget() -> None:
 
 
 def test_priority_ties_use_the_declared_stable_host_index_rule() -> None:
-    action = alpha.TopologyAction(torch.ones(1, 5))
+    action = mechanisms.TopologyAction(torch.ones(1, 5))
     mask = torch.tensor([[True, True, False, True, False]])
 
-    permutation = alpha.StablePriorityPartition()(action, mask)
+    permutation = mechanisms.StablePriorityPartition()(action, mask)
 
     assert torch.equal(permutation, torch.tensor([[0, 1, 3, 2, 4]]))
 
 
 def test_bfloat16_priority_ties_follow_the_same_declared_rule() -> None:
-    action = alpha.TopologyAction(
+    action = mechanisms.TopologyAction(
         torch.tensor([[1.0, 1.0, 0.5, 0.5]], dtype=torch.bfloat16)
     )
     mask = torch.ones(1, 4, dtype=torch.bool)
 
-    permutation = alpha.StablePriorityPartition()(action, mask)
+    permutation = mechanisms.StablePriorityPartition()(action, mask)
 
     assert torch.equal(permutation, torch.tensor([[0, 1, 2, 3]]))
 
@@ -591,9 +591,9 @@ def test_reset_and_shuffle_bank_change_the_priority_field() -> None:
 def test_bank_values_receive_surrogate_gradients_but_query_is_fixed() -> None:
     torch.manual_seed(29)
     x = torch.randn(2, 8, 3, requires_grad=True)
-    bank = alpha.TopologyOperandBank(slots=6, key_dim=4, factor_dim=1)
-    policy = alpha.BankFormulaTopologyPolicy(dim=3, key_dim=4, banks=[bank])
-    topology = alpha.ReversibleTopology(active_count=3, policy=policy)
+    bank = mechanisms.TopologyOperandBank(slots=6, key_dim=4, factor_dim=1)
+    policy = mechanisms.BankFormulaTopologyPolicy(dim=3, key_dim=4, banks=[bank])
+    topology = mechanisms.ReversibleTopology(active_count=3, policy=policy)
 
     state = topology.fold(x)
     state.active.square().mean().backward()
@@ -606,10 +606,10 @@ def test_bank_values_receive_surrogate_gradients_but_query_is_fixed() -> None:
 
 
 def test_duplicate_topology_bank_ids_are_rejected() -> None:
-    first = alpha.TopologyOperandBank(4, 3, bank_id="duplicate")
-    second = alpha.TopologyOperandBank(4, 3, bank_id="duplicate")
+    first = mechanisms.TopologyOperandBank(4, 3, bank_id="duplicate")
+    second = mechanisms.TopologyOperandBank(4, 3, bank_id="duplicate")
     with pytest.raises(ValueError, match="IDs must be unique"):
-        alpha.BankFormulaTopologyPolicy(dim=3, key_dim=3, banks=[first, second])
+        mechanisms.BankFormulaTopologyPolicy(dim=3, key_dim=3, banks=[first, second])
 
 
 def test_bank_policy_accepts_a_versioned_custom_formula_contract() -> None:
@@ -618,25 +618,25 @@ def test_bank_policy_accepts_a_versioned_custom_formula_contract() -> None:
 
         def __init__(self) -> None:
             super().__init__()
-            self.contract = alpha.TopologyFormulaContract(factor_dim=1)
+            self.contract = mechanisms.TopologyFormulaContract(factor_dim=1)
             self.register_buffer("scale", torch.tensor([2.0]))
 
-        def evaluate(self, operands: torch.Tensor) -> alpha.TopologyFormulaOutput:
+        def evaluate(self, operands: torch.Tensor) -> mechanisms.TopologyFormulaOutput:
             priority = operands[..., 0] * self.scale.to(operands)
             confidence = torch.ones_like(priority[..., :1])
-            return alpha.TopologyFormulaOutput(priority, confidence)
+            return mechanisms.TopologyFormulaOutput(priority, confidence)
 
         @property
-        def formula_lock(self) -> alpha.TopologyFormulaLock:
-            return alpha.TopologyFormulaLock(
+        def formula_lock(self) -> mechanisms.TopologyFormulaLock:
+            return mechanisms.TopologyFormulaLock(
                 formula_ref=self._component_reference,
                 contract_fingerprint=self.contract.fingerprint,
                 factor_dim=1,
                 weight_hash="custom-fixed-scale",
             )
 
-    bank = alpha.TopologyOperandBank(4, 3, factor_dim=1, bank_id="custom")
-    policy = alpha.BankFormulaTopologyPolicy(
+    bank = mechanisms.TopologyOperandBank(4, 3, factor_dim=1, bank_id="custom")
+    policy = mechanisms.BankFormulaTopologyPolicy(
         dim=3,
         key_dim=3,
         banks=[bank],
@@ -676,10 +676,10 @@ def test_bank_policy_rejects_a_trainable_query() -> None:
                 "stateful": False,
             }
 
-    bank = alpha.TopologyOperandBank(4, 3, bank_id="fixed-query-required")
+    bank = mechanisms.TopologyOperandBank(4, 3, bank_id="fixed-query-required")
 
     with pytest.raises(ValueError, match="requires a fixed Query"):
-        alpha.BankFormulaTopologyPolicy(
+        mechanisms.BankFormulaTopologyPolicy(
             dim=3,
             key_dim=3,
             banks=[bank],
@@ -706,9 +706,9 @@ def test_bank_policy_rejects_a_query_without_a_fixed_deterministic_contract() ->
                 "stateful": False,
             }
 
-    bank = alpha.TopologyOperandBank(4, 3, bank_id="random-query-rejected")
+    bank = mechanisms.TopologyOperandBank(4, 3, bank_id="random-query-rejected")
     with pytest.raises(ValueError, match="fixed deterministic Query contract"):
-        alpha.BankFormulaTopologyPolicy(
+        mechanisms.BankFormulaTopologyPolicy(
             dim=3,
             key_dim=3,
             banks=[bank],
@@ -717,20 +717,20 @@ def test_bank_policy_rejects_a_query_without_a_fixed_deterministic_contract() ->
 
 
 def test_bank_policy_rejects_a_formula_lock_from_another_contract() -> None:
-    class StaleLockFormula(alpha.TopologyPriorityFormula):
+    class StaleLockFormula(mechanisms.TopologyPriorityFormula):
         @property
-        def formula_lock(self) -> alpha.TopologyFormulaLock:
+        def formula_lock(self) -> mechanisms.TopologyFormulaLock:
             lock = super().formula_lock
-            return alpha.TopologyFormulaLock(
+            return mechanisms.TopologyFormulaLock(
                 formula_ref=lock.formula_ref,
                 contract_fingerprint="stale-contract",
                 factor_dim=lock.factor_dim,
                 weight_hash=lock.weight_hash,
             )
 
-    bank = alpha.TopologyOperandBank(4, 3, bank_id="stale-lock-rejected")
+    bank = mechanisms.TopologyOperandBank(4, 3, bank_id="stale-lock-rejected")
     with pytest.raises(ValueError, match="lock does not match"):
-        alpha.BankFormulaTopologyPolicy(
+        mechanisms.BankFormulaTopologyPolicy(
             dim=3,
             key_dim=3,
             banks=[bank],
@@ -738,21 +738,21 @@ def test_bank_policy_rejects_a_formula_lock_from_another_contract() -> None:
         )
 
 
-def _serializable_bank_fold(*, reverse: bool = False) -> alpha.Fold:
+def _serializable_bank_fold(*, reverse: bool = False) -> mechanisms.Fold:
     banks = [
-        alpha.TopologyOperandBank(6, 4, seed=31, bank_id="first"),
-        alpha.TopologyOperandBank(6, 4, seed=32, bank_id="second"),
+        mechanisms.TopologyOperandBank(6, 4, seed=31, bank_id="first"),
+        mechanisms.TopologyOperandBank(6, 4, seed=32, bank_id="second"),
     ]
     if reverse:
         banks.reverse()
-    policy = alpha.BankFormulaTopologyPolicy(
+    policy = mechanisms.BankFormulaTopologyPolicy(
         dim=3,
         key_dim=4,
         query_seed=77,
         banks=banks,
         bank_weights=[0.75, 0.25] if not reverse else [0.25, 0.75],
     )
-    return alpha.Fold(active_count=2, policy=policy)
+    return mechanisms.Fold(active_count=2, policy=policy)
 
 
 def test_bank_formula_arti_st_round_trip_preserves_hard_topology_and_layout(
@@ -824,24 +824,24 @@ def test_reversed_bank_layout_has_distinct_component_provenance() -> None:
 
 
 def test_fixed_formula_weight_changes_producer_provenance() -> None:
-    bank_a = alpha.TopologyOperandBank(6, 4, factor_dim=2, seed=31, bank_id="same")
-    bank_b = alpha.TopologyOperandBank(6, 4, factor_dim=2, seed=31, bank_id="same")
-    first = alpha.BankFormulaTopologyPolicy(
+    bank_a = mechanisms.TopologyOperandBank(6, 4, factor_dim=2, seed=31, bank_id="same")
+    bank_b = mechanisms.TopologyOperandBank(6, 4, factor_dim=2, seed=31, bank_id="same")
+    first = mechanisms.BankFormulaTopologyPolicy(
         dim=3,
         key_dim=4,
         banks=[bank_a],
-        formula=alpha.TopologyPriorityFormula(2, weight=[1.0, 0.0]),
+        formula=mechanisms.TopologyPriorityFormula(2, weight=[1.0, 0.0]),
     )
-    second = alpha.BankFormulaTopologyPolicy(
+    second = mechanisms.BankFormulaTopologyPolicy(
         dim=3,
         key_dim=4,
         banks=[bank_b],
-        formula=alpha.TopologyPriorityFormula(2, weight=[0.0, 1.0]),
+        formula=mechanisms.TopologyPriorityFormula(2, weight=[0.0, 1.0]),
     )
 
     assert (
-        alpha.ReversibleTopology(2, policy=first).producer_provenance_fingerprint
-        != alpha.ReversibleTopology(2, policy=second).producer_provenance_fingerprint
+        mechanisms.ReversibleTopology(2, policy=first).producer_provenance_fingerprint
+        != mechanisms.ReversibleTopology(2, policy=second).producer_provenance_fingerprint
     )
 
 
@@ -855,13 +855,13 @@ def test_bfloat16_bank_provenance_is_hashable() -> None:
 
 @torch.no_grad()
 def test_unfold_operation_does_not_retain_the_topology_learner() -> None:
-    bank = alpha.TopologyOperandBank(8, 4, bank_id="detached-inverse")
-    policy = alpha.BankFormulaTopologyPolicy(dim=3, key_dim=4, banks=[bank])
-    topology = alpha.ReversibleTopology(2, policy=policy)
+    bank = mechanisms.TopologyOperandBank(8, 4, bank_id="detached-inverse")
+    policy = mechanisms.BankFormulaTopologyPolicy(dim=3, key_dim=4, banks=[bank])
+    topology = mechanisms.ReversibleTopology(2, policy=policy)
     fold, unfold = topology.operations()
 
-    assert isinstance(fold.topology.policy, alpha.BankFormulaTopologyPolicy)
-    assert isinstance(unfold.inverse_contract, alpha.InverseTopologyContract)
+    assert isinstance(fold.topology.policy, mechanisms.BankFormulaTopologyPolicy)
+    assert isinstance(unfold.inverse_contract, mechanisms.InverseTopologyContract)
     assert unfold.state_dict() == {}
 
 
@@ -890,13 +890,13 @@ def test_cuda_fullgraph_matches_eager_value_and_gradient(kind: str) -> None:
         def __init__(self, selected_kind: str) -> None:
             super().__init__()
             if selected_kind == "learned":
-                policy: torch.nn.Module = alpha.LearnedTopologyPolicy(dim=4)
+                policy: torch.nn.Module = mechanisms.LearnedTopologyPolicy(dim=4)
             else:
-                bank = alpha.TopologyOperandBank(8, 4, bank_id="compiled")
-                policy = alpha.BankFormulaTopologyPolicy(
+                bank = mechanisms.TopologyOperandBank(8, 4, bank_id="compiled")
+                policy = mechanisms.BankFormulaTopologyPolicy(
                     dim=4, key_dim=4, banks=[bank]
                 )
-            self.topology = alpha.ReversibleTopology(3, policy=policy)
+            self.topology = mechanisms.ReversibleTopology(3, policy=policy)
 
         def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             return self.topology.fold(x, mask).active

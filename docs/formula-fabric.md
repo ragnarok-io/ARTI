@@ -1,12 +1,12 @@
 # Formula Fabric
 
-Formula Fabric is an alpha, fixed-capacity tensor executor. A program declares
+Formula Fabric is a stable, fixed-capacity tensor executor. A program declares
 a bounded set of Formula cells, while a route source selects their operands.
 The executor remains the only implementation of Formula mathematics.
 
 ## Typed Atom Basis
 
-`FormulaFabricV2` is an alpha typed SSA executor. It is a separate component
+`FormulaFabricV2` is a stable typed SSA executor. It is a separate component
 version from `FormulaFabric@1`; the original fixed-arena runtime remains
 unchanged. A v2 program declares named tensor axes, domains, dtypes, bounded
 slots, explicit Input and Bank bindings, and a sequence of four public atoms:
@@ -21,15 +21,15 @@ For example, a rank-r LoRA-shaped operation is expanded into ordinary atoms:
 ```python
 import torch
 
-from arti import alpha
+from arti import mechanisms
 
-program = alpha.build_lora_program(
+program = mechanisms.build_lora_program(
     input_dim=64,
     output_dim=64,
     rank=8,
     source_ref="my-package/adapter-bank@1",
 )
-fabric = alpha.FormulaFabricV2(program)
+fabric = mechanisms.FormulaFabricV2(program)
 
 x = torch.randn(2, 16, 64)
 base = torch.randn(2, 16, 64)
@@ -40,7 +40,7 @@ values = {
 banks = {
     binding.name: binding.bind(values[binding.name])
     for binding in program.bindings
-    if isinstance(binding, alpha.BankBinding)
+    if isinstance(binding, mechanisms.BankBinding)
 }
 result = fabric(
     inputs={"x": x, "base": base, "lora.gain": torch.tensor(0.5)},
@@ -107,23 +107,23 @@ See `examples/formula_v2_typed_lora.py` for a complete hard-routed Bank example.
 
 ## Objective-Controlled Commits
 
-`ObjectiveFormulaFabricCompute` is an alpha composition adapter that lets an
+`ObjectiveFormulaFabricCompute` is a stable composition adapter that lets an
 `ObjectiveExposureBank` provide bounded commit strength to an existing
 `FormulaCommitBlend` executor. It does not choose Formula routes, primitives,
 fire masks, commit authority, topology, or execution depth.
 
 ```python
-from arti import alpha
+from arti import mechanisms
 
-compute = alpha.FormulaFabricCompute(
-    alpha.FormulaCommitBlend(alpha.FormulaFabric(program)),
+compute = mechanisms.FormulaFabricCompute(
+    mechanisms.FormulaCommitBlend(mechanisms.FormulaFabric(program)),
     active_count=8,
 )
-controlled = alpha.ObjectiveFormulaFabricCompute(
+controlled = mechanisms.ObjectiveFormulaFabricCompute(
     compute,
-    alpha.ObjectiveExposureBank(slots=16, query_dim=64),
+    mechanisms.ObjectiveExposureBank(slots=16, query_dim=64),
 )
-pulse = alpha.AdaptivePulse(
+pulse = mechanisms.AdaptivePulse(
     fold=fold,
     selective_compute=controlled,
     unfold=unfold,
@@ -152,10 +152,10 @@ closed instead of being ignored.
 completed Formula program produces the workspace used by the next route query:
 
 ```python
-from arti import alpha
+from arti import mechanisms
 
-routed = alpha.RoutedFormulaFabricCompute(compute, route_source)
-refined = alpha.IterativeRoutedFormulaFabricCompute(routed, steps=4)
+routed = mechanisms.RoutedFormulaFabricCompute(compute, route_source)
+refined = mechanisms.IterativeRoutedFormulaFabricCompute(routed, steps=4)
 
 next_workspace, info = refined(workspace, return_info=True)
 ```

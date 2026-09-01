@@ -11,7 +11,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
-from arti import alpha
+from arti import mechanisms
 from arti import runtime_checkpoint as checkpoint_module
 
 
@@ -55,7 +55,7 @@ def _rewrite_manifest(path: Path, mutate) -> None:
 
 
 def _committed_runtime():
-    runtime = alpha.VolatileTensorRuntime(
+    runtime = mechanisms.VolatileTensorRuntime(
         {"bank": torch.arange(8, dtype=torch.float32).reshape(2, 4)},
         world_id="checkpoint-test",
         abi_fingerprint=ABI,
@@ -79,7 +79,7 @@ def _committed_runtime():
 
 
 def _binding(runtime, snapshot):
-    return alpha.bind_external_tensor(
+    return mechanisms.bind_external_tensor(
         runtime,
         snapshot,
         "bank",
@@ -87,7 +87,7 @@ def _binding(runtime, snapshot):
         partition_id="target",
         logical_id="bank",
         role="target-bank",
-        authority=alpha.TensorAuthority.READ_WRITE,
+        authority=mechanisms.TensorAuthority.READ_WRITE,
         component_ref="arti/target-bank-updater@2",
         component_config_fingerprint=CONFIG,
         state_schema_ref="arti/target-bank-state@1",
@@ -103,13 +103,13 @@ def test_runtime_checkpoint_round_trip_preserves_root_receipts_and_bindings(
     binding = _binding(runtime, snapshot)
     target = tmp_path / "state.runtime.arti.st"
 
-    saved = alpha.save_runtime_checkpoint(
+    saved = mechanisms.save_runtime_checkpoint(
         runtime,
         snapshot,
         target,
         bindings=[binding],
     )
-    restored = alpha.load_runtime_checkpoint(
+    restored = mechanisms.load_runtime_checkpoint(
         target,
         expected_abi_fingerprint=ABI,
         expected_component_refs=["arti/target-bank-updater@2"],
@@ -150,19 +150,19 @@ def test_repeated_checkpoint_save_is_deterministic_and_replaceable(
     first_path = tmp_path / "first.runtime.arti.st"
     second_path = tmp_path / "second.runtime.arti.st"
 
-    first = alpha.save_runtime_checkpoint(runtime, snapshot, first_path)
-    second = alpha.save_runtime_checkpoint(runtime, snapshot, second_path)
-    replaced = alpha.save_runtime_checkpoint(runtime, snapshot, first_path)
+    first = mechanisms.save_runtime_checkpoint(runtime, snapshot, first_path)
+    second = mechanisms.save_runtime_checkpoint(runtime, snapshot, second_path)
+    replaced = mechanisms.save_runtime_checkpoint(runtime, snapshot, first_path)
 
     assert first.manifest_fingerprint == second.manifest_fingerprint
     assert replaced.manifest_fingerprint == first.manifest_fingerprint
     assert replaced.root_fingerprint == first.root_fingerprint
     assert replaced.artifact_sha256 == hashlib.sha256(first_path.read_bytes()).hexdigest()
-    first_restored = alpha.load_runtime_checkpoint(
+    first_restored = mechanisms.load_runtime_checkpoint(
         first_path,
         expected_abi_fingerprint=ABI,
     )
-    second_restored = alpha.load_runtime_checkpoint(
+    second_restored = mechanisms.load_runtime_checkpoint(
         second_path,
         expected_abi_fingerprint=ABI,
     )
@@ -179,7 +179,7 @@ def test_checkpoint_replace_failure_preserves_previous_artifact_and_releases_loc
 ) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     target = tmp_path / "atomic.runtime.arti.st"
-    baseline = alpha.save_runtime_checkpoint(runtime, snapshot, target)
+    baseline = mechanisms.save_runtime_checkpoint(runtime, snapshot, target)
     baseline_payload = target.read_bytes()
 
     def fail_replace(_source: Path, _target: Path) -> None:
@@ -187,7 +187,7 @@ def test_checkpoint_replace_failure_preserves_previous_artifact_and_releases_loc
 
     monkeypatch.setattr(checkpoint_module.os, "replace", fail_replace)
     with pytest.raises(OSError, match="injected replace failure"):
-        alpha.save_runtime_checkpoint(runtime, snapshot, target)
+        mechanisms.save_runtime_checkpoint(runtime, snapshot, target)
 
     assert target.read_bytes() == baseline_payload
     assert not tuple(tmp_path.glob(".*.tmp"))
@@ -201,10 +201,10 @@ def test_repeated_checkpoint_loads_restore_independent_runtime_state(
 ) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     target = tmp_path / "independent.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, target)
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, target)
 
-    first = alpha.load_runtime_checkpoint(target, expected_abi_fingerprint=ABI)
-    second = alpha.load_runtime_checkpoint(target, expected_abi_fingerprint=ABI)
+    first = mechanisms.load_runtime_checkpoint(target, expected_abi_fingerprint=ABI)
+    second = mechanisms.load_runtime_checkpoint(target, expected_abi_fingerprint=ABI)
     first_before = first.runtime.read(first.snapshot, "bank").value.clone()
     second_before = second.runtime.read(second.snapshot, "bank").value.clone()
 
@@ -239,7 +239,7 @@ def test_checkpoint_load_waits_for_process_local_path_authority(
 ) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     target = tmp_path / "path-authority.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, target)
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, target)
     started = Event()
     finished = Event()
     errors: list[BaseException] = []
@@ -247,7 +247,7 @@ def test_checkpoint_load_waits_for_process_local_path_authority(
     def load() -> None:
         started.set()
         try:
-            alpha.load_runtime_checkpoint(
+            mechanisms.load_runtime_checkpoint(
                 target,
                 expected_abi_fingerprint=ABI,
             )
@@ -268,8 +268,8 @@ def test_checkpoint_load_waits_for_process_local_path_authority(
 
 def test_checkpoint_rejects_stale_root_and_excludes_open_overlay(tmp_path: Path) -> None:
     runtime, initial, snapshot, _receipt = _committed_runtime()
-    with pytest.raises(alpha.RuntimeCheckpointError, match="current committed root"):
-        alpha.save_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="current committed root"):
+        mechanisms.save_runtime_checkpoint(
             runtime,
             initial,
             tmp_path / "stale.runtime.arti.st",
@@ -288,8 +288,8 @@ def test_checkpoint_rejects_stale_root_and_excludes_open_overlay(tmp_path: Path)
         provenance_fingerprint=HASH,
     )
     target = tmp_path / "committed-only.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, target)
-    restored = alpha.load_runtime_checkpoint(
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, target)
+    restored = mechanisms.load_runtime_checkpoint(
         target,
         expected_abi_fingerprint=ABI,
     )
@@ -303,16 +303,16 @@ def test_checkpoint_fails_closed_on_contract_or_payload_corruption(tmp_path: Pat
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     binding = _binding(runtime, snapshot)
     target = tmp_path / "contract.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, target, bindings=[binding])
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, target, bindings=[binding])
 
-    with pytest.raises(alpha.RuntimeCheckpointError, match="ABI mismatch"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="ABI mismatch"):
+        mechanisms.load_runtime_checkpoint(
             target,
             expected_abi_fingerprint="9" * 64,
             expected_component_refs=["arti/target-bank-updater@2"],
         )
-    with pytest.raises(alpha.RuntimeCheckpointError, match="component refs mismatch"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="component refs mismatch"):
+        mechanisms.load_runtime_checkpoint(
             target,
             expected_abi_fingerprint=ABI,
             expected_component_refs=[],
@@ -322,8 +322,8 @@ def test_checkpoint_fails_closed_on_contract_or_payload_corruption(tmp_path: Pat
     payload = bytearray(target.read_bytes())
     payload[-1] ^= 0xFF
     corrupted.write_bytes(payload)
-    with pytest.raises(alpha.RuntimeCheckpointError, match="descriptor mismatch"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="descriptor mismatch"):
+        mechanisms.load_runtime_checkpoint(
             corrupted,
             expected_abi_fingerprint=ABI,
             expected_component_refs=["arti/target-bank-updater@2"],
@@ -331,8 +331,8 @@ def test_checkpoint_fails_closed_on_contract_or_payload_corruption(tmp_path: Pat
 
     truncated = tmp_path / "truncated.runtime.arti.st"
     truncated.write_bytes(target.read_bytes()[:64])
-    with pytest.raises(alpha.RuntimeCheckpointError, match="cannot be opened"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="cannot be opened"):
+        mechanisms.load_runtime_checkpoint(
             truncated,
             expected_abi_fingerprint=ABI,
             expected_component_refs=["arti/target-bank-updater@2"],
@@ -347,8 +347,8 @@ def test_checkpoint_rejects_binding_that_does_not_name_a_root_page(
     foreign_ref = replace(binding.tensor_ref, key="foreign-bank")
     forged = replace(binding, tensor_ref=foreign_ref)
 
-    with pytest.raises(alpha.RuntimeCheckpointError, match="checkpoint root page"):
-        alpha.save_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="checkpoint root page"):
+        mechanisms.save_runtime_checkpoint(
             runtime,
             snapshot,
             tmp_path / "forged-binding.runtime.arti.st",
@@ -360,14 +360,14 @@ def test_page_provenance_changes_root_fingerprint() -> None:
     common = {
         "bank": torch.arange(8, dtype=torch.float32).reshape(2, 4),
     }
-    first = alpha.VolatileTensorRuntime(
+    first = mechanisms.VolatileTensorRuntime(
         common,
         world_id="provenance-test",
         store_instance_id="shared-store",
         abi_fingerprint=ABI,
         provenance_fingerprint="5" * 64,
     )
-    second = alpha.VolatileTensorRuntime(
+    second = mechanisms.VolatileTensorRuntime(
         common,
         world_id="provenance-test",
         store_instance_id="shared-store",
@@ -384,7 +384,7 @@ def test_checkpoint_rejects_foreign_receipt_and_malformed_manifest(
 ) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     foreign = tmp_path / "foreign-receipt.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, foreign)
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, foreign)
 
     def forge_receipt(manifest: dict[str, object]) -> None:
         wrapper = manifest["idempotency_receipts"][0]
@@ -395,17 +395,17 @@ def test_checkpoint_rejects_foreign_receipt_and_malformed_manifest(
         receipt["receipt_fingerprint"] = _fingerprint(content)
 
     _rewrite_manifest(foreign, forge_receipt)
-    with pytest.raises(alpha.RuntimeCheckpointError, match="does not belong"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="does not belong"):
+        mechanisms.load_runtime_checkpoint(
             foreign,
             expected_abi_fingerprint=ABI,
         )
 
     malformed = tmp_path / "malformed.runtime.arti.st"
-    alpha.save_runtime_checkpoint(runtime, snapshot, malformed)
+    mechanisms.save_runtime_checkpoint(runtime, snapshot, malformed)
     _rewrite_manifest(malformed, lambda manifest: manifest["root"].pop("root_id"))
-    with pytest.raises(alpha.RuntimeCheckpointError, match="manifest is malformed"):
-        alpha.load_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="manifest is malformed"):
+        mechanisms.load_runtime_checkpoint(
             malformed,
             expected_abi_fingerprint=ABI,
         )
@@ -416,13 +416,13 @@ def test_resident_checkpoint_restores_pool_metadata_and_executes(tmp_path: Path)
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     binding = _binding(runtime, snapshot)
     device = torch.device("cuda", torch.cuda.current_device())
-    pool = alpha.HotPagePool(
+    pool = mechanisms.HotPagePool(
         torch.tensor([[[2.0], [3.0], [0.0], [9.0]]], device=device),
         generation=torch.tensor([[4, 4, 4, 4]], device=device),
         version=torch.tensor([[7, 8, 9, 10]], device=device),
     )
     support = torch.ones(1, 3, dtype=torch.bool)
-    refs = alpha.FixedPageRefs(
+    refs = mechanisms.FixedPageRefs(
         logical_slot=torch.tensor([[0, 1, 2]], dtype=torch.int64),
         page_id=torch.zeros(1, 3, dtype=torch.int64),
         offset=torch.tensor([[0, 1, 2]], dtype=torch.int64),
@@ -431,10 +431,10 @@ def test_resident_checkpoint_restores_pool_metadata_and_executes(tmp_path: Path)
         write_mask=support,
         commit_mask=support,
     )
-    bucket = alpha.FixedResidentBucket(1, 3, 1, torch.float32, device)
-    bound = alpha.bind_hot_page_pool(pool, bucket, refs)
+    bucket = mechanisms.FixedResidentBucket(1, 3, 1, torch.float32, device)
+    bound = mechanisms.bind_hot_page_pool(pool, bucket, refs)
     target = tmp_path / "resident.runtime.arti.st"
-    alpha.save_runtime_checkpoint(
+    mechanisms.save_runtime_checkpoint(
         runtime,
         snapshot,
         target,
@@ -442,7 +442,7 @@ def test_resident_checkpoint_restores_pool_metadata_and_executes(tmp_path: Path)
         bindings=[binding],
     )
 
-    restored = alpha.load_runtime_checkpoint(
+    restored = mechanisms.load_runtime_checkpoint(
         target,
         expected_abi_fingerprint=ABI,
         expected_component_refs=["arti/target-bank-updater@2"],
@@ -455,19 +455,19 @@ def test_resident_checkpoint_restores_pool_metadata_and_executes(tmp_path: Path)
     assert torch.equal(restored.resident.pool.version, bound.pool.version)
     assert restored.resident.pointer_layout_receipt() != bound.pointer_layout_receipt()
 
-    program = alpha.FormulaFabricProgram(
+    program = mechanisms.FormulaFabricProgram(
         arena_capacity=3,
         feature_dim=1,
-        steps=((alpha.FormulaInvocation(alpha.FormulaPrimitive.ADD, 2),),),
+        steps=((mechanisms.FormulaInvocation(mechanisms.FormulaPrimitive.ADD, 2),),),
     )
     weights = torch.zeros(1, 1, 1, 2, 3, device=device)
     weights[..., 0, 0] = 1
     weights[..., 1, 1] = 1
     enabled = torch.ones(1, 1, 1, dtype=torch.bool, device=device)
-    route = alpha.FormulaRoutePlan(weights, enabled, enabled, enabled)
-    operation = alpha.FormulaResidentOperation(
-        alpha.FormulaFabricCompute(
-            alpha.FormulaFabric(program).to(device),
+    route = mechanisms.FormulaRoutePlan(weights, enabled, enabled, enabled)
+    operation = mechanisms.FormulaResidentOperation(
+        mechanisms.FormulaFabricCompute(
+            mechanisms.FormulaFabric(program).to(device),
             active_count=3,
         ),
         route,
@@ -490,12 +490,12 @@ def test_resident_checkpoint_restores_pool_metadata_and_executes(tmp_path: Path)
 def test_resident_checkpoint_requires_a_root_bound_component(tmp_path: Path) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     device = torch.device("cuda", torch.cuda.current_device())
-    pool = alpha.HotPagePool(torch.zeros(1, 1, 1, device=device))
+    pool = mechanisms.HotPagePool(torch.zeros(1, 1, 1, device=device))
     support = torch.ones(1, 1, dtype=torch.bool)
-    bound = alpha.bind_hot_page_pool(
+    bound = mechanisms.bind_hot_page_pool(
         pool,
-        alpha.FixedResidentBucket(1, 1, 1, torch.float32, device),
-        alpha.FixedPageRefs(
+        mechanisms.FixedResidentBucket(1, 1, 1, torch.float32, device),
+        mechanisms.FixedPageRefs(
             logical_slot=torch.zeros(1, 1, dtype=torch.int64),
             page_id=torch.zeros(1, 1, dtype=torch.int64),
             offset=torch.zeros(1, 1, dtype=torch.int64),
@@ -506,8 +506,8 @@ def test_resident_checkpoint_requires_a_root_bound_component(tmp_path: Path) -> 
         ),
     )
 
-    with pytest.raises(alpha.RuntimeCheckpointError, match="root-bound"):
-        alpha.save_runtime_checkpoint(
+    with pytest.raises(mechanisms.RuntimeCheckpointError, match="root-bound"):
+        mechanisms.save_runtime_checkpoint(
             runtime,
             snapshot,
             tmp_path / "unbound.runtime.arti.st",
@@ -521,10 +521,10 @@ def test_resident_checkpoint_rejects_closed_pool(tmp_path: Path) -> None:
     binding = _binding(runtime, snapshot)
     device = torch.device("cuda", torch.cuda.current_device())
     support = torch.ones(1, 1, dtype=torch.bool)
-    bound = alpha.bind_hot_page_pool(
-        alpha.HotPagePool(torch.zeros(1, 1, 1, device=device)),
-        alpha.FixedResidentBucket(1, 1, 1, torch.float32, device),
-        alpha.FixedPageRefs(
+    bound = mechanisms.bind_hot_page_pool(
+        mechanisms.HotPagePool(torch.zeros(1, 1, 1, device=device)),
+        mechanisms.FixedResidentBucket(1, 1, 1, torch.float32, device),
+        mechanisms.FixedPageRefs(
             logical_slot=torch.zeros(1, 1, dtype=torch.int64),
             page_id=torch.zeros(1, 1, dtype=torch.int64),
             offset=torch.zeros(1, 1, dtype=torch.int64),
@@ -536,8 +536,8 @@ def test_resident_checkpoint_rejects_closed_pool(tmp_path: Path) -> None:
     )
     bound.close(close_pool=True)
 
-    with pytest.raises(alpha.GPUResidentContractError, match="closed"):
-        alpha.save_runtime_checkpoint(
+    with pytest.raises(mechanisms.GPUResidentContractError, match="closed"):
+        mechanisms.save_runtime_checkpoint(
             runtime,
             snapshot,
             tmp_path / "closed.runtime.arti.st",
@@ -551,12 +551,12 @@ def test_resident_checkpoint_waits_for_authority_lock(tmp_path: Path) -> None:
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     binding = _binding(runtime, snapshot)
     device = torch.device("cuda", torch.cuda.current_device())
-    pool = alpha.HotPagePool(torch.zeros(1, 1, 1, device=device))
+    pool = mechanisms.HotPagePool(torch.zeros(1, 1, 1, device=device))
     support = torch.ones(1, 1, dtype=torch.bool)
-    bound = alpha.bind_hot_page_pool(
+    bound = mechanisms.bind_hot_page_pool(
         pool,
-        alpha.FixedResidentBucket(1, 1, 1, torch.float32, device),
-        alpha.FixedPageRefs(
+        mechanisms.FixedResidentBucket(1, 1, 1, torch.float32, device),
+        mechanisms.FixedPageRefs(
             logical_slot=torch.zeros(1, 1, dtype=torch.int64),
             page_id=torch.zeros(1, 1, dtype=torch.int64),
             offset=torch.zeros(1, 1, dtype=torch.int64),
@@ -573,7 +573,7 @@ def test_resident_checkpoint_waits_for_authority_lock(tmp_path: Path) -> None:
     def save() -> None:
         started.set()
         try:
-            alpha.save_runtime_checkpoint(
+            mechanisms.save_runtime_checkpoint(
                 runtime,
                 snapshot,
                 tmp_path / "locked.runtime.arti.st",
@@ -603,10 +603,10 @@ def test_resident_checkpoint_quiesces_pool_before_snapshot(
     runtime, _initial, snapshot, _receipt = _committed_runtime()
     binding = _binding(runtime, snapshot)
     device = torch.device("cuda", torch.cuda.current_device())
-    bound = alpha.bind_hot_page_pool(
-        alpha.HotPagePool(torch.zeros(1, 1, 1, device=device)),
-        alpha.FixedResidentBucket(1, 1, 1, torch.float32, device),
-        alpha.FixedPageRefs(
+    bound = mechanisms.bind_hot_page_pool(
+        mechanisms.HotPagePool(torch.zeros(1, 1, 1, device=device)),
+        mechanisms.FixedResidentBucket(1, 1, 1, torch.float32, device),
+        mechanisms.FixedPageRefs(
             logical_slot=torch.zeros(1, 1, dtype=torch.int64),
             page_id=torch.zeros(1, 1, dtype=torch.int64),
             offset=torch.zeros(1, 1, dtype=torch.int64),
@@ -625,7 +625,7 @@ def test_resident_checkpoint_quiesces_pool_before_snapshot(
         original_quiesce()
 
     monkeypatch.setattr(bound.pool, "_quiesce", observed_quiesce)
-    alpha.save_runtime_checkpoint(
+    mechanisms.save_runtime_checkpoint(
         runtime,
         snapshot,
         tmp_path / "quiesced.runtime.arti.st",

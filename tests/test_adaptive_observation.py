@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     AdaptiveObservation,
     DEFAULT_CONTRACT_LIMITS,
     EnvelopeRef,

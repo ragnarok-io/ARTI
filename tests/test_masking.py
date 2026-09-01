@@ -1,6 +1,6 @@
 import torch
 
-from arti import ARTILayer
+from arti.legacy import ARTILayer
 from arti.layers import ARTIVirtualInterfaceMixer
 
 

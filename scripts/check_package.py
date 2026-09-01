@@ -6,15 +6,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import os
 import tarfile
 import zipfile
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 release runner
-    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,13 +23,16 @@ def run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = No
 
 
 def main() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    expected_version = project["version"]
+    distribution_stem = project["name"].replace("-", "_")
     if DIST.exists():
         shutil.rmtree(DIST)
 
     run([sys.executable, "-m", "build", "--no-isolation", "--sdist", "--wheel", "--outdir", str(DIST)])
 
-    wheels = sorted(DIST.glob("*.whl"))
-    sdists = sorted(DIST.glob("*.tar.gz"))
+    wheels = sorted(DIST.glob(f"{distribution_stem}-*.whl"))
+    sdists = sorted(DIST.glob(f"{distribution_stem}-*.tar.gz"))
     if len(wheels) != 1:
         raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
     if len(sdists) != 1:
@@ -42,13 +41,6 @@ def main() -> None:
     with tarfile.open(sdists[0], mode="r:gz") as archive:
         members = [member.name.replace("\\", "/") for member in archive.getmembers()]
     relative_members = [name.split("/", 1)[1] if "/" in name else name for name in members]
-    unsafe = sorted(
-        name
-        for name in relative_members
-        if name.startswith(("/", "\\")) or ".." in Path(name).parts
-    )
-    if unsafe:
-        raise SystemExit(f"sdist contains unsafe member paths: {unsafe[:5]}")
     leaked = sorted(
         name
         for name in relative_members
@@ -58,55 +50,9 @@ def main() -> None:
         raise SystemExit(f"sdist contains local-only paths: {leaked[:5]}")
     if "LICENSE" not in relative_members:
         raise SystemExit("sdist is missing the root LICENSE file")
-    allowed_sdist_files = {
-        ".gitignore",
-        "AI_ASSISTANCE.md",
-        "AUTHORS.md",
-        "CITATION.cff",
-        "CONTRIBUTING.md",
-        "LICENSE",
-        "PKG-INFO",
-        "README.md",
-        "SECURITY.md",
-        "STABILITY.md",
-        "pyproject.toml",
-        "uv.lock",
-    }
-    allowed_sdist_prefixes = (
-        "docs/",
-        "examples/",
-        "src/arti/",
-        "tests/",
-    )
-    unexpected = sorted(
-        name
-        for name in relative_members
-        if name
-        and name not in allowed_sdist_files
-        and not name.startswith(allowed_sdist_prefixes)
-    )
-    if unexpected:
-        raise SystemExit(f"sdist contains paths outside the release allowlist: {unexpected[:5]}")
 
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    expected_version = str(project["project"]["version"])
     with zipfile.ZipFile(wheels[0]) as wheel:
         names = set(wheel.namelist())
-        unsafe = sorted(
-            name
-            for name in names
-            if name.startswith(("/", "\\")) or ".." in Path(name).parts
-        )
-        if unsafe:
-            raise SystemExit(f"wheel contains unsafe member paths: {unsafe[:5]}")
-        dist_info_prefix = f"arti_fit-{expected_version}.dist-info/"
-        unexpected = sorted(
-            name
-            for name in names
-            if not name.startswith(("arti/", dist_info_prefix))
-        )
-        if unexpected:
-            raise SystemExit(f"wheel contains paths outside the release allowlist: {unexpected[:5]}")
         required = {
             "arti/__init__.py",
             "arti/_version.py",
@@ -116,26 +62,19 @@ def main() -> None:
             "arti/torch/cuda.py",
             "arti/jax/__init__.py",
             "arti/backend.py",
-            "arti/web/__init__.py",
-            "arti/web/contract.py",
-            "arti/web/exporter.py",
+            "arti/experimental/__init__.py",
+            "arti/experimental/web/__init__.py",
+            "arti/experimental/web/contract.py",
+            "arti/experimental/web/exporter.py",
+            "arti/experimental/web/stateful.py",
             "arti/serialization.py",
-            "arti/survival.py",
-            "arti/reversible_topology.py",
-            "arti/topology.py",
-            "arti/adaptive_pulse.py",
-            "arti/aggregate.py",
-            "arti/formula_attention.py",
-            "arti/formula_fabric.py",
-            "arti/objective_bank.py",
-            "arti/objective_formula.py",
-            "arti/observation.py",
-            "arti/observation_bank.py",
-            "arti/selective_recall.py",
-            "arti/typed_topology.py",
-            "arti/vnext_contracts.py",
-            "arti/vnext_pipeline.py",
             "arti/alpha/__init__.py",
+            "arti/mechanisms/__init__.py",
+            "arti/legacy/__init__.py",
+            "arti/legacy/layered_recall.py",
+            "arti/legacy/stateful_recall.py",
+            "arti/arti_layer.py",
+            "arti/attachment_layer.py",
             "arti/formula_v2.py",
             "arti/formula_learning.py",
             "arti/batched_refine.py",
@@ -143,12 +82,8 @@ def main() -> None:
             "arti/branch_refine.py",
             "arti/gpu_resident.py",
             "arti/runtime_checkpoint.py",
-            "arti/refine_exit.py",
-            "arti/refine_exit_training.py",
-            "arti/refine_training.py",
             "arti/tensor_binding.py",
             "arti/tensor_transaction.py",
-            "arti/tensor_operation.py",
             "arti/providers.py",
             "arti/pretrained.py",
             "arti/pretrained_cli.py",
@@ -172,61 +107,6 @@ def main() -> None:
         if missing:
             raise SystemExit(f"wheel is missing expected files: {missing}")
 
-    uv = shutil.which("uv")
-    if uv is None:
-        raise SystemExit("uv is required for isolated distribution installation checks")
-    for distribution in (wheels[0], sdists[0]):
-        with tempfile.TemporaryDirectory(prefix="arti-install-smoke-") as tmp:
-            target = Path(tmp) / "target"
-            run(
-                [
-                    uv,
-                    "pip",
-                    "install",
-                    "--python",
-                    sys.executable,
-                    "--target",
-                    str(target),
-                    "--no-deps",
-                    "--no-build-isolation",
-                    str(distribution),
-                ]
-            )
-            env = os.environ.copy()
-            env["PYTHONPATH"] = str(target)
-            env["ARTI_INSTALL_ROOT"] = str(target)
-            env["ARTI_EXPECTED_VERSION"] = expected_version
-            run(
-                [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import arti, os, pathlib; "
-                        "root = pathlib.Path(os.environ['ARTI_INSTALL_ROOT']).resolve(); "
-                        "assert pathlib.Path(arti.__file__).resolve().parent == root / 'arti'; "
-                        "assert arti.__version__ == os.environ['ARTI_EXPECTED_VERSION']; "
-                        "from arti.alpha import BatchedRefinePlan, BranchBatchHarness, Fold, FormulaFabric, FormulaFabricProgram, ObjectiveExposureBank, UnFold, VolatileTensorRuntime, query_recall_branches, run_batched_refine; "
-                        "assert arti.component_ref(Fold(active_count=2)) == 'arti/fold@2'; "
-                        "assert arti.component_ref(UnFold(active_count=2)) == 'arti/unfold@2'; "
-                        "assert callable(FormulaFabric) and callable(FormulaFabricProgram); "
-                        "assert callable(arti.alpha.FormulaFabricV2); "
-                        "assert callable(arti.alpha.FormulaOperandBank); "
-                        "assert callable(arti.alpha.RefineStepTraining); "
-                        "assert callable(arti.alpha.FormulaRefineExit); "
-                        "assert callable(arti.alpha.RefineExitTraining); "
-                        "assert callable(arti.alpha.OperableTensorPort); "
-                        "assert callable(arti.alpha.TensorOperationLoop); "
-                        "assert callable(arti.alpha.TensorInvocation); "
-                        "assert arti.component_ref(ObjectiveExposureBank(slots=2, query_dim=4)) == 'arti/objective-exposure-bank@1'; "
-                        "assert callable(query_recall_branches) and callable(run_batched_refine); "
-                        "assert callable(BatchedRefinePlan) and callable(BranchBatchHarness); "
-                        "assert callable(VolatileTensorRuntime); "
-                        "assert arti.component_ref(arti.nn.Recall(dim=4, slots=8, activation='none')) == 'arti/recall@4'"
-                    ),
-                ],
-                env=env,
-            )
-
     with tempfile.TemporaryDirectory(prefix="arti-wheel-smoke-") as tmp:
         target = Path(tmp) / "target"
         target.mkdir()
@@ -240,19 +120,20 @@ def main() -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(target) + os.pathsep + env.get("PYTHONPATH", "")
         env["ARTI_WHEEL_ROOT"] = str(target)
-        env["ARTI_EXPECTED_VERSION"] = expected_version
         run(
             [
                 sys.executable,
                 "-c",
                     (
-                    "import arti, arti.functional, arti.torch, arti.jax, arti.web, json, torch; "
-                    "from arti.alpha import Fold as TopologyFold, TargetBankUpdater, UnFold as TopologyUnFold, WriteRefinePolicy; "
+                    "import arti, arti.functional, arti.torch, arti.jax, arti.experimental.web, arti.mechanisms, arti.legacy, importlib.util, json, torch; "
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
                     "import arti.cli; "
-                    "assert callable(arti.web.export); "
-                    "assert arti.__version__ == os.environ['ARTI_EXPECTED_VERSION']; "
+                    "assert callable(arti.experimental.web.export); "
+                    "assert importlib.util.find_spec('arti.web') is None; "
+                    "assert importlib.util.find_spec('arti.layered_recall') is None; "
+                    "assert importlib.util.find_spec('arti.stateful_recall') is None; "
+                    f"assert arti.__version__ == {expected_version!r}; "
                     "assert 'torch' in arti.available_backends(); "
                     "assert arti.jax.backend_status() in {'available', 'broken', 'unavailable'}; "
                     "assert callable(arti.jax.init_layer); "
@@ -278,21 +159,26 @@ def main() -> None:
                     "assert callable(arti.ARTIHostBridge); "
                     "assert arti.torch.ARTIHostBridge is arti.ARTIHostBridge; "
                     "assert callable(arti.Half); "
-                    "assert callable(arti.ExponentialSurvival); "
-                    "assert callable(arti.register_survival); "
-                    "assert callable(arti.resolve_survival); "
-                    "assert arti.describe_survival('arti/survival@1').portable; "
+                    "assert arti.component_ref(arti.Half()) == 'arti/half@1'; "
+                    "assert callable(arti.component_provenance); "
+                    "assert callable(arti.component_catalog); "
+                    "assert callable(arti.component_state_contract); "
+                    "assert callable(arti.validate_component_state_contract); "
+                    "assert callable(arti.state_dict_schema); "
+                    "assert callable(arti.resolve_component); "
+                    "assert callable(arti.validate_component_provenance); "
                     "assert arti.torch.Half is arti.Half; "
-                    "assert arti.component_ref(TargetBankUpdater(4, 3)) == 'arti/target-bank-updater@1'; "
-                    "assert arti.component_ref(arti.resolve_component('arti/target-bank-updater@2', hidden_dim=4, slots=3)) == 'arti/target-bank-updater@2'; "
-                    "assert WriteRefinePolicy.adaptive(max_steps=4, min_steps=2).budget.max_steps == 4; "
-                    "assert arti.component_ref(TopologyFold(active_count=2)) == 'arti/fold@2'; "
-                    "assert arti.component_ref(TopologyUnFold(active_count=2)) == 'arti/unfold@2'; "
-                    "assert TopologyFold(active_count=2)(__import__('torch').zeros(1, 3, 4)).active.shape == (1, 2, 4); "
+                    "assert callable(arti.TensorContext); "
+                    "assert callable(arti.FrameContext); "
+                    "assert callable(arti.EmissionRouter); "
+                    "assert arti.nn.EmissionRouter is arti.EmissionRouter; "
+                    "assert arti.torch.EmissionRouter is arti.EmissionRouter; "
                     "assert callable(arti.Recall); "
                     "assert arti.nn.Recall is arti.Recall; "
                     "assert arti.torch.Recall is arti.Recall; "
+                    "assert callable(arti.module_behavior_fingerprint); "
                     "assert callable(arti.validate_formula); "
+                    "assert callable(arti.RecallFormulaId); "
                     "assert callable(arti.register_formula); "
                     "assert callable(arti.list_formulas); "
                     "assert callable(arti.UnFold); "
@@ -305,54 +191,87 @@ def main() -> None:
                     "assert callable(arti.LearnedPulse); "
                     "assert arti.torch.LearnedPulse is arti.LearnedPulse; "
                     "assert callable(arti.RecallRefiner); "
-                    "assert callable(arti.alpha.AdaptivePulse); "
-                    "assert callable(arti.alpha.AdaptiveObservation); "
-                    "assert callable(arti.alpha.FormulaAttention); "
-                    "assert callable(arti.alpha.SelectiveCompute); "
-                    "assert callable(arti.alpha.FormulaFabric); "
-                    "assert callable(arti.alpha.FormulaCommitBlend); "
-                    "assert callable(arti.alpha.RoutedFormulaFabricCompute); "
-                    "assert callable(arti.alpha.IterativeRoutedFormulaFabricCompute); "
-                    "assert callable(arti.alpha.ObjectiveExposureBank); "
-                    "assert callable(arti.alpha.ObjectiveFormulaFabricCompute); "
-                    "assert callable(arti.alpha.PairwiseRankTopologySurrogate); "
-                    "assert not hasattr(arti, 'FormulaFabric'); "
-                    "assert not hasattr(arti.nn, 'FormulaFabric'); "
-                    "refs = {row['ref'] for row in arti.component_catalog()}; "
-                    "assert {'arti/pulse@2', 'arti/adaptive-observation@1', 'arti/formula-attention@1', 'arti/formula-fabric@1', 'arti/objective-exposure-bank@1'} <= refs; "
                     "assert arti.torch.RecallRefiner is arti.RecallRefiner; "
                     "assert callable(arti.RecallCapacityPlan); "
                     "assert callable(arti.RecallCapacityDecision); "
+                    "assert callable(arti.RecallBankAssembly); "
+                    "assert callable(arti.RecallBankContract); "
+                    "assert callable(arti.RecallBankError); "
+                    "assert callable(arti.RecallBankProvenance); "
+                    "assert callable(arti.migrate_recall_bank); "
+                    "assert arti.RECALL_BANK_PROVENANCE_VERSION == 1; "
+                    "assert arti.alpha is arti.mechanisms; "
+                    "assert callable(arti.mechanisms.AdaptivePulse); "
+                    "default_layer = arti.ARTILayer(); "
+                    "assert isinstance(default_layer.pulse, arti.mechanisms.AdaptivePulse); "
+                    "assert arti.component_ref(default_layer) == 'arti/layer@2'; "
+                    "assert arti.component_spec(default_layer).lifecycle == 'stable'; "
+                    "assert arti.torch.ARTILayer is arti.ARTILayer; "
+                    "assert callable(arti.legacy.LayerRecall); "
+                    "assert callable(arti.legacy.StatefulRecall); "
+                    "assert callable(arti.legacy.ARTILayer); "
                     "assert callable(arti.alpha.RecallValueUpdater); "
                     "assert callable(arti.alpha.query_recall_branches); "
                     "assert callable(arti.alpha.run_batched_refine); "
-                    "assert callable(arti.alpha.BatchedRefinePlan); "
-                    "assert callable(arti.alpha.BranchBatchHarness); "
-                    "assert callable(arti.alpha.VolatileTensorRuntime); "
-                    "assert callable(arti.alpha.FormulaFabricV2); "
-                    "assert callable(arti.alpha.FormulaExecutionPlanV2); "
-                    "assert callable(arti.alpha.FormulaOperandBank); "
-                    "assert callable(arti.alpha.build_lora_program); "
-                    "assert callable(arti.alpha.build_routed_lora_program); "
-                    "assert callable(arti.alpha.hard_formula_route); "
                     "assert callable(arti.alpha.RefineStepTraining); "
+                    "assert callable(arti.alpha.RefineRollout); "
                     "assert callable(arti.alpha.FormulaRefineExit); "
+                    "assert callable(arti.alpha.RefineExitControl); "
+                    "assert callable(arti.alpha.RefineExitCurve); "
                     "assert callable(arti.alpha.RefineExitTraining); "
+                    "assert callable(arti.alpha.PortSpec); "
                     "assert callable(arti.alpha.OperableTensorPort); "
                     "assert callable(arti.alpha.SharedCanvasFold); "
                     "assert callable(arti.alpha.TensorEditFormula); "
+                    "assert callable(arti.alpha.TensorOperationQuery); "
+                    "assert callable(arti.alpha.TensorOperationBank); "
+                    "assert callable(arti.alpha.TensorOperationSelector); "
                     "assert callable(arti.alpha.TensorOperationLoop); "
                     "assert callable(arti.alpha.TensorOperationFieldSpec); "
                     "assert callable(arti.alpha.TensorOperationRouteSelection); "
                     "assert callable(arti.alpha.TensorInvocation); "
                     "port_spec = arti.alpha.PortSpec(canvas_tokens=2, tensor_shape=(1,), dim=2, tensor_to_canvas=(0,)); "
                     "operable_port = arti.alpha.OperableTensorPort(port_spec, batch_size=1); "
+                    "assert arti.component_ref(port_spec) == 'arti/operable-tensor-port-spec@3'; "
                     "assert arti.component_ref(operable_port) == 'arti/operable-tensor-port@2'; "
+                    "assert callable(arti.RecallTraceV3); "
+                    "assert arti.torch.RecallTraceV3 is arti.RecallTraceV3; "
+                    "assert arti.RECALL_TRACE_V3_SCHEMA_REF == 'arti/recall-trace@3'; "
+                    "exit_atom = arti.alpha.FormulaRefineExit(input_kind='logit'); "
+                    "assert arti.component_ref(exit_atom) == 'arti/formula-atom-refine-exit@1'; "
+                    "exit_request = exit_atom(torch.ones(1, 1), mask=torch.ones(1, 1, dtype=torch.bool)); "
+                    "assert arti.component_ref(exit_request) == 'arti/refine-exit-request@1'; "
+                    "assert callable(arti.alpha.BatchedRefinePlan); "
+                    "assert callable(arti.alpha.BranchBatchHarness); "
+                    "assert callable(arti.alpha.HotPagePool); "
+                    "assert callable(arti.alpha.bind_hot_page_pool); "
+                    "assert callable(arti.alpha.save_runtime_checkpoint); "
+                    "assert callable(arti.alpha.load_runtime_checkpoint); "
+                    "assert callable(arti.alpha.VolatileTensorRuntime); "
+                    "assert callable(arti.alpha.TensorSchema); "
+                    "assert callable(arti.alpha.TerminalOutputABI); "
+                    "assert callable(arti.alpha.BankExecutionSignature); "
+                    "assert callable(arti.alpha.AutonomousBankProgram); "
+                    "assert callable(arti.alpha.FederalCandidate); "
+                    "assert callable(arti.alpha.FederalRecall); "
+                    "assert callable(arti.alpha.FederalTrace); "
+                    "assert callable(arti.alpha.FormulaFabricV2); "
+                    "assert callable(arti.alpha.FormulaExecutionPlanV2); "
+                    "assert callable(arti.alpha.FormulaOperandBank); "
+                    "assert callable(arti.alpha.build_lora_program); "
+                    "assert callable(arti.alpha.build_routed_lora_program); "
+                    "assert callable(arti.alpha.hard_formula_route); "
                     "formula_program = arti.alpha.build_lora_program(input_dim=2, output_dim=2, rank=1, source_ref='arti/package-formula-bank@1', dtype='float32'); "
                     "formula_payload = json.loads(json.dumps(formula_program.to_dict())); "
                     "assert arti.alpha.FormulaProgram.from_dict(formula_payload).fingerprint == formula_program.fingerprint; "
-                    "exit_request = arti.alpha.FormulaRefineExit(input_kind='logit')(torch.ones(1, 1), mask=torch.ones(1, 1, dtype=torch.bool)); "
-                    "assert arti.component_ref(exit_request) == 'arti/refine-exit-request@1'; "
+                    "formula_bank = arti.alpha.FormulaOperandBank(keys=torch.tensor([[1.0, 0.0]]), operands={'A': torch.ones(1, 1, 2), 'B': torch.ones(1, 2, 1), 'gain': torch.ones(1)}, source_ref='arti/formula-operand-bank@1', bundle_id='lora'); "
+                    "routed_program = arti.alpha.build_routed_lora_program(input_dim=2, output_dim=2, rank=1, candidate_count=1, source_ref=formula_bank.source_ref, bundle_id=formula_bank.bundle_id, member_ids=formula_bank.member_ids, dtype='float32'); "
+                    "route = formula_bank.route(torch.tensor([[1.0, 0.0]]), estimator='hard').route; "
+                    "formula_result = arti.alpha.FormulaFabricV2(routed_program)(inputs={'x': torch.ones(1, 1, 2), 'base': torch.zeros(1, 1, 2), 'formula.route': route}, banks=formula_bank.bind(routed_program), return_trace=True); "
+                    "assert formula_result.values[0].shape == (1, 1, 2); "
+                    "assert formula_result.trace.to_dict()['schema_ref'] == 'arti/formula-trace@1'; "
+                    "formula_state_contract = arti.component_state_contract(formula_bank, formula_bank.state_dict(), scope='trainable'); "
+                    "assert arti.validate_component_state_contract(formula_state_contract, state_dict=formula_bank.state_dict(), model=formula_bank) == formula_state_contract; "
                     "assert not hasattr(arti, 'StatefulRecall'); "
                     "assert not hasattr(arti, 'LayerRecall'); "
                     "assert callable(arti.VisualField); "

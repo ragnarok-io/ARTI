@@ -19,7 +19,7 @@ HASH = "0" * 64
 
 
 def runtime(initial: dict[str, torch.Tensor] | None = None):
-    return arti.alpha.VolatileTensorRuntime(
+    return arti.mechanisms.VolatileTensorRuntime(
         initial,
         world_id="test-world",
         store_instance_id="test-store",
@@ -218,7 +218,7 @@ def test_v1_rejects_grad_noncontiguous_and_non_cpu_storage() -> None:
 
 def test_snapshot_from_another_runtime_is_rejected() -> None:
     left = runtime({"bank": torch.ones(1)})
-    right = arti.alpha.VolatileTensorRuntime(
+    right = arti.mechanisms.VolatileTensorRuntime(
         {"bank": torch.ones(1)},
         world_id="test-world",
         store_instance_id="other-store",
@@ -235,7 +235,7 @@ def test_same_metadata_runtime_and_forged_snapshot_are_rejected() -> None:
     with pytest.raises(TensorTransactionContractError, match="another runtime"):
         right.begin(snapshot, transaction_id="same-metadata", branch_id="main")
 
-    forged = arti.alpha.TensorSnapshot(
+    forged = arti.mechanisms.TensorSnapshot(
         store_instance_id=snapshot.store_instance_id,
         world_id=snapshot.world_id,
         root_id=snapshot.root_id,
@@ -263,7 +263,7 @@ def test_transaction_constructor_cannot_bypass_runtime_factory() -> None:
             transaction_id="forged-transaction",
             branch_id="main",
         )
-    assert not hasattr(arti.alpha, "TensorTransaction")
+    assert not hasattr(arti.mechanisms, "TensorTransaction")
 
 
 def test_snapshot_has_no_live_tensor_and_runtime_identity_is_read_only() -> None:
@@ -288,4 +288,4 @@ def test_alpha_surface_is_explicit_and_not_an_nn_module() -> None:
     store = runtime()
     assert store._runtime_contract_ref == "arti/volatile-tensor-runtime@1"
     assert not hasattr(store, "forward")
-    assert arti.alpha.TensorRef._runtime_contract_ref == "arti/tensor-ref@1"
+    assert arti.mechanisms.TensorRef._runtime_contract_ref == "arti/tensor-ref@1"

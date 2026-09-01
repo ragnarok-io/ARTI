@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 import arti
-from arti.alpha import (
+from arti.mechanisms import (
     AdaptiveObservation,
     AdaptivePulse,
     BankState,
@@ -72,10 +72,10 @@ def world_fixture(
     return world, supports
 
 
-def topology_pair(active_count: int) -> tuple[arti.alpha.Fold, arti.alpha.UnFold]:
-    topology = arti.alpha.ReversibleTopology(
+def topology_pair(active_count: int) -> tuple[arti.mechanisms.Fold, arti.mechanisms.UnFold]:
+    topology = arti.mechanisms.ReversibleTopology(
         active_count,
-        policy=arti.alpha.FixedTopologyPolicy(),
+        policy=arti.mechanisms.FixedTopologyPolicy(),
     )
     return topology.operations()
 
@@ -308,8 +308,8 @@ def test_pulse_overlay_rejects_selective_support_mutation(field: str) -> None:
 
 
 def test_learned_pulse_arti_st_round_trip_keeps_canonical_graph(tmp_path) -> None:
-    topology = arti.alpha.ReversibleTopology(
-        2, policy=arti.alpha.LearnedTopologyPolicy(dim=3)
+    topology = arti.mechanisms.ReversibleTopology(
+        2, policy=arti.mechanisms.LearnedTopologyPolicy(dim=3)
     )
     fold, unfold = topology.operations()
     source = AdaptivePulse(fold=fold, unfold=unfold).eval()
@@ -318,8 +318,8 @@ def test_learned_pulse_arti_st_round_trip_keeps_canonical_graph(tmp_path) -> Non
     expected = source(world, supports).value
 
     saved = arti.save(source, tmp_path / "pulse.arti.st")
-    restored_topology = arti.alpha.ReversibleTopology(
-        2, policy=arti.alpha.LearnedTopologyPolicy(dim=3)
+    restored_topology = arti.mechanisms.ReversibleTopology(
+        2, policy=arti.mechanisms.LearnedTopologyPolicy(dim=3)
     )
     restored_fold, restored_unfold = restored_topology.operations()
     target = AdaptivePulse(fold=restored_fold, unfold=restored_unfold).eval()
@@ -348,8 +348,8 @@ def test_learned_pulse_arti_st_round_trip_keeps_canonical_graph(tmp_path) -> Non
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_complete_pulse_cuda_fullgraph_forward_backward() -> None:
-    topology = arti.alpha.ReversibleTopology(
-        2, policy=arti.alpha.LearnedTopologyPolicy(dim=3)
+    topology = arti.mechanisms.ReversibleTopology(
+        2, policy=arti.mechanisms.LearnedTopologyPolicy(dim=3)
     ).cuda()
     fold, unfold = topology.operations()
     pulse = AdaptivePulse(fold=fold, unfold=unfold).cuda().train()
@@ -369,8 +369,8 @@ def test_complete_pulse_cuda_fullgraph_forward_backward() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_full_stage_pulse_cuda_fullgraph_forward_backward() -> None:
-    topology = arti.alpha.ReversibleTopology(
-        3, policy=arti.alpha.LearnedTopologyPolicy(dim=3)
+    topology = arti.mechanisms.ReversibleTopology(
+        3, policy=arti.mechanisms.LearnedTopologyPolicy(dim=3)
     ).cuda()
     fold, unfold = topology.operations()
     pulse = AdaptivePulse(
@@ -450,7 +450,7 @@ def bank_pulse(updater: nn.Module) -> AdaptivePulse:
 def test_bank_update_is_explicit_and_fixed_commit_preserves_unwritten_slots() -> None:
     value = torch.randn(1, 5, 3)
     world, supports = world_fixture(value)
-    updater = arti.alpha.TargetBankUpdater(hidden_dim=3, slots=4)
+    updater = arti.mechanisms.TargetBankUpdater(hidden_dim=3, slots=4)
     assert updater.shift_head is not None
     with torch.no_grad():
         updater.shift_head.weight.zero_()
@@ -479,7 +479,7 @@ def test_bank_update_is_explicit_and_fixed_commit_preserves_unwritten_slots() ->
 def test_empty_write_support_bypasses_updater_and_returns_bank_identity() -> None:
     value = torch.randn(1, 5, 3)
     world, supports = world_fixture(value)
-    updater = arti.alpha.TargetBankUpdater(hidden_dim=3, slots=4)
+    updater = arti.mechanisms.TargetBankUpdater(hidden_dim=3, slots=4)
     write = torch.zeros(1, 4, dtype=torch.bool)
     authorized = with_write_authority(supports, updater, write)
     bank = torch.randn(1, 4, 3)
@@ -506,19 +506,19 @@ def test_empty_write_support_bypasses_updater_and_returns_bank_identity() -> Non
 def test_bank_update_cuda_fullgraph_matches_eager(dtype: torch.dtype) -> None:
     torch.manual_seed(731)
     eager_updater = (
-        arti.alpha.TargetBankUpdater(
+        arti.mechanisms.TargetBankUpdater(
             hidden_dim=3,
             slots=4,
-            policy=arti.alpha.WriteRefinePolicy.fixed(2),
+            policy=arti.mechanisms.WriteRefinePolicy.fixed(2),
         )
         .cuda()
         .to(dtype)
     )
     compiled_updater = (
-        arti.alpha.TargetBankUpdater(
+        arti.mechanisms.TargetBankUpdater(
             hidden_dim=3,
             slots=4,
-            policy=arti.alpha.WriteRefinePolicy.fixed(2),
+            policy=arti.mechanisms.WriteRefinePolicy.fixed(2),
         )
         .cuda()
         .to(dtype)
@@ -584,7 +584,7 @@ def test_bank_update_cuda_fullgraph_matches_eager(dtype: torch.dtype) -> None:
 def test_write_authority_cannot_address_invalid_bank_slots() -> None:
     value = torch.randn(1, 5, 3)
     world, supports = world_fixture(value)
-    updater = arti.alpha.TargetBankUpdater(hidden_dim=3, slots=4)
+    updater = arti.mechanisms.TargetBankUpdater(hidden_dim=3, slots=4)
     write = torch.tensor([[False, True, False, False]])
     authorized = with_write_authority(supports, updater, write)
     called: list[bool] = []
@@ -609,7 +609,7 @@ def test_write_authority_cannot_address_invalid_bank_slots() -> None:
 def test_wrong_write_consumer_fails_before_updater_call() -> None:
     value = torch.randn(1, 5, 3)
     world, supports = world_fixture(value)
-    updater = arti.alpha.TargetBankUpdater(hidden_dim=3, slots=4)
+    updater = arti.mechanisms.TargetBankUpdater(hidden_dim=3, slots=4)
     write = torch.ones(1, 4, dtype=torch.bool)
     authorized = with_write_authority(
         supports,

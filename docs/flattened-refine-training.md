@@ -1,6 +1,6 @@
 # Flattened Refine Training
 
-`arti/refine-rollout@1` and `arti/refine-step-training@1` are alpha training
+`arti/refine-rollout@1` and `arti/refine-step-training@1` are stable training
 contracts for deep Recall. They reduce backward graph depth without changing
 the sequential deployment behavior.
 
@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 import arti
-from arti.alpha import RefineStepTraining
+from arti.mechanisms import RefineStepTraining
 
 recall = arti.Recall(64, 128, activation="none")
 trainer = RefineStepTraining(max_snapshot_staleness=0)
