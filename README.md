@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.12"
+uv add "arti-fit==3.0.13a1"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.12"
-uv add "arti-fit[qwen]==3.0.12"
-uv add "arti-fit[sd]==3.0.12"
-uv add "arti-fit[web]==3.0.12"
+uv add "arti-fit[jax]==3.0.13a1"
+uv add "arti-fit[qwen]==3.0.13a1"
+uv add "arti-fit[sd]==3.0.13a1"
+uv add "arti-fit[web]==3.0.13a1"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,14 +41,23 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Stable 3.0.12
+## Alpha 3.0.13a1
 
-This release restores real K-wide Recall traversal and extends Formula Fabric
-with stable typed atoms for nonlinear maps, broadcast, selection, lookup,
-slicing, concatenation, and masked softmax. It also ships optional alpha
-components for bounded Formula program selection and shape-polymorphic Federal
-Bank execution. Alpha component identities remain explicitly marked in the
-registry even though they are distributed in the stable package.
+This prerelease adds a typed NeuralPlasticity effect lane to Formula Fabric.
+An effect leaves its local tensor value unchanged while producing a transition
+for the owning execution site's explicit network state. Ordinary Formula nodes
+can consume the resulting state later in the same program.
+
+`FormulaProgramQueryV2` makes ordinary Formula nodes and NeuralPlasticity nodes
+part of one bounded search space. It selects their number, order, placement,
+and wiring from final task loss; callers declare local typed candidates rather
+than a complete prebuilt self-modifying chain. Program steps remain separate
+from Bank-local Refine steps. These new component identities have lifecycle
+`alpha` and do not expand the stable compatibility surface.
+
+The stable 3.0.12 base retains K-wide Recall traversal, the typed Formula atom
+basis, shape-polymorphic Federal Bank execution, and the default
+AdaptivePulse-backed `ARTILayer` described below.
 
 `arti.ARTILayer` is now `arti/layer@2`: a tensor-in/tensor-out host for one
 composable `AdaptivePulse` graph. An empty graph is an exact identity, so a
@@ -137,6 +146,8 @@ layout, dtype, and position. See [Unified Attachment](docs/unified-attachment.md
 | Iterative hidden-state refinement | `arti.RecallRefiner` |
 | Typed Formula programs | `arti.mechanisms.FormulaFabricV2` |
 | Bounded typed program selection (alpha) | `arti.mechanisms.FormulaProgramQuery` |
+| Execution-site network-state effects (alpha) | `arti.mechanisms.FormulaFabricV3` / `V4` / `V5` |
+| Self-effect topology search (alpha) | `arti.mechanisms.FormulaProgramQueryV2` |
 | Addressable forward Bank updates | `arti.mechanisms.TargetBankUpdater` |
 | Shape-autonomous Bank hierarchy | `arti.mechanisms.FederalRecall` |
 | Persistent auxiliary tensor editing | `arti.mechanisms.TensorOperationLoop` |
@@ -188,6 +199,11 @@ The stable atom basis can compose Transformer-like subgraphs without hiding an
 opaque Attention, MLP, or Transformer primitive. `FormulaProgramQuery@1` is an
 alpha controller for selecting a bounded, shape-valid SSA path from final task
 loss; it chooses one hard candidate per step rather than averaging outputs.
+
+`FormulaProgramQuery@2` extends that search to execution-site network-state
+effects. Its Query observes SSA tensor values, not the implicit state it may
+modify. The selected program returns successor state and revisions explicitly;
+the owning Bank runtime decides whether that successor becomes persistent.
 
 Federal Banks can carry their own sealed Query, Formula program, local Refine
 policy, and terminal ABI. A Bank may change its tensor shape internally and
@@ -259,8 +275,8 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.12
-将 `AdaptivePulse` 设为默认 `ARTILayer` 的执行图，并把经过版本化和验证的
-Recall、Formula、Fold/UnFold、Bank、Observation、TensorOperation 与
-Federal Bank 机制提升为稳定 API。应用负责张量的业务语义，ARTI 负责张量
-的观察、路由、变换、记忆与组合。
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a1
+在 3.0.12 稳定表面之上加入 alpha 级 NeuralPlasticity Formula effect 与
+可搜索的自修改程序拓扑：网络从局部候选中学习自修改节点的数量、顺序、位置
+和连接，而不是由调用者预先拼好完整链。应用负责张量的业务语义，ARTI 负责
+张量的观察、路由、变换、记忆与组合。

@@ -1356,6 +1356,20 @@ def _build_default_registry() -> ComponentRegistry:
         SelectAtom,
         SliceAtom,
     )
+    from .formula_v3 import (
+        FormulaEffectProgram,
+        FormulaEffectProgramV2,
+        FormulaEffectProgramV3,
+        FormulaFabricV3,
+        FormulaFabricV4,
+        FormulaFabricV5,
+        NeuralPlasticityAtom,
+        NeuralPlasticityBlendAtom,
+        NeuralPlasticityOuterAtom,
+        NeuralPlasticityPolynomialAtom,
+        NeuralPlasticityProximalAtom,
+        NeuralPlasticityTransportAtom,
+    )
     from .formula_learning import FormulaOperandBank
     from .gpu_resident import (
         BoundHotPagePool,
@@ -1421,6 +1435,9 @@ def _build_default_registry() -> ComponentRegistry:
     from .bank_local_program import (
         BankLocalFormulaAction,
         BankLocalFormulaProgram,
+        BankLocalNeuralPlasticityAction,
+        BankLocalNeuralPlasticityActionV2,
+        BankLocalNeuralPlasticityActionV3,
         BankLocalTerminalAction,
         DetachedBankLocalProgramTraining,
         DetachedBankLocalRollout,
@@ -1431,6 +1448,12 @@ def _build_default_registry() -> ComponentRegistry:
         ExactFormulaProgramQueryTraining,
         FormulaProgramCandidate,
         FormulaProgramQuery,
+    )
+    from .formula_program_query_v2 import (
+        ExactFormulaProgramQueryTrainingV2,
+        FormulaProgramEffectCandidate,
+        FormulaProgramQueryV2,
+        FormulaProgramTensorCandidate,
     )
     from .terminal_abi import (
         BankExecutionSignature,
@@ -1444,6 +1467,9 @@ def _build_default_registry() -> ComponentRegistry:
         TensorViewFormulaAction,
         TensorViewFormulaProgram,
         TensorViewLayoutTransition,
+        TensorViewNeuralPlasticityAction,
+        TensorViewNeuralPlasticityActionV2,
+        TensorViewNeuralPlasticityActionV3,
     )
     from .recall_refine import (
         AdaptiveRefinePolicy,
@@ -2979,6 +3005,56 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.bank-local.formula-action",),
     )
     add(
+        "arti/bank-local-neural-plasticity-action@1",
+        BankLocalNeuralPlasticityAction,
+        lifecycle="alpha",
+        variant="execution-site-owned-formula-effect",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.fabric),
+            "arti/tensor-schema@1",
+        ),
+        capabilities=(
+            "federal.bank-local.neural-plasticity",
+            "formula.fabric.effect-site",
+        ),
+    )
+    add(
+        "arti/bank-local-neural-plasticity-action@2",
+        BankLocalNeuralPlasticityActionV2,
+        lifecycle="alpha",
+        variant="execution-site-owned-extensible-formula-effect",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.fabric),
+            "arti/tensor-schema@1",
+        ),
+        capabilities=(
+            "federal.bank-local.neural-plasticity",
+            "formula.fabric.effect-algebra",
+            "formula.fabric.effect-site",
+        ),
+    )
+    add(
+        "arti/bank-local-neural-plasticity-action@3",
+        BankLocalNeuralPlasticityActionV3,
+        lifecycle="alpha",
+        variant="in-path-multi-effect-neural-adaptation",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.fabric),
+            "arti/tensor-schema@1",
+        ),
+        capabilities=(
+            "federal.bank-local.neural-plasticity",
+            "formula.fabric.effect-algebra",
+            "formula.fabric.in-path-effects",
+        ),
+    )
+    add(
         "arti/value-terminal-adapter@1",
         ValueTerminalAdapter,
         lifecycle=stable,
@@ -3044,6 +3120,55 @@ def _build_default_registry() -> ComponentRegistry:
             "arti/tensor-view-layout-transition@1",
         ),
         capabilities=("federal.bank-local.tensor-view-formula-action",),
+    )
+    add(
+        "arti/tensor-view-neural-plasticity-action@1",
+        TensorViewNeuralPlasticityAction,
+        lifecycle="alpha",
+        variant="identity-view-self-network-effect",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.action),
+            "arti/tensor-view-layout-transition@1",
+        ),
+        capabilities=(
+            "federal.bank-local.tensor-view-neural-plasticity",
+            "formula.fabric.effect-site",
+        ),
+    )
+    add(
+        "arti/tensor-view-neural-plasticity-action@2",
+        TensorViewNeuralPlasticityActionV2,
+        lifecycle="alpha",
+        variant="identity-view-extensible-self-network-effect",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.action),
+            "arti/tensor-view-layout-transition@1",
+        ),
+        capabilities=(
+            "federal.bank-local.tensor-view-neural-plasticity",
+            "formula.fabric.effect-algebra",
+            "formula.fabric.effect-site",
+        ),
+    )
+    add(
+        "arti/tensor-view-neural-plasticity-action@3",
+        TensorViewNeuralPlasticityActionV3,
+        lifecycle="alpha",
+        variant="formula-view-with-intermediate-self-effects",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            component_ref(component.action),
+            "arti/tensor-view-layout-transition@1",
+        ),
+        capabilities=(
+            "federal.bank-local.tensor-view-neural-plasticity",
+            "formula.fabric.in-path-effects",
+        ),
     )
     add(
         "arti/tensor-view-formula-program@1",
@@ -3141,6 +3266,220 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
+        "arti/formula-program-tensor-candidate@1",
+        FormulaProgramTensorCandidate,
+        lifecycle="alpha",
+        variant="ordinary-formula-node-in-stateful-topology-search",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.candidate),),
+        capabilities=("formula.program-query.tensor-candidate",),
+    )
+    add(
+        "arti/formula-program-effect-candidate@1",
+        FormulaProgramEffectCandidate,
+        lifecycle="alpha",
+        variant="query-placed-implicit-self-state-effect-node",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=(
+            "formula.program-query.effect-candidate",
+            "formula.program-query.searchable-neural-plasticity",
+        ),
+    )
+    add(
+        "arti/formula-program-query@2",
+        FormulaProgramQueryV2,
+        lifecycle="alpha",
+        variant="bounded-stateful-tensor-and-self-effect-topology-query",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted({component_ref(candidate) for candidate in component.candidates})
+        ),
+        capabilities=(
+            "formula.program-query.hard-one",
+            "formula.program-query.implicit-network-state",
+            "formula.program-query.searchable-neural-plasticity",
+            "formula.program-query.shape-valid",
+        ),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity@1",
+        NeuralPlasticityAtom,
+        lifecycle="alpha",
+        variant="identity-data-implicit-self-parameterized-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "additive-plus-state-scaled",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-blend@1",
+        NeuralPlasticityBlendAtom,
+        lifecycle="alpha",
+        variant="identity-data-target-directed-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "target-blend",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-outer@1",
+        NeuralPlasticityOuterAtom,
+        lifecycle="alpha",
+        variant="identity-data-rank-one-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "rank-one-additive",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-transport@1",
+        NeuralPlasticityTransportAtom,
+        lifecycle="alpha",
+        variant="identity-data-low-rank-cross-coordinate-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "low-rank-cross-coordinate-transport",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-polynomial@1",
+        NeuralPlasticityPolynomialAtom,
+        lifecycle="alpha",
+        variant="identity-data-quadratic-state-feedback-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "low-rank-quadratic-state-feedback",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-proximal@1",
+        NeuralPlasticityProximalAtom,
+        lifecycle="alpha",
+        variant="identity-data-l1-proximal-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "execution-site-self",
+            "state_access": "implicit-execution-site-parameterization",
+            "state_transition": "l1-proximal",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-effect-program@1",
+        FormulaEffectProgram,
+        lifecycle="alpha",
+        variant="data-conditioned-site-owned-formula-effect-program",
+        constructible=False,
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: component.dependency_refs,
+        capabilities=("formula.fabric.effect-program",),
+    )
+    add(
+        "arti/formula-effect-program@2",
+        FormulaEffectProgramV2,
+        lifecycle="alpha",
+        variant="data-conditioned-extensible-site-owned-effect-program",
+        constructible=False,
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: component.dependency_refs,
+        capabilities=("formula.fabric.effect-algebra", "formula.fabric.effect-program"),
+    )
+    add(
+        "arti/formula-effect-program@3",
+        FormulaEffectProgramV3,
+        lifecycle="alpha",
+        variant="ordinary-data-path-with-ordered-self-effects",
+        constructible=False,
+        config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: component.dependency_refs,
+        capabilities=(
+            "formula.fabric.effect-algebra",
+            "formula.fabric.effect-program",
+            "formula.fabric.in-path-effects",
+        ),
+    )
+    add(
+        "arti/formula-fabric@3",
+        FormulaFabricV3,
+        lifecycle="alpha",
+        variant="typed-ssa-with-execution-site-effect-lane",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            "arti/formula-effect-program@1",
+            *component.effect_program.dependency_refs,
+        ),
+        capabilities=(
+            "formula.fabric.effect-executor",
+            "formula.fabric.neural-plasticity",
+        ),
+    )
+    add(
+        "arti/formula-fabric@4",
+        FormulaFabricV4,
+        lifecycle="alpha",
+        variant="typed-ssa-with-extensible-execution-site-effect-lane",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            "arti/formula-effect-program@2",
+            *component.effect_program.dependency_refs,
+        ),
+        capabilities=(
+            "formula.fabric.effect-algebra",
+            "formula.fabric.effect-executor",
+            "formula.fabric.neural-plasticity",
+        ),
+    )
+    add(
+        "arti/formula-fabric@5",
+        FormulaFabricV5,
+        lifecycle="alpha",
+        variant="typed-ssa-with-ordered-intermediate-self-effects",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            "arti/formula-effect-program@3",
+            *component.effect_program.dependency_refs,
+        ),
+        capabilities=(
+            "formula.fabric.effect-algebra",
+            "formula.fabric.effect-executor",
+            "formula.fabric.in-path-effects",
+        ),
+    )
+    add(
         "arti/exact-formula-program-query-training@1",
         ExactFormulaProgramQueryTraining,
         lifecycle="alpha",
@@ -3149,6 +3488,19 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda _component: ("arti/formula-program-query@1",),
         capabilities=("formula.program-query.training.final-task-loss",),
+    )
+    add(
+        "arti/exact-formula-program-query-training@2",
+        ExactFormulaProgramQueryTrainingV2,
+        lifecycle="alpha",
+        variant="exact-expected-final-task-loss-with-network-state",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: ("arti/formula-program-query@2",),
+        capabilities=(
+            "formula.program-query.training.effect-topology",
+            "formula.program-query.training.final-task-loss",
+        ),
     )
     add(
         "arti/federal-recall@1",
@@ -4817,6 +5169,215 @@ def _validate_vnext_dependency_closure(
             )
         return
 
+    neural_plasticity_ref = "arti/formula-atom-neural-plasticity@1"
+    if reference == neural_plasticity_ref:
+        required = {
+            "data_lane",
+            "target_binding",
+            "state_access",
+            "state_transition",
+            "state_visibility",
+        }
+        if (
+            not isinstance(config, Mapping)
+            or set(config) != required
+            or config["data_lane"] != "identity"
+            or config["target_binding"] != "execution-site-self"
+            or config["state_access"] != "implicit-execution-site-parameterization"
+            or config["state_transition"] != "additive-plus-state-scaled"
+            or config["state_visibility"] != "next-dispatch"
+            or dependencies
+        ):
+            raise ComponentCompatibilityError(
+                "NeuralPlasticity atom config or dependency closure is invalid"
+            )
+        return
+    neural_plasticity_modes = {
+        "arti/formula-atom-neural-plasticity-blend@1": "target-blend",
+        "arti/formula-atom-neural-plasticity-outer@1": "rank-one-additive",
+        "arti/formula-atom-neural-plasticity-transport@1": (
+            "low-rank-cross-coordinate-transport"
+        ),
+        "arti/formula-atom-neural-plasticity-polynomial@1": (
+            "low-rank-quadratic-state-feedback"
+        ),
+        "arti/formula-atom-neural-plasticity-proximal@1": "l1-proximal",
+    }
+    if reference in neural_plasticity_modes:
+        required = {
+            "data_lane",
+            "target_binding",
+            "state_access",
+            "state_transition",
+            "state_visibility",
+        }
+        if (
+            not isinstance(config, Mapping)
+            or set(config) != required
+            or config["data_lane"] != "identity"
+            or config["target_binding"] != "execution-site-self"
+            or config["state_access"] != "implicit-execution-site-parameterization"
+            or config["state_transition"] != neural_plasticity_modes[reference]
+            or config["state_visibility"] != "next-dispatch"
+            or dependencies
+        ):
+            raise ComponentCompatibilityError(
+                "NeuralPlasticity effect atom config or dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-effect-program@1":
+        from .formula_v3 import FormulaEffectProgram
+
+        try:
+            program = FormulaEffectProgram.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "Formula effect program config is invalid"
+            ) from exc
+        if dependencies != list(program.dependency_refs):
+            raise ComponentCompatibilityError(
+                "Formula effect program dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-effect-program@2":
+        from .formula_v3 import FormulaEffectProgramV2
+
+        try:
+            program = FormulaEffectProgramV2.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "Formula effect program v2 config is invalid"
+            ) from exc
+        if dependencies != list(program.dependency_refs):
+            raise ComponentCompatibilityError(
+                "Formula effect program v2 dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-effect-program@3":
+        from .formula_v3 import FormulaEffectProgramV3
+
+        try:
+            program = FormulaEffectProgramV3.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError(
+                "Formula effect program v3 config is invalid"
+            ) from exc
+        if dependencies != list(program.dependency_refs):
+            raise ComponentCompatibilityError(
+                "Formula effect program v3 dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-fabric@3":
+        from .formula_v3 import FormulaEffectProgram
+
+        required = {
+            "effect_program",
+            "effect_program_fingerprint",
+            "data_lane",
+            "target_binding",
+            "state_access",
+            "state_transition",
+            "state_visibility",
+            "execution_mode",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("FormulaFabric@3 config fields")
+            program = FormulaEffectProgram.from_dict(config["effect_program"])
+            if (
+                config["effect_program_fingerprint"] != program.fingerprint
+                or config["data_lane"] != "identity"
+                or config["target_binding"] != "execution-site-self"
+                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["state_transition"] != "additive-plus-state-scaled"
+                or config["state_visibility"] != "next-dispatch"
+                or config["execution_mode"] != "eager"
+            ):
+                raise ValueError("FormulaFabric@3 contract")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("FormulaFabric@3 config is invalid") from exc
+        expected = sorted({"arti/formula-effect-program@1", *program.dependency_refs})
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "FormulaFabric@3 dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-fabric@4":
+        from .formula_v3 import FormulaEffectProgramV2
+
+        required = {
+            "effect_program",
+            "effect_program_fingerprint",
+            "effect_atom_ref",
+            "data_lane",
+            "target_binding",
+            "state_access",
+            "state_visibility",
+            "execution_mode",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("FormulaFabric@4 config fields")
+            program = FormulaEffectProgramV2.from_dict(config["effect_program"])
+            if (
+                config["effect_program_fingerprint"] != program.fingerprint
+                or config["effect_atom_ref"] != program.effect_instruction.atom_ref
+                or config["data_lane"] != "identity"
+                or config["target_binding"] != "execution-site-self"
+                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["state_visibility"] != "next-dispatch"
+                or config["execution_mode"] != "eager"
+            ):
+                raise ValueError("FormulaFabric@4 contract")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("FormulaFabric@4 config is invalid") from exc
+        expected = sorted({"arti/formula-effect-program@2", *program.dependency_refs})
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "FormulaFabric@4 dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-fabric@5":
+        from .formula_v3 import FormulaEffectProgramV3
+
+        required = {
+            "effect_program",
+            "effect_program_fingerprint",
+            "effect_atom_refs",
+            "effect_count",
+            "data_lane",
+            "effect_position",
+            "target_binding",
+            "state_access",
+            "state_visibility",
+            "execution_mode",
+        }
+        try:
+            if not isinstance(config, Mapping) or set(config) != required:
+                raise ValueError("FormulaFabric@5 config fields")
+            program = FormulaEffectProgramV3.from_dict(config["effect_program"])
+            effect_refs = [effect.atom_ref for effect in program.effect_instructions]
+            if (
+                config["effect_program_fingerprint"] != program.fingerprint
+                or config["effect_atom_refs"] != effect_refs
+                or config["effect_count"] != len(effect_refs)
+                or config["data_lane"] != "ordinary-formula-with-intermediate-effects"
+                or config["effect_position"] != "intermediate"
+                or config["target_binding"] != "execution-site-self"
+                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["state_visibility"] != "next-dispatch"
+                or config["execution_mode"] != "eager"
+            ):
+                raise ValueError("FormulaFabric@5 contract")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("FormulaFabric@5 config is invalid") from exc
+        expected = sorted({"arti/formula-effect-program@3", *program.dependency_refs})
+        if dependencies != expected:
+            raise ComponentCompatibilityError(
+                "FormulaFabric@5 dependency closure is invalid"
+            )
+        return
+
     formula_atom_refs = {
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
@@ -4833,6 +5394,8 @@ def _validate_vnext_dependency_closure(
         "arti/formula-atom-slice@1",
         "arti/formula-atom-concat@1",
         "arti/formula-atom-masked-softmax@1",
+        neural_plasticity_ref,
+        *neural_plasticity_modes,
     }
     formula_instruction_refs = formula_atom_refs | {
         "arti/fold@2",

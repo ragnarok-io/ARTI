@@ -258,6 +258,81 @@ The canonical component identity is
 `arti/iterative-routed-formula-fabric-compute@1`. Diagnostics preserve one
 ordered `RoutedFormulaFabricComputeInfo` record per executed iteration.
 
+## In-Path Neural Adaptation
+
+`FormulaEffectProgramV3` allows one ordinary Formula data path to contain an
+ordered chain of NeuralPlasticity effects. Every effect is an intermediate SSA
+instruction: an ordinary tensor instruction must precede it, another ordinary
+tensor instruction must consume it, and the public output cannot be the effect
+itself.
+
+Each effect returns its local tensor operand unchanged while updating the
+owning execution site's implicit state. Multiple effects in the same program
+apply their state transitions in program order. They are part of one forward
+execution and do not increment Bank-local Refine depth. A downstream ordinary
+Formula action can consume the updated path state through the existing state
+operand overlay during the same federated forward.
+
+This separation is deliberate:
+
+```text
+ordinary tensor Formula
+-> identity-data self effect
+-> ordinary tensor Formula
+-> identity-data self effect
+-> ordinary tensor Formula using the adapted path state
+```
+
+The downstream task loss trains the complete path. There is no state target,
+update teacher, or requirement to repeat one route. Refine remains responsible
+for repeated Bank queries, not for choosing the in-path effect topology. The
+number and placement of in-path effects are a separate architecture dimension.
+
+The alpha identities are `arti/formula-effect-program@3`,
+`arti/formula-fabric@5`, and
+`arti/bank-local-neural-plasticity-action@3`.
+
+`FormulaEffectProgramV3` is only the executor contract for an already selected
+path. It is not evidence that the path topology was discovered. Use
+`FormulaProgramQueryV2` when NeuralPlasticity nodes themselves belong to the
+search space:
+
+```python
+query = mechanisms.FormulaProgramQueryV2(
+    slot_ids=("x", "hidden", "adapted", "output"),
+    state_ids=("path-state",),
+    candidates=(
+        ordinary_formula_candidate,
+        neural_plasticity_candidate,
+        downstream_state_reader,
+    ),
+    terminal_slot="output",
+    max_steps=6,
+)
+
+loss = mechanisms.ExactFormulaProgramQueryTrainingV2(
+    exploration_probability=0.25,
+).loss(
+    query,
+    initial={"x": x},
+    states={"path-state": initial_state},
+    target=target,
+    task_loss=task_loss,
+)
+```
+
+The candidate catalog declares local typed edges, not a prebuilt complete
+effect chain. ProgramQuery chooses the number, order, placement, and wiring of
+ordinary and self-effect nodes from final task loss. Query summaries exclude
+implicit network state. An effect can use the state only through its
+execution-site transition, while a downstream ordinary Formula must explicitly
+declare a state operand to observe the updated network. Program steps and
+Bank-local Refine steps remain separate accounting dimensions.
+
+`FormulaProgramQueryV2` returns the successor states and revisions without
+mutating parameters in place. The owning Bank runtime decides whether a
+selected successor becomes persistent state.
+
 ## Compiled Topology Sources
 
 Caller-owned topology sources may remain outside a Pulse artifact. Before

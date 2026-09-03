@@ -18,7 +18,23 @@ from .federal_recall import (
     FederalCandidate,
     FederalRecallError,
 )
-from .formula_v2 import BankBinding, FormulaFabricV2, FormulaProgram, InputBinding
+from .formula_v2 import (
+    BankBinding,
+    FormulaFabricV2,
+    FormulaProgram,
+    InputBinding,
+    _validate_tensor_against_type,
+)
+from .formula_v3 import (
+    FormulaEffectProgram,
+    FormulaEffectProgramV2,
+    FormulaEffectProgramV3,
+    FormulaFabricV3,
+    FormulaFabricV4,
+    FormulaFabricV5,
+    NeuralPlasticityEffectV2,
+    apply_neural_plasticity_effect,
+)
 from .refine_exit import FormulaRefineExit
 from .tensor_schema import GradientContract, ShapeRelation, TensorSchema, TensorSchemaError
 from .terminal_abi import BankExecutionSignatureV2, TerminalOutputABI
@@ -205,12 +221,24 @@ class BankLocalFormulaAction(nn.Module):
             return False
         return True
 
-    def forward(self, value: Tensor) -> Tensor:
+    def _execute_with_operand_overrides(
+        self,
+        value: Tensor,
+        overrides: Mapping[str, Tensor] | None = None,
+    ) -> Tensor:
         self.input_schema.validate_tensor(value, name=f"{self.action_id}.input")
         tensors = self.operand_store.tensors_for(
             value,
             batch_broadcast=self.batch_broadcast_operands,
         )
+        overrides = {} if overrides is None else dict(overrides)
+        unknown = set(overrides).difference(self._bank_bindings)
+        if unknown:
+            raise ValueError(
+                "Formula operand overrides name undeclared Bank inputs: "
+                + ", ".join(sorted(unknown))
+            )
+        tensors.update(overrides)
         result = self.fabric(
             inputs={self.input_name: value},
             banks={
@@ -220,6 +248,453 @@ class BankLocalFormulaAction(nn.Module):
         ).values[self.output_index]
         self.output_schema.validate_tensor(result, name=f"{self.action_id}.output")
         return result
+
+    def forward(self, value: Tensor) -> Tensor:
+        return self._execute_with_operand_overrides(value)
+
+
+@dataclass(frozen=True)
+class BankLocalNeuralPlasticityResult:
+    """Identity data plus an uncommitted successor for the owning Bank site."""
+
+    value: Tensor
+    successor_state: Tensor
+    update: Tensor
+    previous_revision: int
+    successor_revision: int
+
+
+class BankLocalNeuralPlasticityAction(nn.Module):
+    """A Bank-owned Formula effect site with no caller-selectable target."""
+
+    _component_reference: ClassVar[str] = "arti/bank-local-neural-plasticity-action@1"
+
+    def __init__(
+        self,
+        action_id: str,
+        effect_program: FormulaEffectProgram,
+        *,
+        input_schema: TensorSchema,
+        state: Tensor,
+        operands: Mapping[str, Tensor],
+        result_kind: BankLocalActionKind = "continue",
+        next_bank_id: str | None = None,
+        trainable_operands: Sequence[str] = (),
+        batch_broadcast_operands: Sequence[str] = (),
+    ) -> None:
+        super().__init__()
+        _require_name(action_id, field="action_id")
+        if not isinstance(effect_program, FormulaEffectProgram):
+            raise TypeError("effect_program must be FormulaEffectProgram")
+        if not isinstance(input_schema, TensorSchema):
+            raise TypeError("input_schema must be TensorSchema")
+        if not isinstance(state, Tensor) or not state.is_floating_point():
+            raise TypeError("Bank-local self state must be a floating Tensor")
+        if result_kind not in {"continue", "descend"}:
+            raise ValueError("result_kind must be 'continue' or 'descend'")
+        if result_kind == "descend":
+            _require_name(next_bank_id, field="next_bank_id")
+        elif next_bank_id is not None:
+            raise ValueError("continue actions cannot declare next_bank_id")
+
+        program = effect_program.program
+        input_bindings = tuple(
+            binding for binding in program.bindings if isinstance(binding, InputBinding)
+        )
+        if len(input_bindings) != 1 or input_bindings[0].name != effect_program.data_input_name:
+            raise ValueError(
+                "BankLocalNeuralPlasticityAction@1 requires one current-data InputBinding"
+            )
+        bank_bindings = {
+            binding.name: binding
+            for binding in program.bindings
+            if isinstance(binding, BankBinding)
+        }
+        _validate_tensor_against_type(
+            state,
+            effect_program.state_type,
+            name=f"{action_id}.self_state",
+        )
+
+        self.action_id = action_id
+        self.input_schema = input_schema
+        self.output_schema = input_schema
+        self.result_kind = result_kind
+        self.next_bank_id = next_bank_id
+        self.fabric = FormulaFabricV3(effect_program)
+        self._bank_bindings = bank_bindings
+        self.operand_store = _FormulaOperandStore(
+            bank_bindings,
+            operands,
+            trainable=tuple(trainable_operands),
+        )
+        self.register_buffer("self_state", state.detach().clone(), persistent=True)
+        self.register_buffer(
+            "state_revision",
+            torch.zeros((), dtype=torch.int64),
+            persistent=True,
+        )
+        broadcast_names = frozenset(batch_broadcast_operands)
+        if not broadcast_names.issubset(bank_bindings):
+            raise ValueError(
+                "batch_broadcast_operands must name Formula Bank inputs"
+            )
+        self.batch_broadcast_operands = broadcast_names
+
+    @property
+    def effect_program(self) -> FormulaEffectProgram:
+        return self.fabric.effect_program
+
+    @property
+    def state_site_id(self) -> str:
+        return self.action_id
+
+    def initial_state(self) -> Tensor:
+        return self.self_state.detach().clone()
+
+    def initial_revision(self) -> int:
+        return int(self.state_revision.detach().cpu())
+
+    def _validate_state(self, state: Tensor) -> None:
+        _validate_tensor_against_type(
+            state,
+            self.effect_program.state_type,
+            name=f"{self.action_id}.self_state",
+        )
+
+    def contract_config(self) -> dict[str, object]:
+        return {
+            "action_id": self.action_id,
+            "effect_program_fingerprint": self.effect_program.fingerprint,
+            "input_schema": self.input_schema.to_dict(),
+            "result_kind": self.result_kind,
+            "next_bank_id": self.next_bank_id,
+            "state_type": self.effect_program.state_type.to_dict(),
+            "self_state": _tensor_contract(self.self_state, trainable=False),
+            "state_access": "implicit-execution-site-parameterization",
+            "operands": self.operand_store.contract_config(),
+            "batch_broadcast_operands": sorted(self.batch_broadcast_operands),
+            "target_binding": "execution-site-self",
+        }
+
+    def accepts(self, value: Tensor) -> bool:
+        try:
+            self.input_schema.validate_tensor(value, name=f"{self.action_id}.input")
+        except TensorSchemaError:
+            return False
+        return True
+
+    def _execute_with_state(
+        self,
+        value: Tensor,
+        state: Tensor,
+        *,
+        return_trace: bool = False,
+        previous_revision: int | None = None,
+    ) -> BankLocalNeuralPlasticityResult:
+        self.input_schema.validate_tensor(value, name=f"{self.action_id}.input")
+        tensors = self.operand_store.tensors_for(
+            value,
+            batch_broadcast=self.batch_broadcast_operands,
+        )
+        result = self.fabric._execute_owned(
+            inputs={self.effect_program.data_input_name: value},
+            banks={
+                name: binding.bind(tensors[name])
+                for name, binding in self._bank_bindings.items()
+            },
+            return_trace=return_trace,
+        )
+        if result.value is not value:
+            raise FederalRecallError("NeuralPlasticity data lane must preserve Tensor identity")
+        self._validate_state(state)
+        additive = result.effect.additive_update
+        multiplicative = result.effect.multiplicative_update
+        for name, update in (
+            ("additive_update", additive),
+            ("multiplicative_update", multiplicative),
+        ):
+            _validate_tensor_against_type(
+                update,
+                self.effect_program.state_type,
+                name=f"{self.action_id}.{name}",
+            )
+            if update.shape != state.shape or update.dtype != state.dtype or update.device != state.device:
+                raise FederalRecallError(
+                    "NeuralPlasticity update operands must exactly match execution-site state"
+                )
+        successor = state + additive + state * multiplicative
+        revision = self.initial_revision() if previous_revision is None else previous_revision
+        return BankLocalNeuralPlasticityResult(
+            result.value,
+            successor,
+            successor - state,
+            revision,
+            revision + 1,
+        )
+
+    def forward(self, value: Tensor) -> BankLocalNeuralPlasticityResult:
+        return self._execute_with_state(value, self.initial_state())
+
+    def _commit_successor(self, successor_state: Tensor, successor_revision: int) -> None:
+        with torch.no_grad():
+            self.self_state.copy_(successor_state.detach())
+            self.state_revision.fill_(successor_revision)
+
+
+class BankLocalNeuralPlasticityActionV2(BankLocalNeuralPlasticityAction):
+    """Bank-owned site supporting the extensible NeuralPlasticity effect algebra."""
+
+    _component_reference: ClassVar[str] = "arti/bank-local-neural-plasticity-action@2"
+
+    def __init__(
+        self,
+        action_id: str,
+        effect_program: FormulaEffectProgramV2,
+        *,
+        input_schema: TensorSchema,
+        state: Tensor,
+        operands: Mapping[str, Tensor],
+        result_kind: BankLocalActionKind = "continue",
+        next_bank_id: str | None = None,
+        trainable_operands: Sequence[str] = (),
+        batch_broadcast_operands: Sequence[str] = (),
+    ) -> None:
+        nn.Module.__init__(self)
+        _require_name(action_id, field="action_id")
+        if not isinstance(effect_program, FormulaEffectProgramV2):
+            raise TypeError("effect_program must be FormulaEffectProgramV2")
+        if not isinstance(input_schema, TensorSchema):
+            raise TypeError("input_schema must be TensorSchema")
+        if not isinstance(state, Tensor) or not state.is_floating_point():
+            raise TypeError("Bank-local self state must be a floating Tensor")
+        if result_kind not in {"continue", "descend"}:
+            raise ValueError("result_kind must be 'continue' or 'descend'")
+        if result_kind == "descend":
+            _require_name(next_bank_id, field="next_bank_id")
+        elif next_bank_id is not None:
+            raise ValueError("continue actions cannot declare next_bank_id")
+
+        program = effect_program.program
+        input_bindings = tuple(
+            binding for binding in program.bindings if isinstance(binding, InputBinding)
+        )
+        if len(input_bindings) != 1 or input_bindings[0].name != effect_program.data_input_name:
+            raise ValueError(
+                "BankLocalNeuralPlasticityAction@2 requires one current-data InputBinding"
+            )
+        bank_bindings = {
+            binding.name: binding
+            for binding in program.bindings
+            if isinstance(binding, BankBinding)
+        }
+        _validate_tensor_against_type(
+            state,
+            effect_program.state_type,
+            name=f"{action_id}.self_state",
+        )
+
+        self.action_id = action_id
+        self.input_schema = input_schema
+        self.output_schema = input_schema
+        self.result_kind = result_kind
+        self.next_bank_id = next_bank_id
+        self.fabric = FormulaFabricV4(effect_program)
+        self._bank_bindings = bank_bindings
+        self.operand_store = _FormulaOperandStore(
+            bank_bindings,
+            operands,
+            trainable=tuple(trainable_operands),
+        )
+        self.register_buffer("self_state", state.detach().clone(), persistent=True)
+        self.register_buffer(
+            "state_revision",
+            torch.zeros((), dtype=torch.int64),
+            persistent=True,
+        )
+        broadcast_names = frozenset(batch_broadcast_operands)
+        if not broadcast_names.issubset(bank_bindings):
+            raise ValueError(
+                "batch_broadcast_operands must name Formula Bank inputs"
+            )
+        self.batch_broadcast_operands = broadcast_names
+
+    @property
+    def effect_program(self) -> FormulaEffectProgramV2:
+        return self.fabric.effect_program
+
+    def _execute_with_state(
+        self,
+        value: Tensor,
+        state: Tensor,
+        *,
+        return_trace: bool = False,
+        previous_revision: int | None = None,
+    ) -> BankLocalNeuralPlasticityResult:
+        self.input_schema.validate_tensor(value, name=f"{self.action_id}.input")
+        tensors = self.operand_store.tensors_for(
+            value,
+            batch_broadcast=self.batch_broadcast_operands,
+        )
+        result = self.fabric._execute_owned(
+            inputs={self.effect_program.data_input_name: value},
+            banks={
+                name: binding.bind(tensors[name])
+                for name, binding in self._bank_bindings.items()
+            },
+            return_trace=return_trace,
+        )
+        if result.value is not value:
+            raise FederalRecallError("NeuralPlasticity data lane must preserve Tensor identity")
+        self._validate_state(state)
+        successor = self._apply_effect(result.effect, state)
+        revision = self.initial_revision() if previous_revision is None else previous_revision
+        return BankLocalNeuralPlasticityResult(
+            result.value,
+            successor,
+            successor - state,
+            revision,
+            revision + 1,
+        )
+
+    def _apply_effect(self, effect: NeuralPlasticityEffectV2, state: Tensor) -> Tensor:
+        return apply_neural_plasticity_effect(
+            effect,
+            state,
+            state_type=self.effect_program.state_type,
+        )
+
+
+class BankLocalNeuralPlasticityActionV3(BankLocalNeuralPlasticityActionV2):
+    """Run multiple self-effects inside one ordinary Bank-local Formula path."""
+
+    _component_reference: ClassVar[str] = "arti/bank-local-neural-plasticity-action@3"
+
+    def __init__(
+        self,
+        action_id: str,
+        effect_program: FormulaEffectProgramV3,
+        *,
+        input_schema: TensorSchema,
+        output_schema: TensorSchema,
+        state: Tensor,
+        operands: Mapping[str, Tensor],
+        result_kind: BankLocalActionKind = "continue",
+        next_bank_id: str | None = None,
+        trainable_operands: Sequence[str] = (),
+        batch_broadcast_operands: Sequence[str] = (),
+    ) -> None:
+        nn.Module.__init__(self)
+        _require_name(action_id, field="action_id")
+        if not isinstance(effect_program, FormulaEffectProgramV3):
+            raise TypeError("effect_program must be FormulaEffectProgramV3")
+        if not isinstance(input_schema, TensorSchema) or not isinstance(
+            output_schema, TensorSchema
+        ):
+            raise TypeError("action schemas must be TensorSchema values")
+        if not isinstance(state, Tensor) or not state.is_floating_point():
+            raise TypeError("Bank-local self state must be a floating Tensor")
+        if result_kind not in {"continue", "descend"}:
+            raise ValueError("result_kind must be 'continue' or 'descend'")
+        if result_kind == "descend":
+            _require_name(next_bank_id, field="next_bank_id")
+        elif next_bank_id is not None:
+            raise ValueError("continue actions cannot declare next_bank_id")
+
+        program = effect_program.program
+        input_bindings = tuple(
+            binding for binding in program.bindings if isinstance(binding, InputBinding)
+        )
+        if len(input_bindings) != 1 or input_bindings[0].name != effect_program.data_input_name:
+            raise ValueError(
+                "BankLocalNeuralPlasticityAction@3 requires one current-data InputBinding"
+            )
+        bank_bindings = {
+            binding.name: binding
+            for binding in program.bindings
+            if isinstance(binding, BankBinding)
+        }
+        _validate_tensor_against_type(
+            state,
+            effect_program.state_type,
+            name=f"{action_id}.self_state",
+        )
+
+        self.action_id = action_id
+        self.input_schema = input_schema
+        self.output_schema = output_schema
+        self.result_kind = result_kind
+        self.next_bank_id = next_bank_id
+        self.fabric = FormulaFabricV5(effect_program)
+        self._bank_bindings = bank_bindings
+        self.operand_store = _FormulaOperandStore(
+            bank_bindings,
+            operands,
+            trainable=tuple(trainable_operands),
+        )
+        self.register_buffer("self_state", state.detach().clone(), persistent=True)
+        self.register_buffer("state_revision", torch.zeros((), dtype=torch.int64), persistent=True)
+        broadcast_names = frozenset(batch_broadcast_operands)
+        if not broadcast_names.issubset(bank_bindings):
+            raise ValueError("batch_broadcast_operands must name Formula Bank inputs")
+        self.batch_broadcast_operands = broadcast_names
+
+    @property
+    def effect_program(self) -> FormulaEffectProgramV3:
+        return self.fabric.effect_program
+
+    def contract_config(self) -> dict[str, object]:
+        return {
+            "action_id": self.action_id,
+            "effect_program_fingerprint": self.effect_program.fingerprint,
+            "input_schema": self.input_schema.to_dict(),
+            "output_schema": self.output_schema.to_dict(),
+            "result_kind": self.result_kind,
+            "next_bank_id": self.next_bank_id,
+            "state_type": self.effect_program.state_type.to_dict(),
+            "self_state": _tensor_contract(self.self_state, trainable=False),
+            "state_access": "implicit-execution-site-parameterization",
+            "operands": self.operand_store.contract_config(),
+            "batch_broadcast_operands": sorted(self.batch_broadcast_operands),
+            "target_binding": "execution-site-self",
+            "effect_count": len(self.effect_program.effect_instructions),
+            "effect_step_accounting": "inside-forward-not-refine",
+        }
+
+    def _execute_with_state(
+        self,
+        value: Tensor,
+        state: Tensor,
+        *,
+        return_trace: bool = False,
+        previous_revision: int | None = None,
+    ) -> BankLocalNeuralPlasticityResult:
+        self.input_schema.validate_tensor(value, name=f"{self.action_id}.input")
+        tensors = self.operand_store.tensors_for(
+            value,
+            batch_broadcast=self.batch_broadcast_operands,
+        )
+        result = self.fabric._execute_owned(
+            inputs={self.effect_program.data_input_name: value},
+            banks={
+                name: binding.bind(tensors[name])
+                for name, binding in self._bank_bindings.items()
+            },
+            return_trace=return_trace,
+        )
+        self.output_schema.validate_tensor(result.value, name=f"{self.action_id}.output")
+        self._validate_state(state)
+        successor = state
+        for effect in result.effects:
+            successor = self._apply_effect(effect, successor)
+        revision = self.initial_revision() if previous_revision is None else previous_revision
+        return BankLocalNeuralPlasticityResult(
+            result.value,
+            successor,
+            successor - state,
+            revision,
+            revision + 1,
+        )
 
 
 class ValueTerminalAdapter(nn.Module):
@@ -880,6 +1355,10 @@ __all__ = [
     "BankLocalActionKind",
     "BankLocalDescendLoss",
     "BankLocalFormulaAction",
+    "BankLocalNeuralPlasticityAction",
+    "BankLocalNeuralPlasticityActionV2",
+    "BankLocalNeuralPlasticityActionV3",
+    "BankLocalNeuralPlasticityResult",
     "BankLocalFormulaProgram",
     "BankLocalProgramTrainingLoss",
     "BankLocalTaskLoss",

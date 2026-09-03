@@ -7,7 +7,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, replace
-from typing import ClassVar, Literal, Mapping, NamedTuple, Sequence
+from typing import Callable, ClassVar, Literal, Mapping, NamedTuple, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -88,6 +88,18 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
         2,
         frozenset({"axis", "accumulation_dtype"}),
     ),
+    "arti/formula-atom-neural-plasticity@1": (3, frozenset()),
+    "arti/formula-atom-neural-plasticity-blend@1": (3, frozenset()),
+    "arti/formula-atom-neural-plasticity-outer@1": (4, frozenset()),
+    "arti/formula-atom-neural-plasticity-transport@1": (
+        5,
+        frozenset({"state_axis"}),
+    ),
+    "arti/formula-atom-neural-plasticity-polynomial@1": (
+        6,
+        frozenset({"state_axis"}),
+    ),
+    "arti/formula-atom-neural-plasticity-proximal@1": (3, frozenset()),
     # Parse-only compatibility for FormulaProgram@2 payloads emitted before
     # index worksets stopped borrowing the canonical topology identities.
     "arti/fold@2": (
@@ -1042,6 +1054,17 @@ _LEGACY_INDEX_ATOM_DEPENDENCIES = {
     "arti/unfold@2": "arti/formula-atom-scatter@1",
 }
 
+_EFFECT_ATOM_REFS = frozenset(
+    {
+        "arti/formula-atom-neural-plasticity@1",
+        "arti/formula-atom-neural-plasticity-blend@1",
+        "arti/formula-atom-neural-plasticity-outer@1",
+        "arti/formula-atom-neural-plasticity-transport@1",
+        "arti/formula-atom-neural-plasticity-polynomial@1",
+        "arti/formula-atom-neural-plasticity-proximal@1",
+    }
+)
+
 
 def formula_program_dependency_refs(program: FormulaProgram) -> tuple[str, ...]:
     """Return the atom references that a Formula program actually executes.
@@ -1060,6 +1083,16 @@ def formula_program_dependency_refs(program: FormulaProgram) -> tuple[str, ...]:
                 for item in program.instructions
             }
         )
+    )
+
+
+def formula_program_effect_refs(program: FormulaProgram) -> tuple[str, ...]:
+    """Return effect atoms that require an effect-aware Formula executor."""
+
+    if not isinstance(program, FormulaProgram):
+        raise TypeError("program must be FormulaProgram")
+    return tuple(
+        sorted({item.atom_ref for item in program.instructions if item.atom_ref in _EFFECT_ATOM_REFS})
     )
 
 
@@ -1333,6 +1366,254 @@ def index_fold(
     if active.value_type.axis_names != output_axes or active.value_type.sizes != output_sizes:
         raise AssertionError("index_fold gather inference is inconsistent")
     return FabricIndexFoldState(value_expr, index_expr, active, axis, index_axis)
+
+
+def neural_plasticity(
+    value: FormulaOperand,
+    additive_update: FormulaOperand,
+    multiplicative_update: FormulaOperand,
+) -> _FormulaExpr:
+    """Emit site-owned update operands while leaving the data operand unchanged."""
+
+    value_expr = _as_expr(value)
+    additive_expr = _as_expr(additive_update)
+    multiplicative_expr = _as_expr(multiplicative_update)
+    if additive_expr.value_type != multiplicative_expr.value_type:
+        raise FormulaTypeError(
+            "FF3_EFFECT_TYPE",
+            "NeuralPlasticity additive and multiplicative updates must share one type",
+        )
+    if not additive_expr.value_type.dtype.startswith("float") and (
+        additive_expr.value_type.dtype not in {"floating", "bfloat16"}
+    ):
+        raise FormulaTypeError(
+            "FF3_STATE_DTYPE", "NeuralPlasticity update operands must be floating"
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity@1",
+        (value_expr, additive_expr, multiplicative_expr),
+        (),
+    )
+
+
+def neural_plasticity_blend(
+    value: FormulaOperand,
+    target: FormulaOperand,
+    amount: FormulaOperand,
+) -> _FormulaExpr:
+    """Move site-owned state toward a target while preserving the data operand."""
+
+    value_expr = _as_expr(value)
+    target_expr = _as_expr(target)
+    amount_expr = _as_expr(amount)
+    if target_expr.value_type != amount_expr.value_type:
+        raise FormulaTypeError(
+            "FF4_EFFECT_TYPE",
+            "NeuralPlasticity blend target and amount must share one type",
+        )
+    if not target_expr.value_type.dtype.startswith("float") and (
+        target_expr.value_type.dtype not in {"floating", "bfloat16"}
+    ):
+        raise FormulaTypeError(
+            "FF4_STATE_DTYPE", "NeuralPlasticity blend operands must be floating"
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity-blend@1",
+        (value_expr, target_expr, amount_expr),
+        (),
+    )
+
+
+def neural_plasticity_outer(
+    value: FormulaOperand,
+    left: FormulaOperand,
+    right: FormulaOperand,
+    rate: FormulaOperand,
+) -> _FormulaExpr:
+    """Emit a rank-one site-state update while preserving the data operand."""
+
+    value_expr = _as_expr(value)
+    left_expr = _as_expr(left)
+    right_expr = _as_expr(right)
+    rate_expr = _as_expr(rate)
+    if len(left_expr.value_type.axis_names) != 1 or len(right_expr.value_type.axis_names) != 1:
+        raise FormulaTypeError(
+            "FF4_OUTER_RANK",
+            "NeuralPlasticity outer factors must each have rank one",
+        )
+    if rate_expr.value_type.axis_names or rate_expr.value_type.sizes:
+        raise FormulaTypeError(
+            "FF4_OUTER_RATE", "NeuralPlasticity outer rate must be scalar"
+        )
+    dtypes = {
+        left_expr.value_type.dtype,
+        right_expr.value_type.dtype,
+        rate_expr.value_type.dtype,
+    }
+    if len(dtypes) != 1 or not left_expr.value_type.dtype.startswith("float") and (
+        left_expr.value_type.dtype not in {"floating", "bfloat16"}
+    ):
+        raise FormulaTypeError(
+            "FF4_STATE_DTYPE",
+            "NeuralPlasticity outer factors and rate must share a floating dtype",
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity-outer@1",
+        (value_expr, left_expr, right_expr, rate_expr),
+        (),
+    )
+
+
+def neural_plasticity_transport(
+    value: FormulaOperand,
+    bias: FormulaOperand,
+    output_factor: FormulaOperand,
+    input_factor: FormulaOperand,
+    rate: FormulaOperand,
+    *,
+    state_axis: str,
+) -> _FormulaExpr:
+    """Emit a low-rank cross-coordinate state transport effect."""
+
+    value_expr = _as_expr(value)
+    bias_expr = _as_expr(bias)
+    output_expr = _as_expr(output_factor)
+    input_expr = _as_expr(input_factor)
+    rate_expr = _as_expr(rate)
+    if output_expr.value_type != input_expr.value_type:
+        raise FormulaTypeError(
+            "FF4_TRANSPORT_TYPE",
+            "NeuralPlasticity transport factors must share one type",
+        )
+    if len(output_expr.value_type.axis_names) != 2:
+        raise FormulaTypeError(
+            "FF4_TRANSPORT_RANK",
+            "NeuralPlasticity transport factors must have rank two",
+        )
+    if output_expr.value_type.axis_names[0] != state_axis:
+        raise FormulaTypeError(
+            "FF4_TRANSPORT_AXIS",
+            "NeuralPlasticity transport factor leading axis must equal state_axis",
+        )
+    if rate_expr.value_type.axis_names or rate_expr.value_type.sizes:
+        raise FormulaTypeError(
+            "FF4_TRANSPORT_RATE", "NeuralPlasticity transport rate must be scalar"
+        )
+    dtypes = {
+        bias_expr.value_type.dtype,
+        output_expr.value_type.dtype,
+        input_expr.value_type.dtype,
+        rate_expr.value_type.dtype,
+    }
+    dtype = bias_expr.value_type.dtype
+    if len(dtypes) != 1 or not dtype.startswith("float") and dtype not in {
+        "floating",
+        "bfloat16",
+    }:
+        raise FormulaTypeError(
+            "FF4_STATE_DTYPE",
+            "NeuralPlasticity transport operands must share a floating dtype",
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity-transport@1",
+        (value_expr, bias_expr, output_expr, input_expr, rate_expr),
+        (("state_axis", state_axis),),
+    )
+
+
+def neural_plasticity_polynomial(
+    value: FormulaOperand,
+    bias: FormulaOperand,
+    output_factor: FormulaOperand,
+    left_factor: FormulaOperand,
+    right_factor: FormulaOperand,
+    rate: FormulaOperand,
+    *,
+    state_axis: str,
+) -> _FormulaExpr:
+    """Emit a quadratic state-feedback effect in a learned low-rank subspace."""
+
+    value_expr = _as_expr(value)
+    bias_expr = _as_expr(bias)
+    output_expr = _as_expr(output_factor)
+    left_expr = _as_expr(left_factor)
+    right_expr = _as_expr(right_factor)
+    rate_expr = _as_expr(rate)
+    if output_expr.value_type != left_expr.value_type or (
+        output_expr.value_type != right_expr.value_type
+    ):
+        raise FormulaTypeError(
+            "FF4_POLYNOMIAL_TYPE",
+            "NeuralPlasticity polynomial factors must share one type",
+        )
+    if len(output_expr.value_type.axis_names) != 2:
+        raise FormulaTypeError(
+            "FF4_POLYNOMIAL_RANK",
+            "NeuralPlasticity polynomial factors must have rank two",
+        )
+    if output_expr.value_type.axis_names[0] != state_axis:
+        raise FormulaTypeError(
+            "FF4_POLYNOMIAL_AXIS",
+            "NeuralPlasticity polynomial factor leading axis must equal state_axis",
+        )
+    if rate_expr.value_type.axis_names or rate_expr.value_type.sizes:
+        raise FormulaTypeError(
+            "FF4_POLYNOMIAL_RATE", "NeuralPlasticity polynomial rate must be scalar"
+        )
+    dtypes = {
+        bias_expr.value_type.dtype,
+        output_expr.value_type.dtype,
+        left_expr.value_type.dtype,
+        right_expr.value_type.dtype,
+        rate_expr.value_type.dtype,
+    }
+    dtype = bias_expr.value_type.dtype
+    if len(dtypes) != 1 or not dtype.startswith("float") and dtype not in {
+        "floating",
+        "bfloat16",
+    }:
+        raise FormulaTypeError(
+            "FF4_STATE_DTYPE",
+            "NeuralPlasticity polynomial operands must share a floating dtype",
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity-polynomial@1",
+        (value_expr, bias_expr, output_expr, left_expr, right_expr, rate_expr),
+        (("state_axis", state_axis),),
+    )
+
+
+def neural_plasticity_proximal(
+    value: FormulaOperand,
+    bias: FormulaOperand,
+    raw_strength: FormulaOperand,
+) -> _FormulaExpr:
+    """Emit an L1 proximal state effect with data-conditioned operands."""
+
+    value_expr = _as_expr(value)
+    bias_expr = _as_expr(bias)
+    strength_expr = _as_expr(raw_strength)
+    if bias_expr.value_type != strength_expr.value_type:
+        raise FormulaTypeError(
+            "FF4_PROXIMAL_TYPE",
+            "NeuralPlasticity proximal bias and strength must share one type",
+        )
+    dtype = bias_expr.value_type.dtype
+    if not dtype.startswith("float") and dtype not in {"floating", "bfloat16"}:
+        raise FormulaTypeError(
+            "FF4_STATE_DTYPE", "NeuralPlasticity proximal operands must be floating"
+        )
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-neural-plasticity-proximal@1",
+        (value_expr, bias_expr, strength_expr),
+        (),
+    )
 
 
 def index_unfold(state: FabricIndexFoldState, active: FormulaOperand) -> _FormulaExpr:
@@ -2285,6 +2566,11 @@ class FormulaExecutionPlanV2(nn.Module):
         super().__init__()
         if not isinstance(program, FormulaProgram):
             raise TypeError("FormulaExecutionPlanV2 requires FormulaProgram")
+        if formula_program_effect_refs(program):
+            raise FormulaProgramError(
+                "FF2_EFFECT_UNSUPPORTED",
+                "FormulaExecutionPlan@1 cannot lower effect-bearing programs",
+            )
         self.program = program
         self.program_fingerprint = program.fingerprint
         slot_indices = {
@@ -2349,11 +2635,18 @@ class FormulaFabricV2(nn.Module):
 
     _component_reference: ClassVar[str] = "arti/formula-fabric@2"
 
-    def __init__(self, program: FormulaProgram) -> None:
+    def __init__(self, program: FormulaProgram, *, _allow_effects: bool = False) -> None:
         super().__init__()
         if not isinstance(program, FormulaProgram):
             raise TypeError("FormulaFabricV2 requires FormulaProgram")
+        effects = formula_program_effect_refs(program)
+        if effects and not _allow_effects:
+            raise FormulaProgramError(
+                "FF2_EFFECT_UNSUPPORTED",
+                "FormulaFabric@2 cannot execute effect-bearing programs; use FormulaFabric@3",
+            )
         self.program = program
+        self._allow_effects = bool(_allow_effects)
 
     def execution_plan(self) -> FormulaExecutionPlanV2:
         return FormulaExecutionPlanV2(self.program)
@@ -2380,6 +2673,26 @@ class FormulaFabricV2(nn.Module):
         banks: Mapping[str, FormulaBankOperand],
         return_trace: bool = False,
     ) -> FormulaFabricV2Result:
+        return self._execute(
+            inputs=inputs,
+            banks=banks,
+            return_trace=return_trace,
+            effect_sink=None,
+        )
+
+    def _execute(
+        self,
+        *,
+        inputs: Mapping[str, Tensor],
+        banks: Mapping[str, FormulaBankOperand],
+        return_trace: bool,
+        effect_sink: Callable[[FormulaInstructionV2, tuple[Tensor, ...]], None] | None,
+    ) -> FormulaFabricV2Result:
+        if formula_program_effect_refs(self.program) and effect_sink is None:
+            raise FormulaProgramError(
+                "FF3_EFFECT_CONTEXT_REQUIRED",
+                "effect-bearing Formula execution requires an execution-site effect sink",
+            )
         slots, axis_extents = _bind_runtime_values(self.program, inputs=inputs, banks=banks)
         _preflight_program_shapes(self.program, slots, axis_extents)
 
@@ -2407,6 +2720,7 @@ class FormulaFabricV2(nn.Module):
                     operands,
                     input_types,
                     axis_extents,
+                    effect_sink=effect_sink,
                 )
                 _validate_tensor_against_type(
                     candidate,
@@ -2674,6 +2988,68 @@ def _infer_instruction_output_type(
             axis=attributes["axis"],
             accumulation_dtype=attributes["accumulation_dtype"],
         ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity@1"
+        and len(operand_types) == 3
+    ):
+        return neural_plasticity(
+            InputBinding("value", operand_types[0]),
+            InputBinding("additive_update", operand_types[1]),
+            InputBinding("multiplicative_update", operand_types[2]),
+        ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity-blend@1"
+        and len(operand_types) == 3
+    ):
+        return neural_plasticity_blend(
+            InputBinding("value", operand_types[0]),
+            InputBinding("target", operand_types[1]),
+            InputBinding("amount", operand_types[2]),
+        ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity-outer@1"
+        and len(operand_types) == 4
+    ):
+        return neural_plasticity_outer(
+            InputBinding("value", operand_types[0]),
+            InputBinding("left", operand_types[1]),
+            InputBinding("right", operand_types[2]),
+            InputBinding("rate", operand_types[3]),
+        ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity-transport@1"
+        and len(operand_types) == 5
+    ):
+        return neural_plasticity_transport(
+            InputBinding("value", operand_types[0]),
+            InputBinding("bias", operand_types[1]),
+            InputBinding("output_factor", operand_types[2]),
+            InputBinding("input_factor", operand_types[3]),
+            InputBinding("rate", operand_types[4]),
+            state_axis=attributes["state_axis"],
+        ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity-polynomial@1"
+        and len(operand_types) == 6
+    ):
+        return neural_plasticity_polynomial(
+            InputBinding("value", operand_types[0]),
+            InputBinding("bias", operand_types[1]),
+            InputBinding("output_factor", operand_types[2]),
+            InputBinding("left_factor", operand_types[3]),
+            InputBinding("right_factor", operand_types[4]),
+            InputBinding("rate", operand_types[5]),
+            state_axis=attributes["state_axis"],
+        ).value_type
+    if (
+        instruction.atom_ref == "arti/formula-atom-neural-plasticity-proximal@1"
+        and len(operand_types) == 3
+    ):
+        return neural_plasticity_proximal(
+            InputBinding("value", operand_types[0]),
+            InputBinding("bias", operand_types[1]),
+            InputBinding("raw_strength", operand_types[2]),
+        ).value_type
     if instruction.atom_ref == "arti/fold@2" and len(operand_types) == 2:
         if (
             attributes["record_schema_ref"] != "arti/fold-record@1"
@@ -2714,6 +3090,8 @@ def _execute_instruction(
     operands: tuple[Tensor, ...],
     operand_types: tuple[TensorType, ...],
     dimension_extents: Mapping[str, int],
+    *,
+    effect_sink: Callable[[FormulaInstructionV2, tuple[Tensor, ...]], None] | None = None,
 ) -> Tensor:
     attributes = dict(instruction.attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1":
@@ -2834,6 +3212,28 @@ def _execute_instruction(
             axis=attributes["axis"],
             accumulation_dtype=attributes["accumulation_dtype"],
         )
+    if instruction.atom_ref == "arti/formula-atom-neural-plasticity@1":
+        if effect_sink is None:
+            raise FormulaProgramError(
+                "FF3_EFFECT_CONTEXT_REQUIRED",
+                "NeuralPlasticity@1 requires an execution-site effect sink",
+            )
+        effect_sink(instruction, (operands[1], operands[2]))
+        return operands[0]
+    if instruction.atom_ref in {
+        "arti/formula-atom-neural-plasticity-blend@1",
+        "arti/formula-atom-neural-plasticity-outer@1",
+        "arti/formula-atom-neural-plasticity-transport@1",
+        "arti/formula-atom-neural-plasticity-polynomial@1",
+        "arti/formula-atom-neural-plasticity-proximal@1",
+    }:
+        if effect_sink is None:
+            raise FormulaProgramError(
+                "FF4_EFFECT_CONTEXT_REQUIRED",
+                "NeuralPlasticity effects require an execution-site effect sink",
+            )
+        effect_sink(instruction, operands[1:])
+        return operands[0]
     if instruction.atom_ref == "arti/fold@2":
         return _named_gather(
             operands[0],
@@ -3407,6 +3807,58 @@ def _validate_instruction_dtype_contract(
                 "MaskedSoftmax requires floating logits and a boolean mask",
             )
         return
+    if atom_ref == "arti/formula-atom-neural-plasticity@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if len(dtypes) != 3 or dtypes[1] not in floating or dtypes[2] not in floating:
+            raise FormulaBindingError(
+                "FF3_STATE_DTYPE",
+                "NeuralPlasticity update operands must use floating dtypes",
+            )
+        return
+    if atom_ref == "arti/formula-atom-neural-plasticity-blend@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if (
+            len(dtypes) != 3
+            or dtypes[1] not in floating
+            or dtypes[1] != dtypes[2]
+        ):
+            raise FormulaBindingError(
+                "FF4_STATE_DTYPE",
+                "NeuralPlasticity blend target and amount must share a floating dtype",
+            )
+        return
+    if atom_ref == "arti/formula-atom-neural-plasticity-outer@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if len(dtypes) != 4 or len(set(dtypes[1:])) != 1 or dtypes[1] not in floating:
+            raise FormulaBindingError(
+                "FF4_STATE_DTYPE",
+                "NeuralPlasticity outer factors and rate must share a floating dtype",
+            )
+        return
+    if atom_ref == "arti/formula-atom-neural-plasticity-transport@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if len(dtypes) != 5 or len(set(dtypes[1:])) != 1 or dtypes[1] not in floating:
+            raise FormulaBindingError(
+                "FF4_STATE_DTYPE",
+                "NeuralPlasticity transport operands must share a floating dtype",
+            )
+        return
+    if atom_ref == "arti/formula-atom-neural-plasticity-polynomial@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if len(dtypes) != 6 or len(set(dtypes[1:])) != 1 or dtypes[1] not in floating:
+            raise FormulaBindingError(
+                "FF4_STATE_DTYPE",
+                "NeuralPlasticity polynomial operands must share a floating dtype",
+            )
+        return
+    if atom_ref == "arti/formula-atom-neural-plasticity-proximal@1":
+        floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
+        if len(dtypes) != 3 or len(set(dtypes[1:])) != 1 or dtypes[1] not in floating:
+            raise FormulaBindingError(
+                "FF4_STATE_DTYPE",
+                "NeuralPlasticity proximal operands must share a floating dtype",
+            )
+        return
     if atom_ref == "arti/fold@2":
         if len(dtypes) != 2 or dtypes[1] != torch.int64 or operand_types[1].dtype != "int64":
             raise FormulaBindingError(
@@ -3885,11 +4337,18 @@ __all__ = [
     "contract",
     "dot",
     "formula_program_dependency_refs",
+    "formula_program_effect_refs",
     "gather",
     "index_fold",
     "index_unfold",
     "lookup",
     "masked_softmax",
+    "neural_plasticity",
+    "neural_plasticity_blend",
+    "neural_plasticity_outer",
+    "neural_plasticity_polynomial",
+    "neural_plasticity_proximal",
+    "neural_plasticity_transport",
     "permute",
     "reduce_sum",
     "reshape",
