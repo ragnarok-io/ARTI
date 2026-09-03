@@ -78,6 +78,9 @@ def main() -> None:
             "arti/formula_v2.py",
             "arti/formula_learning.py",
             "arti/formula_program_query.py",
+            "arti/formula_program_query_v3.py",
+            "arti/formula_program_query_v4.py",
+            "arti/formula_v3.py",
             "arti/tensor_view.py",
             "arti/shape_query.py",
             "arti/federal_tensor_view.py",
@@ -265,10 +268,16 @@ def main() -> None:
                     "assert callable(arti.alpha.FormulaProgramCandidate); "
                     "assert callable(arti.alpha.FormulaProgramQuery); "
                     "assert callable(arti.alpha.ExactFormulaProgramQueryTraining); "
-                    "assert callable(arti.alpha.FormulaProgramTensorCandidate); "
-                    "assert callable(arti.alpha.FormulaProgramEffectCandidate); "
-                    "assert callable(arti.alpha.FormulaProgramQueryV2); "
-                    "assert callable(arti.alpha.ExactFormulaProgramQueryTrainingV2); "
+                    "assert callable(arti.alpha.FormulaProgramTensorCandidateV2); "
+                    "assert callable(arti.alpha.FormulaProgramEffectCandidateV2); "
+                    "assert callable(arti.alpha.FormulaProgramQueryV3); "
+                    "assert callable(arti.alpha.ExactFormulaProgramQueryTrainingV3); "
+                    "assert callable(arti.alpha.FormulaProgramQueryV4); "
+                    "assert callable(arti.alpha.FormulaProgramTensorCandidateV3); "
+                    "assert callable(arti.alpha.FormulaProgramEffectCandidateV3); "
+                    "assert callable(arti.alpha.FormulaProgramQueryTensorEncoderV1); "
+                    "assert not hasattr(arti.alpha, 'FormulaProgramQueryV2'); "
+                    "assert importlib.util.find_spec('arti.formula_program_query_v2') is None; "
                     "assert callable(arti.alpha.TensorView); "
                     "assert callable(arti.alpha.TensorViewBankQuery); "
                     "assert callable(arti.alpha.FederalRecallV3); "

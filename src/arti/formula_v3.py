@@ -34,6 +34,7 @@ FORMULA_EFFECT_PROGRAM_V3_SCHEMA_VERSION = 3
 NEURAL_PLASTICITY_ATOM_REF = "arti/formula-atom-neural-plasticity@1"
 NEURAL_PLASTICITY_BLEND_ATOM_REF = "arti/formula-atom-neural-plasticity-blend@1"
 NEURAL_PLASTICITY_OUTER_ATOM_REF = "arti/formula-atom-neural-plasticity-outer@1"
+NEURAL_PLASTICITY_OUTER_V2_ATOM_REF = "arti/formula-atom-neural-plasticity-outer@2"
 NEURAL_PLASTICITY_TRANSPORT_ATOM_REF = "arti/formula-atom-neural-plasticity-transport@1"
 NEURAL_PLASTICITY_POLYNOMIAL_ATOM_REF = "arti/formula-atom-neural-plasticity-polynomial@1"
 NEURAL_PLASTICITY_PROXIMAL_ATOM_REF = "arti/formula-atom-neural-plasticity-proximal@1"
@@ -42,6 +43,7 @@ NEURAL_PLASTICITY_EFFECT_REFS = frozenset(
         NEURAL_PLASTICITY_ATOM_REF,
         NEURAL_PLASTICITY_BLEND_ATOM_REF,
         NEURAL_PLASTICITY_OUTER_ATOM_REF,
+        NEURAL_PLASTICITY_OUTER_V2_ATOM_REF,
         NEURAL_PLASTICITY_TRANSPORT_ATOM_REF,
         NEURAL_PLASTICITY_POLYNOMIAL_ATOM_REF,
         NEURAL_PLASTICITY_PROXIMAL_ATOM_REF,
@@ -298,8 +300,12 @@ class FormulaEffectProgramV2:
                     "blend target and amount must preserve the execution-site state type",
                 )
             return
-        if effect.atom_ref == NEURAL_PLASTICITY_OUTER_ATOM_REF:
-            left_type, right_type, rate_type = operand_types
+        if effect.atom_ref in {
+            NEURAL_PLASTICITY_OUTER_ATOM_REF,
+            NEURAL_PLASTICITY_OUTER_V2_ATOM_REF,
+        }:
+            left_type, right_type, rate_type = operand_types[:3]
+            count_type = None if len(operand_types) == 3 else operand_types[3]
             expected_axes = (*left_type.axis_names, *right_type.axis_names)
             expected_sizes = (*left_type.sizes, *right_type.sizes)
             if (
@@ -320,11 +326,32 @@ class FormulaEffectProgramV2:
                     }
                 )
                 != 1
+                or (
+                    count_type is not None
+                    and (
+                        count_type.axis_names
+                        or count_type.sizes
+                        or count_type.dtype != self.state_type.dtype
+                        or count_type.domain != self.state_type.domain
+                    )
+                )
             ):
                 raise FormulaProgramError(
                     "FF4_EFFECT_TYPE",
                     "outer factors must form the rank-two execution-site state type",
                 )
+            if effect.atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF:
+                max_executions = dict(effect.attributes).get("max_executions")
+                if (
+                    count_type is None
+                    or isinstance(max_executions, bool)
+                    or not isinstance(max_executions, int)
+                    or max_executions <= 0
+                ):
+                    raise FormulaProgramError(
+                        "FF4_EFFECT_TYPE",
+                        "Outer@2 requires a scalar execution_count and positive max_executions",
+                    )
             return
         if effect.atom_ref == NEURAL_PLASTICITY_TRANSPORT_ATOM_REF:
             bias_type, output_type, input_type, rate_type = operand_types
@@ -638,6 +665,8 @@ def apply_neural_plasticity_effect(
     state: Tensor,
     *,
     state_type: TensorType,
+    execution_count: Tensor | None = None,
+    max_executions: int = 16,
 ) -> Tensor:
     """Apply one Formula effect to implicit execution-site state.
 
@@ -656,6 +685,76 @@ def apply_neural_plasticity_effect(
     from .formula_v2 import _validate_tensor_against_type
 
     _validate_tensor_against_type(state, state_type, name="neural-plasticity-state")
+
+    if execution_count is not None:
+        if effect.atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF:
+            raise FormulaProgramError(
+                "FF_EFFECT_EXECUTION_COUNT",
+                "generic execution_count cannot wrap Outer@2's own count operand",
+            )
+        if (
+            execution_count.ndim != 0
+            or execution_count.dtype != state.dtype
+            or execution_count.device != state.device
+        ):
+            raise FormulaProgramError(
+                "FF_EFFECT_EXECUTION_COUNT",
+                "execution_count must be a scalar matching execution-site dtype and device",
+            )
+        if (
+            isinstance(max_executions, bool)
+            or not isinstance(max_executions, int)
+            or max_executions <= 0
+        ):
+            raise FormulaProgramError(
+                "FF_EFFECT_EXECUTION_COUNT",
+                "max_executions must be a positive integer",
+            )
+        bounded = execution_count.clamp(0.0, float(max_executions))
+        hard_steps = int(bounded.detach().round().item())
+        count_surrogate = torch.is_grad_enabled() and execution_count.requires_grad
+        result = state
+        states = [state.detach()] if count_surrogate else []
+        for _ in range(hard_steps):
+            result = apply_neural_plasticity_effect(
+                effect,
+                result,
+                state_type=state_type,
+            )
+            if count_surrogate:
+                states.append(result.detach())
+        if not count_surrogate or not bool(torch.isfinite(result).all()):
+            # Do not repair an invalid *selected* hard transition with a surrogate.
+            return result
+
+        # Only the selected hard path carries state/operand gradients. Extend its
+        # detached snapshots under no_grad: even a finite unselected output can
+        # have an invalid backward path. Never put that path in the autograd graph.
+        # A non-finite trial ends the count surrogate's admissible prefix; neither
+        # that trial nor higher counts enter the zero-valued correction below.
+        with torch.no_grad():
+            current = states[-1]
+            for _ in range(hard_steps, max_executions):
+                successor = apply_neural_plasticity_effect(
+                    effect,
+                    current,
+                    state_type=state_type,
+                )
+                if not bool(torch.isfinite(successor).all()):
+                    break
+                states.append(successor)
+                current = successor
+        choices = torch.arange(
+            len(states),
+            dtype=bounded.dtype,
+            device=bounded.device,
+        )
+        soft_weights = torch.softmax(-4.0 * (choices - bounded).square(), dim=0)
+        # Subtract weights before the contraction, rather than subtracting two
+        # potentially overflowing state mixtures. All stacked values are finite
+        # and detached, so this adds count credit without changing the hard value.
+        zero_weights = soft_weights - soft_weights.detach()
+        return result + torch.einsum("k,k...->...", zero_weights, torch.stack(states, dim=0))
 
     def matching_state_operand(value: Tensor, *, name: str) -> Tensor:
         _validate_tensor_against_type(value, state_type, name=name)
@@ -712,8 +811,12 @@ def apply_neural_plasticity_effect(
         target = matching_state_operand(effect.operands[0], name="blend-target")
         amount = matching_state_operand(effect.operands[1], name="blend-amount")
         return state + amount * (target - state)
-    if effect.atom_ref == NEURAL_PLASTICITY_OUTER_ATOM_REF:
-        left, right, rate = effect.operands
+    if effect.atom_ref in {
+        NEURAL_PLASTICITY_OUTER_ATOM_REF,
+        NEURAL_PLASTICITY_OUTER_V2_ATOM_REF,
+    }:
+        left, right, rate = effect.operands[:3]
+        execution_count = None if len(effect.operands) == 3 else effect.operands[3]
         if (
             left.ndim != 1
             or right.ndim != 1
@@ -724,6 +827,14 @@ def apply_neural_plasticity_effect(
             or left.device != state.device
             or right.device != state.device
             or rate.device != state.device
+            or (
+                execution_count is not None
+                and (
+                    execution_count.ndim != 0
+                    or execution_count.dtype != state.dtype
+                    or execution_count.device != state.device
+                )
+            )
         ):
             raise FormulaProgramError(
                 "FF_EFFECT_OUTER_MISMATCH",
@@ -735,6 +846,22 @@ def apply_neural_plasticity_effect(
                 "FF_EFFECT_OUTER_MISMATCH",
                 "outer product must exactly match execution-site state",
             )
+        if effect.atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF:
+            max_executions = dict(effect.attributes).get("max_executions")
+            if (
+                isinstance(max_executions, bool)
+                or not isinstance(max_executions, int)
+                or max_executions <= 0
+            ):
+                raise FormulaProgramError(
+                    "FF_EFFECT_EXECUTION_COUNT",
+                    "Outer@2 max_executions must be a positive integer",
+                )
+            assert execution_count is not None
+            bounded_count = execution_count.clamp(0.0, float(max_executions))
+            hard_count = bounded_count.round()
+            applied_count = bounded_count + (hard_count - bounded_count).detach()
+            return state + applied_count * update
         return state + update
     if effect.atom_ref == NEURAL_PLASTICITY_TRANSPORT_ATOM_REF:
         bias = matching_state_operand(effect.operands[0], name="transport-bias")
@@ -805,6 +932,17 @@ class NeuralPlasticityOuterAtom(nn.Module):
     def forward(self, *args: object, **kwargs: object) -> Tensor:
         raise RuntimeError(
             "NeuralPlasticityOuter@1 can only execute inside FormulaFabric@4"
+        )
+
+
+class NeuralPlasticityOuterAtomV2(nn.Module):
+    """Rank-one self effect with a direct trainable execution-count operand."""
+
+    _component_reference: ClassVar[str] = NEURAL_PLASTICITY_OUTER_V2_ATOM_REF
+
+    def forward(self, *args: object, **kwargs: object) -> Tensor:
+        raise RuntimeError(
+            "NeuralPlasticityOuter@2 can only execute inside FormulaFabric@4"
         )
 
 
@@ -904,8 +1042,8 @@ class FormulaFabricV3(nn.Module):
             "effect_program": self.effect_program.to_dict(),
             "effect_program_fingerprint": self.effect_program.fingerprint,
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "additive-plus-state-scaled",
             "state_visibility": "next-dispatch",
             "execution_mode": "eager",
@@ -982,8 +1120,8 @@ class FormulaFabricV4(nn.Module):
             "effect_program_fingerprint": self.effect_program.fingerprint,
             "effect_atom_ref": self.effect_program.effect_instruction.atom_ref,
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_visibility": "next-dispatch",
             "execution_mode": "eager",
         }
@@ -1063,8 +1201,8 @@ class FormulaFabricV5(nn.Module):
             "effect_count": len(self.effect_program.effect_instructions),
             "data_lane": "ordinary-formula-with-intermediate-effects",
             "effect_position": "intermediate",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_visibility": "next-dispatch",
             "execution_mode": "eager",
         }
@@ -1081,6 +1219,7 @@ __all__ = [
     "NEURAL_PLASTICITY_BLEND_ATOM_REF",
     "NEURAL_PLASTICITY_EFFECT_REFS",
     "NEURAL_PLASTICITY_OUTER_ATOM_REF",
+    "NEURAL_PLASTICITY_OUTER_V2_ATOM_REF",
     "NEURAL_PLASTICITY_POLYNOMIAL_ATOM_REF",
     "NEURAL_PLASTICITY_PROXIMAL_ATOM_REF",
     "NEURAL_PLASTICITY_TRANSPORT_ATOM_REF",
@@ -1098,6 +1237,7 @@ __all__ = [
     "NeuralPlasticityEffect",
     "NeuralPlasticityEffectV2",
     "NeuralPlasticityOuterAtom",
+    "NeuralPlasticityOuterAtomV2",
     "NeuralPlasticityPolynomialAtom",
     "NeuralPlasticityProximalAtom",
     "NeuralPlasticityTransportAtom",

@@ -836,6 +836,22 @@ def _target_bank_updater_dependencies(component: Any) -> Sequence[str]:
     return result
 
 
+def _formula_program_tensor_candidate_v3_dependencies(
+    component: Any,
+) -> Sequence[str]:
+    dependencies = [component_ref(component.candidate)]
+    if component.bank_slot_ref is not None:
+        dependencies.append(component_ref(component.bank_owner))
+    return tuple(dependencies)
+
+
+def _formula_program_query_v4_dependencies(component: Any) -> Sequence[str]:
+    dependencies = {component_ref(candidate) for candidate in component.candidates}
+    if component.tensor_encoder is not None:
+        dependencies.add(component_ref(component.tensor_encoder))
+    return tuple(sorted(dependencies))
+
+
 def _route_stack_config(component: Any) -> Mapping[str, Any]:
     items = []
     for item in _attr(component, "items"):
@@ -1366,6 +1382,7 @@ def _build_default_registry() -> ComponentRegistry:
         NeuralPlasticityAtom,
         NeuralPlasticityBlendAtom,
         NeuralPlasticityOuterAtom,
+        NeuralPlasticityOuterAtomV2,
         NeuralPlasticityPolynomialAtom,
         NeuralPlasticityProximalAtom,
         NeuralPlasticityTransportAtom,
@@ -1433,11 +1450,9 @@ def _build_default_registry() -> ComponentRegistry:
         SealedBankQuery,
     )
     from .bank_local_program import (
+        BankLocalFormulaEffectAction,
         BankLocalFormulaAction,
         BankLocalFormulaProgram,
-        BankLocalNeuralPlasticityAction,
-        BankLocalNeuralPlasticityActionV2,
-        BankLocalNeuralPlasticityActionV3,
         BankLocalTerminalAction,
         DetachedBankLocalProgramTraining,
         DetachedBankLocalRollout,
@@ -1449,11 +1464,19 @@ def _build_default_registry() -> ComponentRegistry:
         FormulaProgramCandidate,
         FormulaProgramQuery,
     )
-    from .formula_program_query_v2 import (
-        ExactFormulaProgramQueryTrainingV2,
-        FormulaProgramEffectCandidate,
-        FormulaProgramQueryV2,
-        FormulaProgramTensorCandidate,
+    from .formula_program_query_v3 import (
+        ExactFormulaProgramQueryTrainingV3,
+        FormulaProgramCandidateV2,
+        FormulaProgramEffectCandidateV2,
+        FormulaProgramQueryV3,
+        FormulaProgramTensorCandidateV2,
+    )
+    from .formula_program_query_v4 import (
+        FormulaProgramBankOwnerV1,
+        FormulaProgramEffectCandidateV3,
+        FormulaProgramQueryTensorEncoderV1,
+        FormulaProgramQueryV4,
+        FormulaProgramTensorCandidateV3,
     )
     from .terminal_abi import (
         BankExecutionSignature,
@@ -1464,12 +1487,10 @@ def _build_default_registry() -> ComponentRegistry:
     from .federal_recall import BankLocalRefinePolicy, FederalRecall, FederalRecallV2
     from .federal_tensor_view import (
         FederalRecallV3,
+        TensorViewFormulaEffectAction,
         TensorViewFormulaAction,
         TensorViewFormulaProgram,
         TensorViewLayoutTransition,
-        TensorViewNeuralPlasticityAction,
-        TensorViewNeuralPlasticityActionV2,
-        TensorViewNeuralPlasticityActionV3,
     )
     from .recall_refine import (
         AdaptiveRefinePolicy,
@@ -3005,10 +3026,10 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.bank-local.formula-action",),
     )
     add(
-        "arti/bank-local-neural-plasticity-action@1",
-        BankLocalNeuralPlasticityAction,
+        "arti/bank-local-formula-effect-action@1",
+        BankLocalFormulaEffectAction,
         lifecycle="alpha",
-        variant="execution-site-owned-formula-effect",
+        variant="dynamic-predecessor-bank-slot-effect",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (
@@ -3016,42 +3037,9 @@ def _build_default_registry() -> ComponentRegistry:
             "arti/tensor-schema@1",
         ),
         capabilities=(
-            "federal.bank-local.neural-plasticity",
-            "formula.fabric.effect-site",
-        ),
-    )
-    add(
-        "arti/bank-local-neural-plasticity-action@2",
-        BankLocalNeuralPlasticityActionV2,
-        lifecycle="alpha",
-        variant="execution-site-owned-extensible-formula-effect",
-        constructible=False,
-        config_builder=lambda component: component.contract_config(),
-        dependency_builder=lambda component: (
-            component_ref(component.fabric),
-            "arti/tensor-schema@1",
-        ),
-        capabilities=(
-            "federal.bank-local.neural-plasticity",
+            "federal.bank-local.predecessor-bank-plasticity",
             "formula.fabric.effect-algebra",
-            "formula.fabric.effect-site",
-        ),
-    )
-    add(
-        "arti/bank-local-neural-plasticity-action@3",
-        BankLocalNeuralPlasticityActionV3,
-        lifecycle="alpha",
-        variant="in-path-multi-effect-neural-adaptation",
-        constructible=False,
-        config_builder=lambda component: component.contract_config(),
-        dependency_builder=lambda component: (
-            component_ref(component.fabric),
-            "arti/tensor-schema@1",
-        ),
-        capabilities=(
-            "federal.bank-local.neural-plasticity",
-            "formula.fabric.effect-algebra",
-            "formula.fabric.in-path-effects",
+            "formula.fabric.identity-data-effect",
         ),
     )
     add(
@@ -3109,23 +3097,10 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.tensor-view.successor-layout",),
     )
     add(
-        "arti/tensor-view-formula-action@1",
+        "arti/tensor-view-formula-action@2",
         TensorViewFormulaAction,
         lifecycle="alpha",
-        variant="typed-formula-to-successor-view",
-        constructible=False,
-        config_builder=lambda component: component.contract_config(),
-        dependency_builder=lambda component: (
-            component_ref(component.action),
-            "arti/tensor-view-layout-transition@1",
-        ),
-        capabilities=("federal.bank-local.tensor-view-formula-action",),
-    )
-    add(
-        "arti/tensor-view-neural-plasticity-action@1",
-        TensorViewNeuralPlasticityAction,
-        lifecycle="alpha",
-        variant="identity-view-self-network-effect",
+        variant="producer-owned-bank-slot-formula-view",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (
@@ -3133,15 +3108,15 @@ def _build_default_registry() -> ComponentRegistry:
             "arti/tensor-view-layout-transition@1",
         ),
         capabilities=(
-            "federal.bank-local.tensor-view-neural-plasticity",
-            "formula.fabric.effect-site",
+            "federal.bank-local.predecessor-bank-owner",
+            "federal.bank-local.tensor-view-formula-action",
         ),
     )
     add(
-        "arti/tensor-view-neural-plasticity-action@2",
-        TensorViewNeuralPlasticityActionV2,
+        "arti/tensor-view-formula-effect-action@1",
+        TensorViewFormulaEffectAction,
         lifecycle="alpha",
-        variant="identity-view-extensible-self-network-effect",
+        variant="identity-view-dynamic-predecessor-effect",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (
@@ -3149,32 +3124,15 @@ def _build_default_registry() -> ComponentRegistry:
             "arti/tensor-view-layout-transition@1",
         ),
         capabilities=(
-            "federal.bank-local.tensor-view-neural-plasticity",
-            "formula.fabric.effect-algebra",
-            "formula.fabric.effect-site",
+            "federal.bank-local.predecessor-bank-plasticity",
+            "formula.fabric.identity-data-effect",
         ),
     )
     add(
-        "arti/tensor-view-neural-plasticity-action@3",
-        TensorViewNeuralPlasticityActionV3,
-        lifecycle="alpha",
-        variant="formula-view-with-intermediate-self-effects",
-        constructible=False,
-        config_builder=lambda component: component.contract_config(),
-        dependency_builder=lambda component: (
-            component_ref(component.action),
-            "arti/tensor-view-layout-transition@1",
-        ),
-        capabilities=(
-            "federal.bank-local.tensor-view-neural-plasticity",
-            "formula.fabric.in-path-effects",
-        ),
-    )
-    add(
-        "arti/tensor-view-formula-program@1",
+        "arti/tensor-view-formula-program@2",
         TensorViewFormulaProgram,
         lifecycle="alpha",
-        variant="latest-tensor-view-local-refine-program",
+        variant="winner-owned-predecessor-bank-local-refine-program",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: tuple(
@@ -3192,6 +3150,7 @@ def _build_default_registry() -> ComponentRegistry:
         ),
         capabilities=(
             "federal.bank-local.latest-tensor-view-requery",
+            "federal.bank-local.predecessor-bank-plasticity",
             "federal.bank-local.variable-rank-refine",
         ),
     )
@@ -3250,6 +3209,19 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("formula.program-query.candidate",),
     )
     add(
+        "arti/formula-program-candidate@2",
+        FormulaProgramCandidateV2,
+        lifecycle="alpha",
+        variant="bounded-subprogram-explicit-ssa-wiring",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=(
+            "formula.program-query.candidate",
+            "formula.program-query.composed-producer",
+        ),
+    )
+    add(
         "arti/formula-program-query@1",
         FormulaProgramQuery,
         lifecycle="alpha",
@@ -3266,55 +3238,142 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/formula-program-tensor-candidate@1",
-        FormulaProgramTensorCandidate,
+        "arti/formula-program-tensor-candidate@2",
+        FormulaProgramTensorCandidateV2,
         lifecycle="alpha",
-        variant="ordinary-formula-node-in-stateful-topology-search",
+        variant="ordinary-formula-node-owning-plastic-bank-slot",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (component_ref(component.candidate),),
-        capabilities=("formula.program-query.tensor-candidate",),
+        capabilities=(
+            "formula.program-query.predecessor-bank-slot-owner",
+            "formula.program-query.tensor-candidate",
+        ),
     )
     add(
-        "arti/formula-program-effect-candidate@1",
-        FormulaProgramEffectCandidate,
+        "arti/formula-program-effect-candidate@2",
+        FormulaProgramEffectCandidateV2,
         lifecycle="alpha",
-        variant="query-placed-implicit-self-state-effect-node",
+        variant="identity-data-dynamic-predecessor-bank-slot-effect",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (component_ref(component.fabric),),
         capabilities=(
+            "formula.program-query.dynamic-predecessor-target",
             "formula.program-query.effect-candidate",
-            "formula.program-query.searchable-neural-plasticity",
+            "formula.program-query.write-only-proposal",
         ),
     )
     add(
-        "arti/formula-program-query@2",
-        FormulaProgramQueryV2,
+        "arti/formula-program-query@3",
+        FormulaProgramQueryV3,
         lifecycle="alpha",
-        variant="bounded-stateful-tensor-and-self-effect-topology-query",
+        variant="predecessor-bank-slot-self-operation-query",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: tuple(
             sorted({component_ref(candidate) for candidate in component.candidates})
         ),
         capabilities=(
+            "formula.program-query.dynamic-predecessor-target",
             "formula.program-query.hard-one",
-            "formula.program-query.implicit-network-state",
-            "formula.program-query.searchable-neural-plasticity",
-            "formula.program-query.shape-valid",
+            "formula.program-query.identity-data-effect",
+            "formula.program-query.winner-bank-state",
+        ),
+    )
+    add(
+        "arti/formula-program-bank-owner@1",
+        FormulaProgramBankOwnerV1,
+        lifecycle="alpha",
+        variant="single-persistent-fast-state-owner",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "formula.program-query.forward-written-state",
+            "formula.program-query.shared-bank-owner",
+        ),
+    )
+    add(
+        "arti/formula-program-tensor-candidate@3",
+        FormulaProgramTensorCandidateV3,
+        lifecycle="alpha",
+        variant="versioned-ssa-occurrence-sharing-plastic-bank-owner",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_tensor_candidate_v3_dependencies,
+        capabilities=(
+            "formula.program-query.branch-overlay-read",
+            "formula.program-query.predecessor-bank-slot-owner",
+            "formula.program-query.tensor-candidate",
+        ),
+    )
+    add(
+        "arti/formula-program-effect-candidate@3",
+        FormulaProgramEffectCandidateV3,
+        lifecycle="alpha",
+        variant="identity-data-latest-predecessor-bank-effect",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=(
+            "formula.program-query.branch-overlay-write",
+            "formula.program-query.dynamic-predecessor-target",
+            "formula.program-query.effect-candidate",
+        ),
+    )
+    add(
+        "arti/formula-program-query-tensor-encoder@1",
+        FormulaProgramQueryTensorEncoderV1,
+        lifecycle="alpha",
+        variant="dynamic-length-content-sensitive-ssa-summary",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "formula.program-query.content-sensitive-summary",
+            "formula.program-query.dynamic-token-axis",
+        ),
+    )
+    add(
+        "arti/formula-program-query@4",
+        FormulaProgramQueryV4,
+        lifecycle="alpha",
+        variant="branch-visible-predecessor-bank-self-operation-query",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_query_v4_dependencies,
+        capabilities=(
+            "formula.program-query.branch-overlay-read-write",
+            "formula.program-query.dynamic-predecessor-target",
+            "formula.program-query.hard-one",
+            "formula.program-query.identity-data-effect",
+            "formula.program-query.shared-bank-owner",
+            "formula.program-query.winner-bank-state",
+        ),
+    )
+    add(
+        "arti/exact-formula-program-query-training@3",
+        ExactFormulaProgramQueryTrainingV3,
+        lifecycle="alpha",
+        variant="exact-two-event-predecessor-bank-policy",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: ("arti/formula-program-query@3",),
+        capabilities=(
+            "formula.program-query.training.exact-expected",
+            "formula.program-query.training.final-task-loss",
+            "formula.program-query.training.two-event",
         ),
     )
     add(
         "arti/formula-atom-neural-plasticity@1",
         NeuralPlasticityAtom,
         lifecycle="alpha",
-        variant="identity-data-implicit-self-parameterized-effect",
+        variant="identity-data-predecessor-bank-effect",
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "additive-plus-state-scaled",
             "state_visibility": "next-dispatch",
         },
@@ -3328,8 +3387,8 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "target-blend",
             "state_visibility": "next-dispatch",
         },
@@ -3343,9 +3402,25 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "rank-one-additive",
+            "state_visibility": "next-dispatch",
+        },
+        capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
+    )
+    add(
+        "arti/formula-atom-neural-plasticity-outer@2",
+        NeuralPlasticityOuterAtomV2,
+        lifecycle="alpha",
+        variant="identity-data-rank-one-repeated-self-effect",
+        constructible=False,
+        config_builder=lambda _component: {
+            "data_lane": "identity",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
+            "state_transition": "rank-one-additive-repeated",
+            "execution_count": "direct-formula-scalar",
             "state_visibility": "next-dispatch",
         },
         capabilities=("formula.fabric.effect", "formula.fabric.neural-plasticity"),
@@ -3358,8 +3433,8 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "low-rank-cross-coordinate-transport",
             "state_visibility": "next-dispatch",
         },
@@ -3373,8 +3448,8 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "low-rank-quadratic-state-feedback",
             "state_visibility": "next-dispatch",
         },
@@ -3388,8 +3463,8 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         config_builder=lambda _component: {
             "data_lane": "identity",
-            "target_binding": "execution-site-self",
-            "state_access": "implicit-execution-site-parameterization",
+            "target_binding": "runtime-predecessor-bank",
+            "state_access": "effect-operands-only",
             "state_transition": "l1-proximal",
             "state_visibility": "next-dispatch",
         },
@@ -3488,19 +3563,6 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda _component: ("arti/formula-program-query@1",),
         capabilities=("formula.program-query.training.final-task-loss",),
-    )
-    add(
-        "arti/exact-formula-program-query-training@2",
-        ExactFormulaProgramQueryTrainingV2,
-        lifecycle="alpha",
-        variant="exact-expected-final-task-loss-with-network-state",
-        artifact_policy="runtime_only",
-        config_builder=lambda component: component.contract_config(),
-        dependency_builder=lambda _component: ("arti/formula-program-query@2",),
-        capabilities=(
-            "formula.program-query.training.effect-topology",
-            "formula.program-query.training.final-task-loss",
-        ),
     )
     add(
         "arti/federal-recall@1",
@@ -5182,8 +5244,8 @@ def _validate_vnext_dependency_closure(
             not isinstance(config, Mapping)
             or set(config) != required
             or config["data_lane"] != "identity"
-            or config["target_binding"] != "execution-site-self"
-            or config["state_access"] != "implicit-execution-site-parameterization"
+            or config["target_binding"] != "runtime-predecessor-bank"
+            or config["state_access"] != "effect-operands-only"
             or config["state_transition"] != "additive-plus-state-scaled"
             or config["state_visibility"] != "next-dispatch"
             or dependencies
@@ -5215,14 +5277,38 @@ def _validate_vnext_dependency_closure(
             not isinstance(config, Mapping)
             or set(config) != required
             or config["data_lane"] != "identity"
-            or config["target_binding"] != "execution-site-self"
-            or config["state_access"] != "implicit-execution-site-parameterization"
+            or config["target_binding"] != "runtime-predecessor-bank"
+            or config["state_access"] != "effect-operands-only"
             or config["state_transition"] != neural_plasticity_modes[reference]
             or config["state_visibility"] != "next-dispatch"
             or dependencies
         ):
             raise ComponentCompatibilityError(
                 "NeuralPlasticity effect atom config or dependency closure is invalid"
+            )
+        return
+    if reference == "arti/formula-atom-neural-plasticity-outer@2":
+        required = {
+            "data_lane",
+            "target_binding",
+            "state_access",
+            "state_transition",
+            "execution_count",
+            "state_visibility",
+        }
+        if (
+            not isinstance(config, Mapping)
+            or set(config) != required
+            or config["data_lane"] != "identity"
+            or config["target_binding"] != "runtime-predecessor-bank"
+            or config["state_access"] != "effect-operands-only"
+            or config["state_transition"] != "rank-one-additive-repeated"
+            or config["execution_count"] != "direct-formula-scalar"
+            or config["state_visibility"] != "next-dispatch"
+            or dependencies
+        ):
+            raise ComponentCompatibilityError(
+                "NeuralPlasticity Outer@2 atom config or dependency closure is invalid"
             )
         return
     if reference == "arti/formula-effect-program@1":
@@ -5287,8 +5373,8 @@ def _validate_vnext_dependency_closure(
             if (
                 config["effect_program_fingerprint"] != program.fingerprint
                 or config["data_lane"] != "identity"
-                or config["target_binding"] != "execution-site-self"
-                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["target_binding"] != "runtime-predecessor-bank"
+                or config["state_access"] != "effect-operands-only"
                 or config["state_transition"] != "additive-plus-state-scaled"
                 or config["state_visibility"] != "next-dispatch"
                 or config["execution_mode"] != "eager"
@@ -5323,8 +5409,8 @@ def _validate_vnext_dependency_closure(
                 config["effect_program_fingerprint"] != program.fingerprint
                 or config["effect_atom_ref"] != program.effect_instruction.atom_ref
                 or config["data_lane"] != "identity"
-                or config["target_binding"] != "execution-site-self"
-                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["target_binding"] != "runtime-predecessor-bank"
+                or config["state_access"] != "effect-operands-only"
                 or config["state_visibility"] != "next-dispatch"
                 or config["execution_mode"] != "eager"
             ):
@@ -5363,8 +5449,8 @@ def _validate_vnext_dependency_closure(
                 or config["effect_count"] != len(effect_refs)
                 or config["data_lane"] != "ordinary-formula-with-intermediate-effects"
                 or config["effect_position"] != "intermediate"
-                or config["target_binding"] != "execution-site-self"
-                or config["state_access"] != "implicit-execution-site-parameterization"
+                or config["target_binding"] != "runtime-predecessor-bank"
+                or config["state_access"] != "effect-operands-only"
                 or config["state_visibility"] != "next-dispatch"
                 or config["execution_mode"] != "eager"
             ):

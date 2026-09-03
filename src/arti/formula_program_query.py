@@ -116,6 +116,7 @@ class _ProgramOperandStore(nn.Module):
             raise ValueError("trainable_operands must name declared Bank operands")
         self.trainable_names = trainable_names
         self._attributes: dict[str, str] = {}
+        self._external_buffers: dict[str, tuple[nn.Module, str]] = {}
         for index, name in enumerate(self.names):
             value = values[name]
             if not isinstance(value, Tensor):
@@ -131,7 +132,39 @@ class _ProgramOperandStore(nn.Module):
                 self.register_buffer(attribute, cloned, persistent=True)
 
     def tensors(self) -> dict[str, Tensor]:
-        return {name: getattr(self, self._attributes[name]) for name in self.names}
+        return {name: self.tensor(name) for name in self.names}
+
+    def tensor(self, name: str) -> Tensor:
+        if name in self._external_buffers:
+            owner, attribute = self._external_buffers[name]
+            return getattr(owner, attribute)
+        try:
+            attribute = self._attributes[name]
+        except KeyError as exc:
+            raise KeyError(name) from exc
+        return getattr(self, attribute)
+
+    def _bind_external_buffer(self, name: str, owner: nn.Module, attribute: str) -> None:
+        """Follow a transferred buffer without registering its owner a second time."""
+        if name in self.trainable_names:
+            raise ValueError("trainable operands cannot be transferred to a Bank owner")
+        local_attribute = self._attributes[name]
+        self._buffers.pop(local_attribute, None)
+        object.__setattr__(self, local_attribute, None)
+        # Resolve the owner's current buffer after .to() replaces its Tensor.
+        self._external_buffers[name] = (owner, attribute)
+
+    def install_(self, name: str, value: Tensor) -> None:
+        current = self.tensor(name)
+        if (
+            not isinstance(value, Tensor)
+            or value.shape != current.shape
+            or value.dtype != current.dtype
+            or value.device != current.device
+        ):
+            raise ValueError("installed Formula operand must exactly match its Bank slot")
+        with torch.no_grad():
+            current.copy_(value.detach())
 
     def contract_config(self) -> dict[str, object]:
         return {

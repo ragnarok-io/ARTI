@@ -1,4 +1,4 @@
-"""Same-ABI clean-restart checkpoints for the private vHyper runtime."""
+"""Same-ABI clean-restart checkpoints for persistent tensor runtimes."""
 
 from __future__ import annotations
 

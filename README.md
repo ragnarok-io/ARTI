@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.13a1"
+uv add "arti-fit==3.0.13a2"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.13a1"
-uv add "arti-fit[qwen]==3.0.13a1"
-uv add "arti-fit[sd]==3.0.13a1"
-uv add "arti-fit[web]==3.0.13a1"
+uv add "arti-fit[jax]==3.0.13a2"
+uv add "arti-fit[qwen]==3.0.13a2"
+uv add "arti-fit[sd]==3.0.13a2"
+uv add "arti-fit[web]==3.0.13a2"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,19 +41,27 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Alpha 3.0.13a1
+## Alpha 3.0.13a2
 
-This prerelease adds a typed NeuralPlasticity effect lane to Formula Fabric.
-An effect leaves its local tensor value unchanged while producing a transition
-for the owning execution site's explicit network state. Ordinary Formula nodes
-can consume the resulting state later in the same program.
+This corrective prerelease makes NeuralPlasticity modify the actual Bank Value
+used by its ordinary Formula predecessor. The effect's data output remains
+the same tensor. It has no separate effect-owned memory or caller-selected
+write target.
 
-`FormulaProgramQueryV2` makes ordinary Formula nodes and NeuralPlasticity nodes
-part of one bounded search space. It selects their number, order, placement,
-and wiring from final task loss; callers declare local typed candidates rather
-than a complete prebuilt self-modifying chain. Program steps remain separate
-from Bank-local Refine steps. These new component identities have lifecycle
-`alpha` and do not expand the stable compatibility surface.
+`FormulaProgramQueryV3` commits a selected stopped path for later invocations.
+`FormulaProgramQueryV4` additionally lets the same Bank owner re-execute with
+its branch-local successor during one forward. Other branches stay isolated;
+only the selected execution can be committed to persistent Bank buffers.
+
+Ordinary Formula candidates and six plasticity families can share the search
+space. A bounded, optionally trainable execution-count operand controls repeated
+transitions. The old alpha `FormulaProgramQueryV2` state-arena API is removed;
+rebuild those programs with predecessor-owned Bank slots. These alpha changes
+do not expand or replace the stable compatibility surface.
+
+See the [Formula Fabric guide](docs/formula-fabric.md#in-path-neural-adaptation)
+and [runnable example](examples/predecessor_bank_plasticity.py). The example
+demonstrates writeback and reload, not downstream task-quality superiority.
 
 The stable 3.0.12 base retains K-wide Recall traversal, the typed Formula atom
 basis, shape-polymorphic Federal Bank execution, and the default
@@ -147,7 +155,7 @@ layout, dtype, and position. See [Unified Attachment](docs/unified-attachment.md
 | Typed Formula programs | `arti.mechanisms.FormulaFabricV2` |
 | Bounded typed program selection (alpha) | `arti.mechanisms.FormulaProgramQuery` |
 | Execution-site network-state effects (alpha) | `arti.mechanisms.FormulaFabricV3` / `V4` / `V5` |
-| Self-effect topology search (alpha) | `arti.mechanisms.FormulaProgramQueryV2` |
+| Predecessor-owned self-modification (alpha) | `arti.mechanisms.FormulaProgramQueryV3` / `FormulaProgramQueryV4` |
 | Addressable forward Bank updates | `arti.mechanisms.TargetBankUpdater` |
 | Shape-autonomous Bank hierarchy | `arti.mechanisms.FederalRecall` |
 | Persistent auxiliary tensor editing | `arti.mechanisms.TensorOperationLoop` |
@@ -200,10 +208,11 @@ opaque Attention, MLP, or Transformer primitive. `FormulaProgramQuery@1` is an
 alpha controller for selecting a bounded, shape-valid SSA path from final task
 loss; it chooses one hard candidate per step rather than averaging outputs.
 
-`FormulaProgramQuery@2` extends that search to execution-site network-state
-effects. Its Query observes SSA tensor values, not the implicit state it may
-modify. The selected program returns successor state and revisions explicitly;
-the owning Bank runtime decides whether that successor becomes persistent.
+`FormulaProgramQuery@3` extends that search to predecessor-owned Bank effects
+with commit-visible successors. `FormulaProgramQuery@4` additionally permits
+the same producer to re-execute using its branch-local successor. Query sees
+ordinary SSA tensors, not a direct state input. Persistent `commit_()` installs
+only the selected stopped execution and detaches its state from the training graph.
 
 Federal Banks can carry their own sealed Query, Formula program, local Refine
 policy, and terminal ABI. A Bank may change its tensor shape internally and
@@ -275,8 +284,8 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a1
-在 3.0.12 稳定表面之上加入 alpha 级 NeuralPlasticity Formula effect 与
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a2
+在 3.0.12 稳定表面之上纠正 alpha 级 NeuralPlasticity 的前序 Bank 写回与
 可搜索的自修改程序拓扑：网络从局部候选中学习自修改节点的数量、顺序、位置
 和连接，而不是由调用者预先拼好完整链。应用负责张量的业务语义，ARTI 负责
 张量的观察、路由、变换、记忆与组合。

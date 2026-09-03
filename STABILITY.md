@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a1 package
+ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a2 package
 is a prerelease that adds alpha NeuralPlasticity and self-effect topology-search
 components without expanding the stable compatibility surface. Stability covers
 documented component identities, tensor contracts, artifact schemas, and
@@ -39,11 +39,17 @@ The Python-first browser exporter remains under `arti.experimental.web`, and
 the TypeScript runtime remains an alpha npm package. Web artifacts are
 deployment products, not portable training checkpoints.
 
-`FormulaProgramQuery@1`, `FormulaProgramQuery@2`, `FormulaFabric@3` through
+`FormulaProgramQuery@1`, `FormulaProgramQuery@3`, `FormulaProgramQuery@4`, `FormulaFabric@3` through
 `FormulaFabric@5`, the NeuralPlasticity effect atoms, `FederalRecall@3`, and the
 shape-polymorphic TensorView query contracts ship for composition experiments
 with lifecycle `alpha`. Their presence in the package does not freeze those
 component contracts.
+
+The 3.0.13a2 correction removes the alpha `FormulaProgramQuery@2` effect-owned
+state arena. Reconstruct those programs with ordinary producer-owned Bank
+slots; old alpha state artifacts are not silently migrated. Query@3 has
+commit-visible successors, while Query@4 adds branch-local producer
+re-execution. Stable component identities are unchanged.
 
 Experimental integrations may change without the stable mechanism deprecation
 window. A stable mechanism used by an experimental integration does not make

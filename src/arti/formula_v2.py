@@ -91,6 +91,10 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     "arti/formula-atom-neural-plasticity@1": (3, frozenset()),
     "arti/formula-atom-neural-plasticity-blend@1": (3, frozenset()),
     "arti/formula-atom-neural-plasticity-outer@1": (4, frozenset()),
+    "arti/formula-atom-neural-plasticity-outer@2": (
+        5,
+        frozenset({"max_executions"}),
+    ),
     "arti/formula-atom-neural-plasticity-transport@1": (
         5,
         frozenset({"state_axis"}),
@@ -1059,6 +1063,7 @@ _EFFECT_ATOM_REFS = frozenset(
         "arti/formula-atom-neural-plasticity@1",
         "arti/formula-atom-neural-plasticity-blend@1",
         "arti/formula-atom-neural-plasticity-outer@1",
+        "arti/formula-atom-neural-plasticity-outer@2",
         "arti/formula-atom-neural-plasticity-transport@1",
         "arti/formula-atom-neural-plasticity-polynomial@1",
         "arti/formula-atom-neural-plasticity-proximal@1",
@@ -1431,13 +1436,21 @@ def neural_plasticity_outer(
     left: FormulaOperand,
     right: FormulaOperand,
     rate: FormulaOperand,
+    execution_count: FormulaOperand | None = None,
+    *,
+    max_executions: int = 16,
 ) -> _FormulaExpr:
-    """Emit a rank-one site-state update while preserving the data operand."""
+    """Emit a rank-one site-state update while preserving the data operand.
+
+    Passing ``execution_count`` selects the versioned atom whose final scalar
+    operand directly controls how many times the local update is applied.
+    """
 
     value_expr = _as_expr(value)
     left_expr = _as_expr(left)
     right_expr = _as_expr(right)
     rate_expr = _as_expr(rate)
+    count_expr = None if execution_count is None else _as_expr(execution_count)
     if len(left_expr.value_type.axis_names) != 1 or len(right_expr.value_type.axis_names) != 1:
         raise FormulaTypeError(
             "FF4_OUTER_RANK",
@@ -1447,10 +1460,22 @@ def neural_plasticity_outer(
         raise FormulaTypeError(
             "FF4_OUTER_RATE", "NeuralPlasticity outer rate must be scalar"
         )
+    if count_expr is not None and (
+        count_expr.value_type.axis_names or count_expr.value_type.sizes
+    ):
+        raise FormulaTypeError(
+            "FF4_OUTER_EXECUTION_COUNT",
+            "NeuralPlasticity outer execution_count must be scalar",
+        )
+    if isinstance(max_executions, bool) or not isinstance(max_executions, int):
+        raise TypeError("max_executions must be an integer")
+    if max_executions <= 0:
+        raise ValueError("max_executions must be positive")
     dtypes = {
         left_expr.value_type.dtype,
         right_expr.value_type.dtype,
         rate_expr.value_type.dtype,
+        *(tuple() if count_expr is None else (count_expr.value_type.dtype,)),
     }
     if len(dtypes) != 1 or not left_expr.value_type.dtype.startswith("float") and (
         left_expr.value_type.dtype not in {"floating", "bfloat16"}
@@ -1459,11 +1484,18 @@ def neural_plasticity_outer(
             "FF4_STATE_DTYPE",
             "NeuralPlasticity outer factors and rate must share a floating dtype",
         )
+    if count_expr is None:
+        return _FormulaExpr(
+            value_expr.value_type,
+            "arti/formula-atom-neural-plasticity-outer@1",
+            (value_expr, left_expr, right_expr, rate_expr),
+            (),
+        )
     return _FormulaExpr(
         value_expr.value_type,
-        "arti/formula-atom-neural-plasticity-outer@1",
-        (value_expr, left_expr, right_expr, rate_expr),
-        (),
+        "arti/formula-atom-neural-plasticity-outer@2",
+        (value_expr, left_expr, right_expr, rate_expr, count_expr),
+        (("max_executions", max_executions),),
     )
 
 
@@ -3007,14 +3039,22 @@ def _infer_instruction_output_type(
             InputBinding("amount", operand_types[2]),
         ).value_type
     if (
-        instruction.atom_ref == "arti/formula-atom-neural-plasticity-outer@1"
-        and len(operand_types) == 4
+        instruction.atom_ref
+        in {
+            "arti/formula-atom-neural-plasticity-outer@1",
+            "arti/formula-atom-neural-plasticity-outer@2",
+        }
+        and len(operand_types) in {4, 5}
     ):
         return neural_plasticity_outer(
             InputBinding("value", operand_types[0]),
             InputBinding("left", operand_types[1]),
             InputBinding("right", operand_types[2]),
             InputBinding("rate", operand_types[3]),
+            None
+            if len(operand_types) == 4
+            else InputBinding("execution_count", operand_types[4]),
+            max_executions=attributes.get("max_executions", 16),
         ).value_type
     if (
         instruction.atom_ref == "arti/formula-atom-neural-plasticity-transport@1"
@@ -3223,6 +3263,7 @@ def _execute_instruction(
     if instruction.atom_ref in {
         "arti/formula-atom-neural-plasticity-blend@1",
         "arti/formula-atom-neural-plasticity-outer@1",
+        "arti/formula-atom-neural-plasticity-outer@2",
         "arti/formula-atom-neural-plasticity-transport@1",
         "arti/formula-atom-neural-plasticity-polynomial@1",
         "arti/formula-atom-neural-plasticity-proximal@1",
@@ -3827,12 +3868,20 @@ def _validate_instruction_dtype_contract(
                 "NeuralPlasticity blend target and amount must share a floating dtype",
             )
         return
-    if atom_ref == "arti/formula-atom-neural-plasticity-outer@1":
+    if atom_ref in {
+        "arti/formula-atom-neural-plasticity-outer@1",
+        "arti/formula-atom-neural-plasticity-outer@2",
+    }:
         floating = {torch.float16, torch.bfloat16, torch.float32, torch.float64}
-        if len(dtypes) != 4 or len(set(dtypes[1:])) != 1 or dtypes[1] not in floating:
+        expected_arity = 5 if atom_ref.endswith("@2") else 4
+        if (
+            len(dtypes) != expected_arity
+            or len(set(dtypes[1:])) != 1
+            or dtypes[1] not in floating
+        ):
             raise FormulaBindingError(
                 "FF4_STATE_DTYPE",
-                "NeuralPlasticity outer factors and rate must share a floating dtype",
+                "NeuralPlasticity outer operands must share a floating dtype",
             )
         return
     if atom_ref == "arti/formula-atom-neural-plasticity-transport@1":

@@ -4,120 +4,89 @@ import pytest
 import torch
 
 import arti
+import arti.formula_v3 as formula_v3
 from arti import mechanisms
-from arti.bank_local_program import (
-    BankLocalNeuralPlasticityAction,
-    BankLocalNeuralPlasticityActionV2,
-)
+from arti.formula_v3 import apply_neural_plasticity_effect
 
 
-def _schema() -> mechanisms.TensorSchema:
+def _schema(width: int = 3) -> mechanisms.TensorSchema:
     return mechanisms.TensorSchema(
         dtype="float32",
         device_class="any",
-        dimensions=("B", 3),
+        dimensions=("B", width),
         semantic_axes=("batch", "feature"),
         mask_semantics="none",
     )
 
 
-def _effect_program() -> mechanisms.FormulaEffectProgram:
-    data_type = mechanisms.TensorType(
+def _type(width: int = 3) -> mechanisms.TensorType:
+    return mechanisms.TensorType(
         ("B", "D"),
-        ("B", 3),
+        ("B", width),
         dtype="float32",
         domain="activation",
     )
-    state_type = mechanisms.TensorType(
-        ("D",),
-        (3,),
-        dtype="float32",
-        domain="activation",
-    )
-    value = mechanisms.InputBinding("value", data_type)
-    writer = mechanisms.BankBinding(
-        "writer",
+
+
+def _state_type(*shape: int) -> mechanisms.TensorType:
+    axes = () if not shape else ("D",)
+    return mechanisms.TensorType(axes, shape, dtype="float32", domain="activation")
+
+
+def _binding(name: str, value_type: mechanisms.TensorType) -> mechanisms.BankBinding:
+    return mechanisms.BankBinding(
+        name,
         source_ref="arti/formula-operand-bank@1",
-        partition_id="writer",
-        value_type=state_type,
-    )
-    gain = mechanisms.BankBinding(
-        "gain",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="gain",
-        value_type=state_type,
-    )
-    additive = mechanisms.reduce_sum(
-        mechanisms.scale(value, writer),
-        axis="B",
-    )
-    multiplicative = mechanisms.reduce_sum(
-        mechanisms.scale(value, gain),
-        axis="B",
-    )
-    identity = mechanisms.neural_plasticity(value, additive, multiplicative)
-    return mechanisms.FormulaEffectProgram(
-        mechanisms.FormulaProgram.build(outputs=(identity,)),
-        data_input_name="value",
-        state_type=state_type,
+        partition_id=name,
+        value_type=value_type,
     )
 
 
-def _action(state: torch.Tensor | None = None) -> BankLocalNeuralPlasticityAction:
-    return BankLocalNeuralPlasticityAction(
+def _simple_action() -> mechanisms.BankLocalFormulaEffectAction:
+    value = mechanisms.InputBinding("value", _type())
+    state = _state_type(3)
+    writer = _binding("writer", state)
+    gain = _binding("gain", state)
+    effect = mechanisms.neural_plasticity(
+        value,
+        mechanisms.reduce_sum(mechanisms.scale(value, writer), axis="B"),
+        mechanisms.reduce_sum(mechanisms.scale(value, gain), axis="B"),
+    )
+    return mechanisms.BankLocalFormulaEffectAction(
         "remember",
-        _effect_program(),
+        mechanisms.FormulaEffectProgramV2(
+            mechanisms.FormulaProgram.build(outputs=(effect,)),
+            data_input_name="value",
+            state_type=state,
+        ),
         input_schema=_schema(),
-        state=torch.tensor([0.25, -0.5, 2.0]) if state is None else state,
         operands={
             "writer": torch.tensor([0.1, 0.2, 0.3]),
             "gain": torch.tensor([-0.1, 0.05, 0.2]),
         },
+        trainable_operands=("writer", "gain"),
     )
 
 
-def _blend_action() -> BankLocalNeuralPlasticityActionV2:
-    data_type = mechanisms.TensorType(
-        ("B", "D"),
-        ("B", 3),
-        dtype="float32",
-        domain="activation",
-    )
-    state_type = mechanisms.TensorType(
-        ("D",),
-        (3,),
-        dtype="float32",
-        domain="activation",
-    )
-    value = mechanisms.InputBinding("value", data_type)
-    target_weight = mechanisms.BankBinding(
-        "target-weight",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="blend-target",
-        value_type=state_type,
-    )
-    amount_weight = mechanisms.BankBinding(
-        "amount-weight",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="blend-amount",
-        value_type=state_type,
-    )
+def _blend_action() -> mechanisms.BankLocalFormulaEffectAction:
+    value = mechanisms.InputBinding("value", _type())
+    state = _state_type(3)
+    target_weight = _binding("target-weight", state)
+    amount_weight = _binding("amount-weight", state)
     target = mechanisms.reduce_sum(mechanisms.scale(value, target_weight), axis="B")
     amount = mechanisms.scalar_map(
         mechanisms.reduce_sum(mechanisms.scale(value, amount_weight), axis="B"),
         mode="sigmoid",
     )
-    identity = mechanisms.neural_plasticity_blend(value, target, amount)
-    program = mechanisms.FormulaEffectProgramV2(
-        mechanisms.FormulaProgram.build(outputs=(identity,)),
-        data_input_name="value",
-        state_type=state_type,
-    )
-    return BankLocalNeuralPlasticityActionV2(
-        "blend-memory",
-        program,
+    effect = mechanisms.neural_plasticity_blend(value, target, amount)
+    return mechanisms.BankLocalFormulaEffectAction(
+        "blend",
+        mechanisms.FormulaEffectProgramV2(
+            mechanisms.FormulaProgram.build(outputs=(effect,)),
+            data_input_name="value",
+            state_type=state,
+        ),
         input_schema=_schema(),
-        state=torch.tensor([1.0, -1.0, 0.5]),
         operands={
             "target-weight": torch.tensor([0.5, -0.25, 0.75]),
             "amount-weight": torch.tensor([0.1, 0.2, -0.3]),
@@ -126,112 +95,107 @@ def _blend_action() -> BankLocalNeuralPlasticityActionV2:
     )
 
 
-def _outer_action() -> BankLocalNeuralPlasticityActionV2:
-    data_type = mechanisms.TensorType(
-        ("B", "O"),
-        ("B", 2),
-        dtype="float32",
-        domain="activation",
-    )
-    left_type = mechanisms.TensorType(
-        ("O",),
-        (2,),
-        dtype="float32",
-        domain="activation",
-    )
-    right_type = mechanisms.TensorType(
-        ("I",),
-        (3,),
-        dtype="float32",
-        domain="activation",
-    )
-    rate_type = mechanisms.TensorType((), (), dtype="float32", domain="activation")
-    state_type = mechanisms.TensorType(
-        ("O", "I"),
+def _outer_action() -> mechanisms.BankLocalFormulaEffectAction:
+    value_type = _type(2)
+    state = mechanisms.TensorType(
+        ("D", "I"),
         (2, 3),
         dtype="float32",
         domain="activation",
     )
-    value = mechanisms.InputBinding("value", data_type)
-    right = mechanisms.BankBinding(
+    value = mechanisms.InputBinding("value", value_type)
+    right = _binding(
         "right",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="outer-right",
-        value_type=right_type,
-    )
-    rate = mechanisms.BankBinding(
-        "rate",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="outer-rate",
-        value_type=rate_type,
-    )
-    left = mechanisms.reduce_sum(value, axis="B")
-    assert left.value_type == left_type
-    identity = mechanisms.neural_plasticity_outer(value, left, right, rate)
-    program = mechanisms.FormulaEffectProgramV2(
-        mechanisms.FormulaProgram.build(outputs=(identity,)),
-        data_input_name="value",
-        state_type=state_type,
-    )
-    return BankLocalNeuralPlasticityActionV2(
-        "outer-memory",
-        program,
-        input_schema=mechanisms.TensorSchema(
+        mechanisms.TensorType(
+            ("I",),
+            (3,),
             dtype="float32",
-            device_class="any",
-            dimensions=("B", 2),
-            semantic_axes=("batch", "feature"),
-            mask_semantics="none",
+            domain="activation",
         ),
-        state=torch.zeros(2, 3),
+    )
+    rate = _binding("rate", _state_type())
+    effect = mechanisms.neural_plasticity_outer(
+        value,
+        mechanisms.reduce_sum(value, axis="B"),
+        right,
+        rate,
+    )
+    return mechanisms.BankLocalFormulaEffectAction(
+        "outer",
+        mechanisms.FormulaEffectProgramV2(
+            mechanisms.FormulaProgram.build(outputs=(effect,)),
+            data_input_name="value",
+            state_type=state,
+        ),
+        input_schema=_schema(2),
         operands={"right": torch.tensor([0.25, -0.5, 1.0]), "rate": torch.tensor(0.2)},
         trainable_operands=("right", "rate"),
     )
 
 
-def _state_coupled_action(kind: str) -> BankLocalNeuralPlasticityActionV2:
-    data_type = mechanisms.TensorType(
-        ("B", "D"),
-        ("B", 3),
+def _repeated_outer_action(
+    execution_count: float = 3.0,
+) -> mechanisms.BankLocalFormulaEffectAction:
+    value_type = _type(2)
+    state = mechanisms.TensorType(
+        ("D", "I"),
+        (2, 3),
         dtype="float32",
         domain="activation",
     )
-    state_type = mechanisms.TensorType(
-        ("D",),
-        (3,),
-        dtype="float32",
-        domain="activation",
+    value = mechanisms.InputBinding("value", value_type)
+    right = _binding(
+        "right",
+        mechanisms.TensorType(
+            ("I",),
+            (3,),
+            dtype="float32",
+            domain="activation",
+        ),
     )
+    rate = _binding("rate", _state_type())
+    count = _binding("execution-count", _state_type())
+    effect = mechanisms.neural_plasticity_outer(
+        value,
+        mechanisms.reduce_sum(value, axis="B"),
+        right,
+        rate,
+        count,
+        max_executions=8,
+    )
+    return mechanisms.BankLocalFormulaEffectAction(
+        "repeated-outer",
+        mechanisms.FormulaEffectProgramV2(
+            mechanisms.FormulaProgram.build(outputs=(effect,)),
+            data_input_name="value",
+            state_type=state,
+        ),
+        input_schema=_schema(2),
+        operands={
+            "right": torch.tensor([0.25, -0.5, 1.0]),
+            "rate": torch.tensor(0.2),
+            "execution-count": torch.tensor(execution_count),
+        },
+        trainable_operands=("execution-count",),
+    )
+
+
+def _coupled_action(kind: str) -> mechanisms.BankLocalFormulaEffectAction:
+    value = mechanisms.InputBinding("value", _type())
+    state = _state_type(3)
     factor_type = mechanisms.TensorType(
         ("D", "R"),
         (3, 2),
         dtype="float32",
         domain="activation",
     )
-    scalar_type = mechanisms.TensorType((), (), dtype="float32", domain="activation")
-    value = mechanisms.InputBinding("value", data_type)
     bias = mechanisms.reduce_sum(value, axis="B")
+    rate = _binding("rate", _state_type())
     operands: dict[str, torch.Tensor]
     if kind == "transport":
-        output_factor = mechanisms.BankBinding(
-            "output-factor",
-            source_ref="arti/formula-operand-bank@1",
-            partition_id="transport-output",
-            value_type=factor_type,
-        )
-        input_factor = mechanisms.BankBinding(
-            "input-factor",
-            source_ref="arti/formula-operand-bank@1",
-            partition_id="transport-input",
-            value_type=factor_type,
-        )
-        rate = mechanisms.BankBinding(
-            "rate",
-            source_ref="arti/formula-operand-bank@1",
-            partition_id="transport-rate",
-            value_type=scalar_type,
-        )
-        identity = mechanisms.neural_plasticity_transport(
+        output_factor = _binding("output-factor", factor_type)
+        input_factor = _binding("input-factor", factor_type)
+        effect = mechanisms.neural_plasticity_transport(
             value,
             bias,
             output_factor,
@@ -245,27 +209,15 @@ def _state_coupled_action(kind: str) -> BankLocalNeuralPlasticityActionV2:
             "rate": torch.tensor(0.2),
         }
     elif kind == "polynomial":
-        bindings = {
-            name: mechanisms.BankBinding(
-                name,
-                source_ref="arti/formula-operand-bank@1",
-                partition_id=f"polynomial-{name}",
-                value_type=factor_type,
-            )
-            for name in ("output-factor", "left-factor", "right-factor")
-        }
-        rate = mechanisms.BankBinding(
-            "rate",
-            source_ref="arti/formula-operand-bank@1",
-            partition_id="polynomial-rate",
-            value_type=scalar_type,
-        )
-        identity = mechanisms.neural_plasticity_polynomial(
+        output_factor = _binding("output-factor", factor_type)
+        left_factor = _binding("left-factor", factor_type)
+        right_factor = _binding("right-factor", factor_type)
+        effect = mechanisms.neural_plasticity_polynomial(
             value,
             bias,
-            bindings["output-factor"],
-            bindings["left-factor"],
-            bindings["right-factor"],
+            output_factor,
+            left_factor,
+            right_factor,
             rate,
             state_axis="D",
         )
@@ -276,418 +228,346 @@ def _state_coupled_action(kind: str) -> BankLocalNeuralPlasticityActionV2:
             "rate": torch.tensor(0.15),
         }
     elif kind == "proximal":
-        raw_strength = mechanisms.BankBinding(
-            "raw-strength",
-            source_ref="arti/formula-operand-bank@1",
-            partition_id="proximal-strength",
-            value_type=state_type,
-        )
-        identity = mechanisms.neural_plasticity_proximal(value, bias, raw_strength)
+        strength = _binding("raw-strength", state)
+        effect = mechanisms.neural_plasticity_proximal(value, bias, strength)
         operands = {"raw-strength": torch.tensor([-1.0, -0.5, 0.25])}
     else:
-        raise AssertionError(f"unknown test effect {kind!r}")
-    program = mechanisms.FormulaEffectProgramV2(
-        mechanisms.FormulaProgram.build(outputs=(identity,)),
-        data_input_name="value",
-        state_type=state_type,
-    )
-    return BankLocalNeuralPlasticityActionV2(
-        f"{kind}-memory",
-        program,
+        raise AssertionError(kind)
+    return mechanisms.BankLocalFormulaEffectAction(
+        kind,
+        mechanisms.FormulaEffectProgramV2(
+            mechanisms.FormulaProgram.build(outputs=(effect,)),
+            data_input_name="value",
+            state_type=state,
+        ),
         input_schema=_schema(),
-        state=torch.tensor([0.75, -1.25, 0.5]),
         operands=operands,
         trainable_operands=tuple(operands),
     )
 
 
-def test_effect_is_one_ssa_instruction_with_an_identity_data_lane() -> None:
-    effect_program = _effect_program()
-    action = _action()
-    value = torch.tensor(
-        [[1.0, 2.0, -1.0], [3.0, -2.0, 0.5]],
-        requires_grad=True,
-    )
-    state = action.initial_state().requires_grad_()
+@pytest.mark.parametrize(
+    "factory,state,value",
+    [
+        (_simple_action, torch.tensor([0.25, -0.5, 2.0]), torch.randn(2, 3)),
+        (_blend_action, torch.tensor([1.0, -1.0, 0.5]), torch.randn(2, 3)),
+        (_outer_action, torch.zeros(2, 3), torch.randn(2, 2)),
+        (lambda: _coupled_action("transport"), torch.tensor([0.75, -1.25, 0.5]), torch.randn(2, 3)),
+        (lambda: _coupled_action("polynomial"), torch.tensor([0.75, -1.25, 0.5]), torch.randn(2, 3)),
+        (lambda: _coupled_action("proximal"), torch.tensor([0.75, -1.25, 0.5]), torch.randn(2, 3)),
+    ],
+)
+def test_effect_atoms_preserve_data_and_differentiate_successor(
+    factory,
+    state: torch.Tensor,
+    value: torch.Tensor,
+) -> None:
+    action = factory()
+    value = value.requires_grad_()
+    state = state.requires_grad_()
 
-    result = action._execute_with_state(value, state, return_trace=True)
+    result = action._execute_against(value, state, previous_revision=4)
 
-    operands = action.operand_store.tensors()
-    additive = (value * operands["writer"]).sum(dim=0)
-    multiplicative = (value * operands["gain"]).sum(dim=0)
-    expected = state + additive + state * multiplicative
     assert result.value is value
-    torch.testing.assert_close(result.successor_state, expected)
-    assert effect_program.effect_instruction.atom_ref == mechanisms.NEURAL_PLASTICITY_ATOM_REF
-    assert effect_program.program.outputs == (effect_program.effect_instruction.output_slot,)
-
-    result.successor_state.square().sum().backward()
+    assert result.successor.shape == state.shape
+    assert result.previous_revision == 4
+    assert result.successor_revision == 5
+    assert torch.isfinite(result.successor).all()
+    result.successor.square().sum().backward()
     assert value.grad is not None and torch.isfinite(value.grad).all()
     assert state.grad is not None and torch.isfinite(state.grad).all()
+    assert all(parameter.grad is not None for parameter in action.parameters())
 
 
-def test_self_state_parameterizes_effect_without_becoming_a_formula_binding() -> None:
-    action = _action()
-    value = torch.tensor([[1.0, 2.0, 3.0]])
-    left_state = torch.tensor([0.5, 0.5, 0.5])
-    right_state = torch.tensor([1.5, 1.5, 1.5])
-
-    left = action._execute_with_state(value, left_state)
-    right = action._execute_with_state(value, right_state)
-
-    assert not torch.equal(left.update, right.update)
-    assert "self_state" not in action.effect_program.program.input_names
-    assert "self_state" not in action.effect_program.program.bank_names
-
-
-def test_same_site_state_but_different_data_produces_different_effects() -> None:
-    action = _action()
-    state = action.initial_state()
-
-    left = action._execute_with_state(torch.ones(2, 3), state).successor_state
-    right = action._execute_with_state(torch.full((2, 3), 2.0), state).successor_state
-
-    assert not torch.equal(left, right)
-
-
-def test_effect_execution_is_site_bound_and_caller_cannot_supply_target() -> None:
-    effect_program = _effect_program()
-    fabric = mechanisms.FormulaFabricV3(effect_program)
-
-    with pytest.raises(RuntimeError, match="execution-site-bound"):
-        fabric(
-            inputs={"value": torch.ones(2, 3)},
-            banks={},
-        )
-    with pytest.raises(ValueError, match="exactly once"):
-        BankLocalNeuralPlasticityAction(
-            "remember",
-            effect_program,
-            input_schema=_schema(),
-            state=torch.ones(3),
-            operands={
-                "writer": torch.ones(3),
-                "gain": torch.ones(3),
-                "self_state": torch.zeros(3),
-            },
-        )
-
-
-def test_formula_effect_program_round_trips_and_has_versioned_dependencies() -> None:
-    effect_program = _effect_program()
-
-    restored = mechanisms.FormulaEffectProgram.from_dict(effect_program.to_dict())
-
-    assert restored == effect_program
-    assert restored.fingerprint == effect_program.fingerprint
-    assert mechanisms.NEURAL_PLASTICITY_ATOM_REF in restored.dependency_refs
-    assert arti.component_ref(restored) == "arti/formula-effect-program@1"
-    assert arti.component_ref(mechanisms.FormulaFabricV3(restored)) == "arti/formula-fabric@3"
-    assert arti.component_ref(mechanisms.NeuralPlasticityAtom()) == (
-        "arti/formula-atom-neural-plasticity@1"
-    )
-
-
-def test_formula_fabric_v3_provenance_does_not_register_a_v2_child() -> None:
-    fabric = mechanisms.FormulaFabricV3(_effect_program())
-
-    provenance = arti.component_provenance(fabric)
-    references = {component["ref"] for component in provenance["components"]}
-
-    assert "arti/formula-fabric@3" in references
-    assert "arti/formula-fabric@2" not in references
-    assert arti.validate_component_provenance(provenance) == provenance
-
-
-def test_effect_rejects_explicit_self_state_binding() -> None:
-    valid = _effect_program()
-    bindings = {binding.name: binding for binding in valid.program.bindings}
-    value = bindings["value"]
-    self_state = mechanisms.BankBinding(
-        "self_state",
-        source_ref=mechanisms.NEURAL_PLASTICITY_ATOM_REF,
-        partition_id="self",
-        value_type=valid.state_type,
-    )
-    update = mechanisms.add(
-        self_state,
-        mechanisms.reduce_sum(value, axis="B"),
-    )
-    program = mechanisms.FormulaProgram.build(
-        outputs=(mechanisms.neural_plasticity(value, update, update),)
-    )
-
-    with pytest.raises(mechanisms.FormulaProgramError, match="cannot appear"):
-        mechanisms.FormulaEffectProgram(
-            program,
-            data_input_name="value",
-            state_type=valid.state_type,
-        )
-
-
-def test_formula_effect_program_requires_data_conditioned_update() -> None:
-    valid = _effect_program()
-    bindings = {binding.name: binding for binding in valid.program.bindings}
-    value = bindings["value"]
-    writer = bindings["writer"]
-    program = mechanisms.FormulaProgram.build(
-        outputs=(mechanisms.neural_plasticity(value, writer, writer),)
-    )
-
-    with pytest.raises(mechanisms.FormulaProgramError, match="current data"):
-        mechanisms.FormulaEffectProgram(
-            program,
-            data_input_name="value",
-            state_type=valid.state_type,
-        )
-
-
-def test_effect_rejects_a_transformed_public_data_lane() -> None:
-    valid = _effect_program()
-    bindings = {binding.name: binding for binding in valid.program.bindings}
-    value = bindings["value"]
-    writer = bindings["writer"]
-    gain = bindings["gain"]
-    additive = mechanisms.reduce_sum(mechanisms.scale(value, writer), axis="B")
-    multiplicative = mechanisms.reduce_sum(mechanisms.scale(value, gain), axis="B")
-    transformed = mechanisms.add(value, value)
-    program = mechanisms.FormulaProgram.build(
-        outputs=(mechanisms.neural_plasticity(transformed, additive, multiplicative),)
-    )
-
-    with pytest.raises(mechanisms.FormulaProgramError, match="unmodified current data"):
-        mechanisms.FormulaEffectProgram(
-            program,
-            data_input_name="value",
-            state_type=valid.state_type,
-        )
-
-
-def test_pure_formula_executors_reject_effect_programs() -> None:
-    program = _effect_program().program
-
-    with pytest.raises(mechanisms.FormulaProgramError, match="cannot execute effect-bearing"):
-        mechanisms.FormulaFabricV2(program)
-    with pytest.raises(mechanisms.FormulaProgramError, match="cannot lower effect-bearing"):
-        mechanisms.FormulaExecutionPlanV2(program)
-
-
-def test_blend_effect_moves_owned_state_toward_a_data_conditioned_target() -> None:
-    action = _blend_action()
-    value = torch.tensor([[1.0, 2.0, -1.0], [0.5, -1.0, 2.0]], requires_grad=True)
-    state = action.initial_state().requires_grad_()
-
-    result = action._execute_with_state(value, state)
-
-    operands = action.operand_store.tensors()
-    target = (value * operands["target-weight"]).sum(dim=0)
-    amount = torch.sigmoid((value * operands["amount-weight"]).sum(dim=0))
-    expected = state + amount * (target - state)
-    assert result.value is value
-    torch.testing.assert_close(result.successor_state, expected)
-    assert result.successor_state.shape == state.shape
-    assert action.effect_program.effect_instruction.atom_ref == (
-        mechanisms.NEURAL_PLASTICITY_BLEND_ATOM_REF
-    )
-
-    result.successor_state.square().sum().backward()
-    assert value.grad is not None and torch.count_nonzero(value.grad) > 0
-    assert state.grad is not None and torch.count_nonzero(state.grad) > 0
-    assert action.operand_store.tensors()["target-weight"].grad is not None
-
-
-def test_outer_effect_applies_a_rank_one_update_without_materializing_a_target() -> None:
-    action = _outer_action()
-    value = torch.tensor([[1.0, -2.0], [0.5, 3.0]], requires_grad=True)
-    state = action.initial_state().requires_grad_()
-
-    result = action._execute_with_state(value, state)
-
-    operands = action.operand_store.tensors()
-    expected_update = operands["rate"] * torch.outer(value.sum(dim=0), operands["right"])
-    assert result.value is value
-    torch.testing.assert_close(result.update, expected_update)
-    torch.testing.assert_close(result.successor_state, state + expected_update)
-    assert action.effect_program.effect_instruction.atom_ref == (
-        mechanisms.NEURAL_PLASTICITY_OUTER_ATOM_REF
-    )
-
-    result.successor_state.square().sum().backward()
-    assert value.grad is not None and torch.count_nonzero(value.grad) > 0
-    assert action.operand_store.tensors()["right"].grad is not None
-    assert action.operand_store.tensors()["rate"].grad is not None
-
-
-def test_transport_effect_introduces_cross_coordinate_state_feedback() -> None:
-    action = _state_coupled_action("transport")
-    value = torch.tensor([[0.1, -0.2, 0.3]], requires_grad=True)
-    state = action.initial_state().requires_grad_()
+def test_additive_multiplicative_effect_matches_formula() -> None:
+    action = _simple_action()
+    value = torch.tensor([[1.0, 2.0, -1.0], [3.0, -2.0, 0.5]])
+    predecessor = torch.tensor([0.25, -0.5, 2.0])
     operands = action.operand_store.tensors()
 
-    result = action._execute_with_state(value, state)
-    flat = state.reshape(-1)
-    expected = state + value.sum(dim=0) + operands["rate"] * (
-        operands["output-factor"]
-        @ (operands["input-factor"].transpose(0, 1) @ flat)
-    )
-    torch.testing.assert_close(result.successor_state, expected)
-    assert result.value is value
+    result = action._execute_against(value, predecessor, previous_revision=0)
 
-    jacobian = torch.autograd.functional.jacobian(
-        lambda current: action._execute_with_state(value, current).successor_state,
+    additive = (value * operands["writer"]).sum(dim=0)
+    multiplicative = (value * operands["gain"]).sum(dim=0)
+    torch.testing.assert_close(
+        result.successor,
+        predecessor + additive + predecessor * multiplicative,
+    )
+
+
+def test_outer_v2_uses_direct_trainable_execution_count_in_one_effect() -> None:
+    action = _repeated_outer_action()
+    value = torch.tensor([[1.0, -2.0], [0.5, 1.0]])
+    predecessor = torch.zeros(2, 3)
+    operands = action.operand_store.tensors()
+
+    result = action._execute_against(value, predecessor, previous_revision=7)
+
+    one_update = (
+        operands["rate"]
+        * value.sum(dim=0).unsqueeze(-1)
+        * operands["right"].unsqueeze(0)
+    )
+    assert result.value is value
+    assert result.previous_revision == 7
+    assert result.successor_revision == 8
+    torch.testing.assert_close(result.successor, predecessor + 3.0 * one_update)
+    result.successor.square().sum().backward()
+    count = action.operand_store.tensor("execution-count")
+    assert count.grad is not None
+    assert torch.isfinite(count.grad)
+    assert count.grad.abs() > 0
+    assert (
+        action.effect_program.effect_instruction.atom_ref
+        == "arti/formula-atom-neural-plasticity-outer@2"
+    )
+    assert dict(action.effect_program.effect_instruction.attributes) == {
+        "max_executions": 8
+    }
+
+
+def test_generic_execution_count_repeats_nonlinear_effect_on_latest_state() -> None:
+    state_type = _state_type(2)
+    state = torch.tensor([0.0, 2.0])
+    target = torch.tensor([4.0, -2.0])
+    amount = torch.tensor([0.5, 0.25])
+    count = torch.tensor(2.0, requires_grad=True)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "repeat-blend",
+        mechanisms.NEURAL_PLASTICITY_BLEND_ATOM_REF,
+        (target, amount),
+    )
+
+    result = apply_neural_plasticity_effect(
+        effect,
         state,
+        state_type=state_type,
+        execution_count=count,
+        max_executions=4,
     )
-    off_diagonal = jacobian - torch.diag(torch.diagonal(jacobian))
-    assert torch.count_nonzero(off_diagonal) > 0
+    once = state + amount * (target - state)
+    expected = once + amount * (target - once)
 
-    result.successor_state.square().sum().backward()
-    assert value.grad is not None and torch.count_nonzero(value.grad) > 0
-    assert operands["output-factor"].grad is not None
-    assert operands["input-factor"].grad is not None
+    torch.testing.assert_close(result, expected)
+    result.square().sum().backward()
+    assert count.grad is not None
+    assert bool(torch.isfinite(count.grad))
+    assert float(count.grad.abs()) > 0.0
 
 
-def test_transport_acts_on_one_named_axis_without_flattening_other_axes() -> None:
-    state_type = mechanisms.TensorType(
-        ("M", "D"),
-        ("M", "D"),
-        dtype="float32",
-        domain="activation",
-    )
-    factor_type = mechanisms.TensorType(
-        ("D", "R"),
-        ("D", "R"),
-        dtype="float32",
-        domain="activation",
-    )
-    scalar_type = mechanisms.TensorType((), (), dtype="float32", domain="activation")
-    value = mechanisms.InputBinding("value", state_type)
-    output_factor = mechanisms.BankBinding(
-        "output-factor",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="matrix-transport-output",
-        value_type=factor_type,
-    )
-    input_factor = mechanisms.BankBinding(
-        "input-factor",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="matrix-transport-input",
-        value_type=factor_type,
-    )
-    rate = mechanisms.BankBinding(
-        "rate",
-        source_ref="arti/formula-operand-bank@1",
-        partition_id="matrix-transport-rate",
-        value_type=scalar_type,
-    )
-    effect = mechanisms.neural_plasticity_transport(
-        value,
-        value,
-        output_factor,
-        input_factor,
-        rate,
-        state_axis="D",
-    )
-    action = BankLocalNeuralPlasticityActionV2(
-        "matrix-transport",
-        mechanisms.FormulaEffectProgramV2(
-            mechanisms.FormulaProgram.build(outputs=(effect,)),
-            data_input_name="value",
-            state_type=state_type,
-        ),
-        input_schema=mechanisms.TensorSchema(
-            dtype="float32",
-            device_class="any",
-            dimensions=("M", "D"),
-            semantic_axes=("item", "feature"),
-            mask_semantics="none",
-        ),
-        state=torch.tensor([[0.5, -0.25, 0.75], [1.0, 0.5, -0.5]]),
-        operands={
-            "output-factor": torch.tensor([[1.0, 0.0], [0.5, 1.0], [0.0, -0.5]]),
-            "input-factor": torch.tensor([[0.0, 1.0], [1.0, 0.5], [-0.5, 0.0]]),
-            "rate": torch.tensor(0.2),
-        },
-    )
-    data = torch.tensor([[0.1, 0.2, -0.1], [-0.2, 0.3, 0.4]])
-    state = action.initial_state()
+def test_outer_v2_clamps_execution_count_to_declared_atom_budget() -> None:
+    action = _repeated_outer_action(execution_count=50.0)
+    value = torch.tensor([[1.0, -2.0], [0.5, 1.0]])
+    predecessor = torch.zeros(2, 3)
     operands = action.operand_store.tensors()
 
-    result = action._execute_with_state(data, state)
-    expected = state + data + operands["rate"] * (
-        (state @ operands["input-factor"])
-        @ operands["output-factor"].transpose(0, 1)
+    result = action._execute_against(value, predecessor, previous_revision=0)
+
+    one_update = (
+        operands["rate"]
+        * value.sum(dim=0).unsqueeze(-1)
+        * operands["right"].unsqueeze(0)
     )
-
-    assert result.value is data
-    assert result.successor_state.shape == (2, 3)
-    torch.testing.assert_close(result.successor_state, expected)
+    torch.testing.assert_close(result.successor, predecessor + 8.0 * one_update)
 
 
-def test_polynomial_effect_has_nonzero_state_curvature() -> None:
-    action = _state_coupled_action("polynomial")
-    value = torch.tensor([[0.05, -0.1, 0.2]], requires_grad=True)
-    state = action.initial_state().requires_grad_()
-    direction = torch.tensor([0.2, -0.1, 0.15])
-
-    center = action._execute_with_state(value, state).successor_state
-    plus = action._execute_with_state(value, state + direction).successor_state
-    minus = action._execute_with_state(value, state - direction).successor_state
-    second_difference = plus - 2.0 * center + minus
-    assert torch.linalg.vector_norm(second_difference) > 1e-5
-
-    center.square().sum().backward()
-    assert value.grad is not None and torch.count_nonzero(value.grad) > 0
-    assert action.operand_store.tensors()["left-factor"].grad is not None
-    assert action.operand_store.tensors()["right-factor"].grad is not None
-
-
-def test_proximal_effect_is_sparse_and_nonexpansive() -> None:
-    action = _state_coupled_action("proximal")
-    value = torch.tensor([[0.2, 0.8, -0.4]], requires_grad=True)
-    state = action.initial_state().requires_grad_()
-    shifted = state + torch.tensor([0.1, -0.05, 0.2])
-
-    left = action._execute_with_state(value, state).successor_state
-    right = action._execute_with_state(value, shifted).successor_state
-    threshold = torch.nn.functional.softplus(
-        action.operand_store.tensors()["raw-strength"]
+@pytest.mark.parametrize("count_value", (0.0, 1.0))
+@pytest.mark.parametrize("maximum", (2, 4))
+def test_generic_count_excludes_unselected_overflow(
+    count_value: float, maximum: int,
+) -> None:
+    state = torch.tensor([1.0], requires_grad=True)
+    additive = torch.tensor([0.0], requires_grad=True)
+    multiplier = torch.tensor([1e20], requires_grad=True)
+    count = torch.tensor(count_value, requires_grad=True)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "overflow-after-first", mechanisms.NEURAL_PLASTICITY_ATOM_REF,
+        (additive, multiplier),
     )
-    candidate = state + value.sum(dim=0)
-    expected = torch.sign(candidate) * torch.relu(torch.abs(candidate) - threshold)
-    torch.testing.assert_close(left, expected)
-    assert torch.count_nonzero(left) < left.numel()
-    assert torch.linalg.vector_norm(right - left) <= (
-        torch.linalg.vector_norm(shifted - state) + 1e-6
+    result = apply_neural_plasticity_effect(
+        effect, state, state_type=_state_type(1),
+        execution_count=count, max_executions=maximum,
     )
+    with torch.no_grad():
+        inference = apply_neural_plasticity_effect(
+            effect, state, state_type=_state_type(1),
+            execution_count=count, max_executions=maximum,
+        )
+    assert torch.equal(result, inference)
+    assert torch.isfinite(result).all()
+    fixed = apply_neural_plasticity_effect(
+        effect, state, state_type=_state_type(1),
+        execution_count=count.detach(), max_executions=maximum,
+    )
+    actual = torch.autograd.grad(result.sum(), (state, additive, multiplier, count), allow_unused=True)
+    expected = torch.autograd.grad(fixed.sum(), (state, additive, multiplier), allow_unused=True)
+    for gradient, hard_gradient in zip(actual[:3], expected, strict=True):
+        if hard_gradient is None:
+            assert gradient is None
+        else:
+            assert gradient is not None and torch.isfinite(gradient).all()
+            torch.testing.assert_close(gradient, hard_gradient)
+    assert actual[3] is not None and torch.isfinite(actual[3])
+    assert actual[3].abs() > 0
 
-    left.square().sum().backward()
-    assert value.grad is not None and torch.count_nonzero(value.grad) > 0
-    assert action.operand_store.tensors()["raw-strength"].grad is not None
+
+def test_generic_count_zero_has_no_credit_past_invalid_first_trial() -> None:
+    state = torch.tensor([3e38], requires_grad=True)
+    count = torch.tensor(0.0, requires_grad=True)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "invalid-first-trial", mechanisms.NEURAL_PLASTICITY_ATOM_REF,
+        (torch.zeros(1), torch.tensor([2.0], requires_grad=True)),
+    )
+    result = apply_neural_plasticity_effect(
+        effect, state, state_type=_state_type(1), execution_count=count, max_executions=4,
+    )
+    assert torch.equal(result, state)
+    state_gradient, count_gradient, operand_gradient = torch.autograd.grad(
+        result.sum(), (state, count, effect.operands[1]), allow_unused=True,
+    )
+    torch.testing.assert_close(state_gradient, torch.ones_like(state))
+    torch.testing.assert_close(count_gradient, torch.zeros_like(count))
+    assert operand_gradient is None
+
+
+def test_generic_count_does_not_clip_selected_overflow() -> None:
+    state = torch.ones(1)
+    count = torch.tensor(2.0, requires_grad=True)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "selected-overflow", mechanisms.NEURAL_PLASTICITY_ATOM_REF,
+        (torch.zeros(1), torch.tensor([1e20])),
+    )
+    result = apply_neural_plasticity_effect(
+        effect, state, state_type=_state_type(1), execution_count=count, max_executions=4,
+    )
+    with torch.no_grad():
+        inference = apply_neural_plasticity_effect(
+            effect, state, state_type=_state_type(1), execution_count=count, max_executions=4,
+        )
+    assert torch.isinf(result).all()
+    assert torch.equal(result, inference)
+
+
+@pytest.mark.parametrize("count_value", (-1.0, 0.0, 0.49, 0.5, 0.51, 1.5, 2.0, 2.5, 4.0, 9.0))
+def test_generic_count_preserves_finite_blend_straight_through_gradients(count_value: float) -> None:
+    state = torch.tensor([0.0, 2.0], requires_grad=True)
+    target = torch.tensor([4.0, -2.0], requires_grad=True)
+    amount = torch.tensor([0.5, 0.25], requires_grad=True)
+    count = torch.tensor(count_value, requires_grad=True)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "finite-blend", mechanisms.NEURAL_PLASTICITY_BLEND_ATOM_REF, (target, amount),
+    )
+    result = apply_neural_plasticity_effect(
+        effect, state, state_type=_state_type(2), execution_count=count, max_executions=4,
+    )
+    states = [state]
+    for _ in range(4):
+        states.append(states[-1] + amount * (target - states[-1]))
+    bounded = count.clamp(0, 4)
+    soft = torch.softmax(-4 * (torch.arange(5) - bounded).square(), dim=0)
+    hard = torch.nn.functional.one_hot(bounded.detach().round().long(), num_classes=5)
+    reference = torch.einsum("k,kd->d", soft + (hard - soft).detach(), torch.stack(states))
+    with torch.no_grad():
+        inference = apply_neural_plasticity_effect(
+            effect, state, state_type=_state_type(2), execution_count=count, max_executions=4,
+        )
+    assert torch.equal(result, inference)
+    parameters = (state, target, amount, count)
+    actual = torch.autograd.grad(result.square().sum(), parameters, allow_unused=True)
+    expected = torch.autograd.grad(reference.square().sum(), parameters)
+    for parameter, gradient, previous_gradient in zip(parameters, actual, expected, strict=True):
+        gradient = torch.zeros_like(parameter) if gradient is None else gradient
+        assert torch.isfinite(gradient).all()
+        torch.testing.assert_close(gradient, previous_gradient)
+
+
+def test_generic_count_only_records_selected_repetitions_for_backward(monkeypatch) -> None:
+    grad_modes = []
+    original = apply_neural_plasticity_effect
+
+    def record(effect, state, **kwargs):
+        grad_modes.append(torch.is_grad_enabled())
+        return original(effect, state, **kwargs)
+
+    monkeypatch.setattr(formula_v3, "apply_neural_plasticity_effect", record)
+    effect = mechanisms.NeuralPlasticityEffectV2(
+        "count-work", mechanisms.NEURAL_PLASTICITY_BLEND_ATOM_REF,
+        (torch.ones(1), torch.tensor([0.5])),
+    )
+    original(
+        effect, torch.zeros(1), state_type=_state_type(1),
+        execution_count=torch.tensor(2.0, requires_grad=True), max_executions=4,
+    )
+    assert grad_modes == [True, True, False, False]
+
+
+@pytest.mark.parametrize(
+    "program_type,fabric_type,intermediate",
+    (
+        (formula_v3.FormulaEffectProgram, formula_v3.FormulaFabricV3, False),
+        (formula_v3.FormulaEffectProgramV2, formula_v3.FormulaFabricV4, False),
+        (formula_v3.FormulaEffectProgramV3, formula_v3.FormulaFabricV5, True),
+    ),
+)
+def test_effect_fabric_contract_describes_runtime_predecessor(program_type, fabric_type, intermediate):
+    value = mechanisms.InputBinding("value", _type())
+    current = mechanisms.add(value, value) if intermediate else value
+    drive = mechanisms.reduce_sum(current, axis="B")
+    effect = mechanisms.neural_plasticity(current, drive, drive)
+    output = mechanisms.add(effect, value) if intermediate else effect
+    program = program_type(
+        mechanisms.FormulaProgram.build(outputs=(output,)),
+        data_input_name="value", state_type=_state_type(3),
+    )
+    config = fabric_type(program).contract_config()
+    assert config["target_binding"] == "runtime-predecessor-bank"
+    assert config["state_access"] == "effect-operands-only"
+
+
+def test_effect_has_no_owned_state_or_caller_target() -> None:
+    action = _simple_action()
+    config = action.contract_config()
+
+    assert arti.component_ref(action) == "arti/bank-local-formula-effect-action@1"
+    assert config["target_resolution"] == "dynamic-immediate-predecessor-bank-slot"
+    assert config["data_lane"] == "identity"
+    assert "self_state" not in dict(action.named_buffers())
+    assert "state_revision" not in dict(action.named_buffers())
+    assert "target" not in config
+    with pytest.raises(RuntimeError, match="predecessor lineage"):
+        action(torch.ones(1, 3))
 
 
 @pytest.mark.parametrize(
     "factory",
     [
+        _simple_action,
         _blend_action,
         _outer_action,
-        lambda: _state_coupled_action("transport"),
-        lambda: _state_coupled_action("polynomial"),
-        lambda: _state_coupled_action("proximal"),
+        _repeated_outer_action,
+        lambda: _coupled_action("transport"),
+        lambda: _coupled_action("polynomial"),
+        lambda: _coupled_action("proximal"),
     ],
 )
-def test_formula_effect_program_v2_round_trips_with_its_effect_atom(factory) -> None:
+def test_effect_program_round_trip_preserves_atom(factory) -> None:
     action = factory()
-    program = action.effect_program
+    restored = mechanisms.FormulaEffectProgramV2.from_dict(
+        action.effect_program.to_dict()
+    )
 
-    restored = mechanisms.FormulaEffectProgramV2.from_dict(program.to_dict())
-    fabric = mechanisms.FormulaFabricV4(restored)
-    provenance = arti.component_provenance(fabric)
-    root = next(component for component in provenance["components"] if component["path"] == "$")
-
-    assert restored == program
-    assert restored.fingerprint == program.fingerprint
-    assert arti.component_ref(restored) == "arti/formula-effect-program@2"
-    assert arti.component_ref(fabric) == "arti/formula-fabric@4"
-    assert restored.effect_instruction.atom_ref in root["dependencies"]
-    assert "arti/formula-effect-program@2" in root["dependencies"]
+    assert restored.fingerprint == action.effect_program.fingerprint
+    assert restored.effect_instruction.atom_ref == action.effect_program.effect_instruction.atom_ref
+    provenance = arti.component_provenance(action)
     assert arti.validate_component_provenance(provenance) == provenance
+
+
+def test_effect_rejects_incompatible_predecessor_shape() -> None:
+    action = _simple_action()
+
+    with pytest.raises((ValueError, mechanisms.FormulaV2Error), match="predecessor"):
+        action._execute_against(
+            torch.ones(1, 3),
+            torch.zeros(2, 3),
+            previous_revision=0,
+        )

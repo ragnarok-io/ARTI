@@ -14,10 +14,8 @@ import torch
 from torch import Tensor, nn
 
 from .bank_local_program import (
+    BankLocalFormulaEffectAction,
     BankLocalFormulaAction,
-    BankLocalNeuralPlasticityAction,
-    BankLocalNeuralPlasticityActionV2,
-    BankLocalNeuralPlasticityActionV3,
     BankLocalTerminalAction,
 )
 from .component_registry import component_ref
@@ -34,6 +32,8 @@ from .shape_query import (
     SealedTensorViewBankQuery,
     TensorViewQueryResult,
 )
+from .formula_program_query_v3 import BankSlotRef, FormulaProgramBankState
+from .formula_v2 import FormulaV2Error, _validate_tensor_against_type
 from .tensor_schema import GradientContract
 from .tensor_view import AxisDescriptor, TensorIndexMap, TensorView, TensorViewPattern
 from .terminal_abi import BankExecutionSignatureV3, TerminalOutputABI
@@ -45,31 +45,70 @@ TENSOR_VIEW_FEDERAL_TRACE_VERSION = 3
 _NAME = re.compile(r"^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$")
 TensorViewActionKind = Literal["continue", "descend"]
 IndexTransitionKind = Literal["identity", "preserve_flat", "permute"]
-_StateOverlays = tuple[tuple[BankLocalNeuralPlasticityAction, Tensor, int], ...]
 
 
-def _state_from_overlays(
-    overlays: _StateOverlays,
-    source: BankLocalNeuralPlasticityAction,
+@dataclass(frozen=True)
+class _TensorViewProducerLineage:
+    owner_bank_id: str
+    action_id: str
+    slot_ref: BankSlotRef | None
+    bound_revision: int | None
+    bound_value: Tensor | None
+
+
+@dataclass(frozen=True)
+class _BankSlotEffectProposal:
+    target: BankSlotRef
+    owner_bank_id: str
+    predecessor_action_id: str
+    effect_action_id: str
+    effect_program_fingerprint: str
+    instruction_id: str
+    effect_atom_ref: str
+    previous_revision: int
+    successor_revision: int
+    previous: Tensor
+    successor: Tensor
+
+    def __post_init__(self) -> None:
+        if self.target.producer_id != f"{self.owner_bank_id}.{self.predecessor_action_id}":
+            raise FederalRecallError("effect target must belong to its dynamic predecessor")
+        if self.successor_revision != self.previous_revision + 1:
+            raise FederalRecallError("effect proposal must advance one logical revision")
+        if (
+            self.previous.shape != self.successor.shape
+            or self.previous.dtype != self.successor.dtype
+            or self.previous.device != self.successor.device
+        ):
+            raise FederalRecallError("effect proposal must preserve Bank slot type")
+
+
+_BankSlotProposals = tuple[_BankSlotEffectProposal, ...]
+
+
+def _effect_state(
+    entry: FormulaProgramBankState,
+    proposals: _BankSlotProposals,
+    slot_ref: BankSlotRef,
 ) -> tuple[Tensor, int]:
-    for candidate, state, revision in overlays:
-        if candidate is source:
-            return state, revision
-    return source.initial_state(), source.initial_revision()
+    for proposal in reversed(proposals):
+        if proposal.target == slot_ref:
+            return proposal.successor, proposal.successor_revision
+    return entry.value(slot_ref), entry.revision(slot_ref)
 
 
-def _replace_state_overlay(
-    overlays: _StateOverlays,
-    source: BankLocalNeuralPlasticityAction,
-    state: Tensor,
-    revision: int,
-) -> _StateOverlays:
-    retained = tuple(
-        (candidate, value, current_revision)
-        for candidate, value, current_revision in overlays
-        if candidate is not source
-    )
-    return (*retained, (source, state, revision))
+def _committed_state(
+    entry: FormulaProgramBankState,
+    proposals: _BankSlotProposals,
+) -> FormulaProgramBankState:
+    state = entry
+    for proposal in proposals:
+        state = state.replace(
+            proposal.target,
+            proposal.successor,
+            revision=proposal.successor_revision,
+        )
+    return state
 
 
 def _require_name(value: str, *, field: str) -> None:
@@ -228,16 +267,15 @@ class TensorViewLayoutTransition:
 
 
 class TensorViewFormulaAction(nn.Module):
-    """Run one typed Formula action and expose its successor TensorView."""
+    """Run one ordinary Formula action and stamp its producer-owned Bank slot."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-view-formula-action@1"
+    _component_reference: ClassVar[str] = "arti/tensor-view-formula-action@2"
 
     def __init__(
         self,
         action: BankLocalFormulaAction,
         *,
         layout: TensorViewLayoutTransition,
-        state_operands: Mapping[str, BankLocalNeuralPlasticityAction] | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(action, BankLocalFormulaAction):
@@ -246,16 +284,21 @@ class TensorViewFormulaAction(nn.Module):
             raise TypeError("layout must be TensorViewLayoutTransition")
         if action.output_schema.rank != len(layout.axis_names):
             raise FederalRecallError("action output schema and TensorView layout ranks disagree")
-        sources = {} if state_operands is None else dict(state_operands)
-        if not set(sources).issubset(action._bank_bindings):
-            raise FederalRecallError(
-                "state_operands must name Formula Bank bindings owned by the action"
-            )
-        if any(not isinstance(item, BankLocalNeuralPlasticityAction) for item in sources.values()):
-            raise TypeError("state_operands must reference Bank-local NeuralPlasticity sites")
         self.action = action
         self.layout = layout
-        self._state_operands = sources
+        self._owner_bank_id: str | None = None
+
+    def _bind_owner_bank(self, bank_id: str) -> None:
+        _require_name(bank_id, field="bank_id")
+        if self._owner_bank_id is not None and self._owner_bank_id != bank_id:
+            raise FederalRecallError("a Formula action cannot be owned by multiple Banks")
+        self._owner_bank_id = bank_id
+
+    @property
+    def owner_bank_id(self) -> str:
+        if self._owner_bank_id is None:
+            raise FederalRecallError("TensorView Formula action is not mounted in a Bank")
+        return self._owner_bank_id
 
     @property
     def action_id(self) -> str:
@@ -269,6 +312,12 @@ class TensorViewFormulaAction(nn.Module):
     def next_bank_id(self) -> str | None:
         return self.action.next_bank_id
 
+    @property
+    def bank_slot_ref(self) -> BankSlotRef | None:
+        if self.action.plastic_bank_slot is None:
+            return None
+        return self.action.bank_slot_ref(self.owner_bank_id)
+
     def accepts(self, view: TensorView) -> bool:
         return isinstance(view, TensorView) and self.action.accepts(view.value)
 
@@ -276,69 +325,104 @@ class TensorViewFormulaAction(nn.Module):
         return {
             "action": self.action.contract_config(),
             "layout": self.layout.to_dict(),
+            "owner_bank_id": self.owner_bank_id,
+            "bank_slot_ref": (
+                None if self.bank_slot_ref is None else self.bank_slot_ref.to_dict()
+            ),
             "state_transform_owner": "formula-fabric",
-            "path_state_operands": {
-                name: source.action_id for name, source in sorted(self._state_operands.items())
-            },
         }
-
-    @property
-    def state_sources(self) -> tuple[BankLocalNeuralPlasticityAction, ...]:
-        return tuple(dict.fromkeys(self._state_operands.values()))
 
     def _execute(
         self,
         view: TensorView,
-        overlays: _StateOverlays,
+        *,
+        bank_state: FormulaProgramBankState,
+        proposals: _BankSlotProposals,
     ) -> _TensorViewActionExecution:
         if not isinstance(view, TensorView):
             raise TypeError("TensorViewFormulaAction expects TensorView")
-        overrides = {
-            name: _state_from_overlays(overlays, source)[0]
-            for name, source in self._state_operands.items()
-        }
-        output = self.action._execute_with_operand_overrides(view.value, overrides)
+        output = self.action._execute_from_bank_state(
+            view.value,
+            owner_bank_id=self.owner_bank_id,
+            bank_state=bank_state,
+        )
+        slot_ref = self.bank_slot_ref
+        producer = _TensorViewProducerLineage(
+            self.owner_bank_id,
+            self.action_id,
+            slot_ref,
+            None if slot_ref is None else bank_state.revision(slot_ref),
+            None if slot_ref is None else bank_state.value(slot_ref),
+        )
         return _TensorViewActionExecution(
             self.layout.apply(view, output),
-            overlays,
+            proposals,
+            producer,
         )
 
     def forward(self, view: TensorView) -> TensorView:
-        return self._execute(view, ()).view
+        if self._owner_bank_id is None:
+            if self.action.plastic_bank_slot is not None:
+                raise FederalRecallError(
+                    "a plastic TensorView Formula action must be mounted in a Bank"
+                )
+            return self.layout.apply(view, self.action(view.value))
+        slot_ref = self.bank_slot_ref
+        state = (
+            FormulaProgramBankState.empty()
+            if slot_ref is None
+            else FormulaProgramBankState(
+                (slot_ref,),
+                (self.action.initial_bank_value(),),
+                (self.action.initial_revision(),),
+            )
+        )
+        return self._execute(view, bank_state=state, proposals=()).view
 
 
 @dataclass(frozen=True)
 class _TensorViewActionExecution:
     view: TensorView
-    state_overlays: _StateOverlays
-    effect_site: BankLocalNeuralPlasticityAction | None = None
-    state_change_norm: Tensor | None = None
-    previous_revision: int | None = None
-    successor_revision: int | None = None
+    bank_proposals: _BankSlotProposals
+    producer: _TensorViewProducerLineage | None
+    effect_proposal: _BankSlotEffectProposal | None = None
 
 
-class TensorViewNeuralPlasticityAction(nn.Module):
-    """Expose a NeuralPlasticity effect as a real Bank-local Formula action."""
+class TensorViewFormulaEffectAction(nn.Module):
+    """Apply an identity-data effect to the dynamic ordinary predecessor Bank slot."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-view-neural-plasticity-action@1"
+    _component_reference: ClassVar[str] = "arti/tensor-view-formula-effect-action@1"
 
     def __init__(
         self,
-        action: BankLocalNeuralPlasticityAction,
+        action: BankLocalFormulaEffectAction,
         *,
         layout: TensorViewLayoutTransition,
     ) -> None:
         super().__init__()
-        if not isinstance(action, BankLocalNeuralPlasticityAction):
-            raise TypeError("action must be BankLocalNeuralPlasticityAction")
+        if not isinstance(action, BankLocalFormulaEffectAction):
+            raise TypeError("action must be BankLocalFormulaEffectAction")
         if not isinstance(layout, TensorViewLayoutTransition):
             raise TypeError("layout must be TensorViewLayoutTransition")
         if layout.index_transition != "identity":
-            raise FederalRecallError("NeuralPlasticity data identity requires identity layout")
+            raise FederalRecallError("Formula effect data identity requires identity layout")
         if action.input_schema.rank != len(layout.axis_names):
             raise FederalRecallError("effect schema and TensorView layout ranks disagree")
         self.action = action
         self.layout = layout
+        self._owner_bank_id: str | None = None
+
+    def _bind_owner_bank(self, bank_id: str) -> None:
+        _require_name(bank_id, field="bank_id")
+        if self._owner_bank_id is not None and self._owner_bank_id != bank_id:
+            raise FederalRecallError("a Formula effect action cannot be owned by multiple Banks")
+        self._owner_bank_id = bank_id
+
+    @property
+    def owner_bank_id(self) -> str:
+        if self._owner_bank_id is None:
+            raise FederalRecallError("TensorView Formula effect is not mounted in a Bank")
+        return self._owner_bank_id
 
     @property
     def action_id(self) -> str:
@@ -352,150 +436,116 @@ class TensorViewNeuralPlasticityAction(nn.Module):
     def next_bank_id(self) -> str | None:
         return self.action.next_bank_id
 
-    @property
-    def state_sources(self) -> tuple[BankLocalNeuralPlasticityAction, ...]:
-        return ()
-
-    @property
-    def effect_site(self) -> BankLocalNeuralPlasticityAction:
-        return self.action
-
-    def accepts(self, view: TensorView) -> bool:
-        return isinstance(view, TensorView) and self.action.accepts(view.value)
+    def accepts(
+        self,
+        view: TensorView,
+        producer: _TensorViewProducerLineage | None = None,
+    ) -> bool:
+        if (
+            not isinstance(view, TensorView)
+            or not self.action.accepts(view.value)
+            or producer is None
+            or producer.slot_ref is None
+            or producer.bound_revision is None
+            or producer.bound_value is None
+        ):
+            return False
+        try:
+            _validate_tensor_against_type(
+                producer.bound_value,
+                self.action.effect_program.state_type,
+                name=f"{self.action_id}.predecessor_bank_slot",
+            )
+        except FormulaV2Error:
+            return False
+        return True
 
     def contract_config(self) -> dict[str, object]:
         return {
             "action": self.action.contract_config(),
             "layout": self.layout.to_dict(),
+            "owner_bank_id": self.owner_bank_id,
             "data_lane": "identity",
-            "state_target": "current-execution-site",
+            "target_resolution": "dynamic-immediate-predecessor-bank-slot",
         }
 
     def _execute(
         self,
         view: TensorView,
-        overlays: _StateOverlays,
+        *,
+        bank_state: FormulaProgramBankState,
+        proposals: _BankSlotProposals,
+        producer: _TensorViewProducerLineage | None,
     ) -> _TensorViewActionExecution:
-        if not isinstance(view, TensorView):
-            raise TypeError("TensorViewNeuralPlasticityAction expects TensorView")
-        previous, previous_revision = _state_from_overlays(overlays, self.action)
-        result = self.action._execute_with_state(
+        if not self.accepts(view, producer):
+            raise FederalRecallError(
+                "Formula effect requires one unambiguous plastic ordinary predecessor"
+            )
+        assert producer is not None
+        assert producer.slot_ref is not None
+        previous, previous_revision = _effect_state(
+            bank_state,
+            proposals,
+            producer.slot_ref,
+        )
+        result = self.action._execute_against(
             view.value,
             previous,
             previous_revision=previous_revision,
         )
-        next_view = self.layout.apply(view, result.value)
-        successor = result.successor_state
-        change = torch.linalg.vector_norm((successor - previous).to(torch.float32))
-        return _TensorViewActionExecution(
-            next_view,
-            _replace_state_overlay(
-                overlays,
-                self.action,
-                successor,
-                result.successor_revision,
-            ),
-            self.action,
-            change,
+        instruction = self.action.effect_program.effect_instruction
+        proposal = _BankSlotEffectProposal(
+            producer.slot_ref,
+            producer.owner_bank_id,
+            producer.action_id,
+            self.action_id,
+            self.action.effect_program.fingerprint,
+            instruction.instruction_id,
+            instruction.atom_ref,
             result.previous_revision,
             result.successor_revision,
+            previous,
+            result.successor,
+        )
+        next_view = self.layout.apply(view, result.value)
+        if next_view.value is not view.value:
+            raise FederalRecallError("Formula effect must preserve the current Tensor identity")
+        return _TensorViewActionExecution(
+            next_view,
+            (*proposals, proposal),
+            producer,
+            proposal,
         )
 
     def forward(self, view: TensorView) -> TensorView:
         raise RuntimeError(
-            "TensorView NeuralPlasticity effects can only execute inside FederalRecall@3"
+            "Formula effects can only execute with runtime-resolved predecessor lineage"
         )
-
-
-class TensorViewNeuralPlasticityActionV2(TensorViewNeuralPlasticityAction):
-    """Expose the extensible NeuralPlasticity algebra as a TensorView action."""
-
-    _component_reference: ClassVar[str] = "arti/tensor-view-neural-plasticity-action@2"
-
-    def __init__(
-        self,
-        action: BankLocalNeuralPlasticityActionV2,
-        *,
-        layout: TensorViewLayoutTransition,
-    ) -> None:
-        if not isinstance(action, BankLocalNeuralPlasticityActionV2):
-            raise TypeError("action must be BankLocalNeuralPlasticityActionV2")
-        super().__init__(action, layout=layout)
-
-
-class TensorViewNeuralPlasticityActionV3(TensorViewNeuralPlasticityAction):
-    """Expose an in-path self-effect chain with an ordinary Formula output."""
-
-    _component_reference: ClassVar[str] = "arti/tensor-view-neural-plasticity-action@3"
-
-    def __init__(
-        self,
-        action: BankLocalNeuralPlasticityActionV3,
-        *,
-        layout: TensorViewLayoutTransition,
-    ) -> None:
-        nn.Module.__init__(self)
-        if not isinstance(action, BankLocalNeuralPlasticityActionV3):
-            raise TypeError("action must be BankLocalNeuralPlasticityActionV3")
-        if not isinstance(layout, TensorViewLayoutTransition):
-            raise TypeError("layout must be TensorViewLayoutTransition")
-        if action.output_schema.rank != len(layout.axis_names):
-            raise FederalRecallError("effect output schema and TensorView layout ranks disagree")
-        self.action = action
-        self.layout = layout
-
-    def contract_config(self) -> dict[str, object]:
-        return {
-            "action": self.action.contract_config(),
-            "layout": self.layout.to_dict(),
-            "data_lane": "ordinary-formula-with-intermediate-effects",
-            "state_target": "current-execution-site",
-            "effect_step_accounting": "inside-forward-not-refine",
-        }
-
 
 @dataclass(frozen=True)
 class TensorViewFederalCandidate(FederalCandidate):
-    """A federal candidate that retains the Formula-produced successor view."""
+    """A federal candidate with producer lineage and write-only Bank proposals."""
 
     next_view: TensorView | None = None
-    state_overlays: _StateOverlays = ()
-    effect_site_id: str | None = None
-    effect_state_change_norm: Tensor | None = None
-    effect_previous_revision: int | None = None
-    effect_successor_revision: int | None = None
+    bank_proposals: _BankSlotProposals = ()
+    producer: _TensorViewProducerLineage | None = None
+    effect_proposal: _BankSlotEffectProposal | None = None
 
-    _runtime_contract_ref: ClassVar[str] = "arti/federal-candidate@2"
+    _runtime_contract_ref: ClassVar[str] = "arti/federal-candidate@3"
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        sites = tuple(source for source, _state, _revision in self.state_overlays)
-        if len({id(source) for source in sites}) != len(sites):
-            raise FederalRecallError("candidate state overlays must contain unique sites")
-        for source, state, revision in self.state_overlays:
-            if not isinstance(source, BankLocalNeuralPlasticityAction):
-                raise TypeError("candidate state overlays require NeuralPlasticity sites")
-            source._validate_state(state)
-            if type(revision) is not int or revision < 0:
-                raise FederalRecallError("candidate state revisions must be non-negative integers")
-        if self.effect_state_change_norm is not None:
+        object.__setattr__(self, "bank_proposals", tuple(self.bank_proposals))
+        if any(not isinstance(item, _BankSlotEffectProposal) for item in self.bank_proposals):
+            raise TypeError("candidate proposals must be Bank-slot effect proposals")
+        if self.effect_proposal is not None:
             if (
-                self.effect_site_id is None
-                or self.effect_state_change_norm.numel() != 1
-                or type(self.effect_previous_revision) is not int
-                or type(self.effect_successor_revision) is not int
-                or self.effect_successor_revision != self.effect_previous_revision + 1
+                not self.bank_proposals
+                or self.bank_proposals[-1] is not self.effect_proposal
             ):
-                raise FederalRecallError("effect receipts require a site and scalar state change")
-        elif any(
-            item is not None
-            for item in (
-                self.effect_site_id,
-                self.effect_previous_revision,
-                self.effect_successor_revision,
-            )
-        ):
-            raise FederalRecallError("effect site receipts require a state change norm")
+                raise FederalRecallError(
+                    "candidate effect proposal must be the latest branch proposal"
+                )
         if self.next_value is None:
             if self.next_view is not None:
                 raise FederalRecallError("terminal candidates cannot carry a successor view")
@@ -512,22 +562,18 @@ class TensorViewFederalCandidate(FederalCandidate):
         *,
         local_log_score: Tensor,
         next_view: TensorView,
-        state_overlays: _StateOverlays = (),
-        effect_site_id: str | None = None,
-        effect_state_change_norm: Tensor | None = None,
-        effect_previous_revision: int | None = None,
-        effect_successor_revision: int | None = None,
+        bank_proposals: _BankSlotProposals = (),
+        producer: _TensorViewProducerLineage | None = None,
+        effect_proposal: _BankSlotEffectProposal | None = None,
     ) -> TensorViewFederalCandidate:
         return cls(
             candidate_id,
             local_log_score,
             next_value=next_view.value,
             next_view=next_view,
-            state_overlays=state_overlays,
-            effect_site_id=effect_site_id,
-            effect_state_change_norm=effect_state_change_norm,
-            effect_previous_revision=effect_previous_revision,
-            effect_successor_revision=effect_successor_revision,
+            bank_proposals=bank_proposals,
+            producer=producer,
+            effect_proposal=effect_proposal,
         )
 
     @classmethod
@@ -538,11 +584,9 @@ class TensorViewFederalCandidate(FederalCandidate):
         local_log_score: Tensor,
         next_bank_id: str,
         next_view: TensorView,
-        state_overlays: _StateOverlays = (),
-        effect_site_id: str | None = None,
-        effect_state_change_norm: Tensor | None = None,
-        effect_previous_revision: int | None = None,
-        effect_successor_revision: int | None = None,
+        bank_proposals: _BankSlotProposals = (),
+        producer: _TensorViewProducerLineage | None = None,
+        effect_proposal: _BankSlotEffectProposal | None = None,
     ) -> TensorViewFederalCandidate:
         return cls(
             candidate_id,
@@ -550,11 +594,9 @@ class TensorViewFederalCandidate(FederalCandidate):
             next_bank_id=next_bank_id,
             next_value=next_view.value,
             next_view=next_view,
-            state_overlays=state_overlays,
-            effect_site_id=effect_site_id,
-            effect_state_change_norm=effect_state_change_norm,
-            effect_previous_revision=effect_previous_revision,
-            effect_successor_revision=effect_successor_revision,
+            bank_proposals=bank_proposals,
+            producer=producer,
+            effect_proposal=effect_proposal,
         )
 
     @classmethod
@@ -564,26 +606,29 @@ class TensorViewFederalCandidate(FederalCandidate):
         *,
         local_log_score: Tensor,
         outputs: Mapping[str, Tensor],
-        state_overlays: _StateOverlays = (),
+        bank_proposals: _BankSlotProposals = (),
+        producer: _TensorViewProducerLineage | None = None,
     ) -> TensorViewFederalCandidate:
         return cls(
             candidate_id,
             local_log_score,
             terminal_outputs=outputs,
-            state_overlays=state_overlays,
+            bank_proposals=bank_proposals,
+            producer=producer,
         )
-
 
 @dataclass(frozen=True)
 class TensorViewLocalRefineTraceStep(BankLocalRefineTraceStep):
-    """Local refine evidence including logical view identities."""
+    """Local refine evidence including dynamic predecessor Bank ownership."""
 
     input_view_fingerprint: str = ""
     output_view_fingerprint: str | None = None
     input_axes: tuple[str, ...] = ()
     output_axes: tuple[str, ...] | None = None
-    effect_site_id: str | None = None
-    effect_site_ref: str | None = None
+    effect_action_id: str | None = None
+    effect_action_ref: str | None = None
+    predecessor_action_id: str | None = None
+    target_bank_slot: BankSlotRef | None = None
     effect_program_fingerprint: str | None = None
     effect_instruction_id: str | None = None
     effect_atom_ref: str | None = None
@@ -592,7 +637,7 @@ class TensorViewLocalRefineTraceStep(BankLocalRefineTraceStep):
     effect_previous_revision: int | None = None
     effect_successor_revision: int | None = None
 
-    _runtime_contract_ref: ClassVar[str] = "arti/bank-local-refine-trace-step@2"
+    _runtime_contract_ref: ClassVar[str] = "arti/bank-local-refine-trace-step@3"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -608,8 +653,12 @@ class TensorViewLocalRefineTraceStep(BankLocalRefineTraceStep):
             "output_view_fingerprint": self.output_view_fingerprint,
             "input_axes": list(self.input_axes),
             "output_axes": None if self.output_axes is None else list(self.output_axes),
-            "effect_site_id": self.effect_site_id,
-            "effect_site_ref": self.effect_site_ref,
+            "effect_action_id": self.effect_action_id,
+            "effect_action_ref": self.effect_action_ref,
+            "predecessor_action_id": self.predecessor_action_id,
+            "target_bank_slot": (
+                None if self.target_bank_slot is None else self.target_bank_slot.to_dict()
+            ),
             "effect_program_fingerprint": self.effect_program_fingerprint,
             "effect_instruction_id": self.effect_instruction_id,
             "effect_atom_ref": self.effect_atom_ref,
@@ -622,10 +671,12 @@ class TensorViewLocalRefineTraceStep(BankLocalRefineTraceStep):
 
 @dataclass(frozen=True)
 class NeuralPlasticityCommitReceipt:
-    """JSON-safe evidence for one winner-owned state publication."""
+    """JSON-safe evidence for a winner proposal installed into its producer slot."""
 
     bank_id: str
-    action_id: str
+    producer_action_id: str
+    effect_action_id: str
+    bank_slot_ref: BankSlotRef
     effect_program_fingerprint: str
     instruction_id: str
     effect_atom_ref: str
@@ -635,11 +686,14 @@ class NeuralPlasticityCommitReceipt:
     winner_path: str
     visibility: str = "next-dispatch"
 
-    _runtime_contract_ref: ClassVar[str] = "arti/neural-plasticity-commit-receipt@1"
+    _runtime_contract_ref: ClassVar[str] = "arti/neural-plasticity-commit-receipt@2"
 
     def __post_init__(self) -> None:
         _require_name(self.bank_id, field="bank_id")
-        _require_name(self.action_id, field="action_id")
+        _require_name(self.producer_action_id, field="producer_action_id")
+        _require_name(self.effect_action_id, field="effect_action_id")
+        if self.bank_slot_ref.producer_id != f"{self.bank_id}.{self.producer_action_id}":
+            raise FederalRecallError("commit receipt Bank slot must belong to its producer")
         if not isinstance(self.effect_program_fingerprint, str) or len(
             self.effect_program_fingerprint
         ) != 64:
@@ -652,9 +706,9 @@ class NeuralPlasticityCommitReceipt:
             type(self.previous_revision) is not int
             or type(self.successor_revision) is not int
             or self.previous_revision < 0
-            or self.successor_revision <= self.previous_revision
+            or self.successor_revision != self.previous_revision + 1
         ):
-            raise FederalRecallError("commit receipt revisions must advance")
+            raise FederalRecallError("commit receipt revisions must advance one step")
         if not math.isfinite(self.state_change_norm) or self.state_change_norm < 0.0:
             raise FederalRecallError("state_change_norm must be finite and non-negative")
         if not isinstance(self.winner_path, str) or not self.winner_path:
@@ -662,16 +716,13 @@ class NeuralPlasticityCommitReceipt:
         if self.visibility != "next-dispatch":
             raise FederalRecallError("unsupported NeuralPlasticity visibility boundary")
 
-    @property
-    def site_ref(self) -> str:
-        return f"{self.bank_id}/{self.action_id}"
-
     def to_dict(self) -> dict[str, object]:
         return {
             "ref": self._runtime_contract_ref,
-            "site_ref": self.site_ref,
             "bank_id": self.bank_id,
-            "action_id": self.action_id,
+            "producer_action_id": self.producer_action_id,
+            "effect_action_id": self.effect_action_id,
+            "bank_slot_ref": self.bank_slot_ref.to_dict(),
             "effect_program_fingerprint": self.effect_program_fingerprint,
             "instruction_id": self.instruction_id,
             "effect_atom_ref": self.effect_atom_ref,
@@ -681,7 +732,6 @@ class NeuralPlasticityCommitReceipt:
             "winner_path": self.winner_path,
             "visibility": self.visibility,
         }
-
 
 @dataclass(frozen=True)
 class TensorViewFederalTrace:
@@ -734,20 +784,21 @@ class _LocalViewPath:
     view: TensorView
     cumulative_log_score: Tensor
     lineage: tuple[str, ...]
-    state_overlays: _StateOverlays = ()
+    bank_proposals: _BankSlotProposals = ()
+    producer: _TensorViewProducerLineage | None = None
 
 
 class TensorViewFormulaProgram(nn.Module):
-    """A Bank that re-queries its latest Formula-produced TensorView."""
+    """A Bank that re-queries the latest view while proposals remain write-only."""
 
-    _component_reference: ClassVar[str] = "arti/tensor-view-formula-program@1"
+    _component_reference: ClassVar[str] = "arti/tensor-view-formula-program@2"
 
     def __init__(
         self,
         *,
         bank_id: str,
         query: SealedTensorViewBankQuery,
-        actions: Sequence[TensorViewFormulaAction | TensorViewNeuralPlasticityAction],
+        actions: Sequence[TensorViewFormulaAction | TensorViewFormulaEffectAction],
         terminal_action: BankLocalTerminalAction,
         local_refine: BankLocalRefinePolicy,
         input_pattern: TensorViewPattern,
@@ -760,15 +811,10 @@ class TensorViewFormulaProgram(nn.Module):
             raise TypeError("query must be SealedTensorViewBankQuery")
         normalized = tuple(actions)
         if not normalized or any(
-            not isinstance(
-                item,
-                (TensorViewFormulaAction, TensorViewNeuralPlasticityAction),
-            )
+            not isinstance(item, (TensorViewFormulaAction, TensorViewFormulaEffectAction))
             for item in normalized
         ):
-            raise TypeError(
-                "actions must contain TensorView Formula or NeuralPlasticity actions"
-            )
+            raise TypeError("actions must contain TensorView Formula or effect actions")
         if not isinstance(terminal_action, BankLocalTerminalAction):
             raise TypeError("terminal_action must be BankLocalTerminalAction")
         if not isinstance(local_refine, BankLocalRefinePolicy):
@@ -786,6 +832,8 @@ class TensorViewFormulaProgram(nn.Module):
             raise FederalRecallError(
                 "sealed TensorView Query members must exactly match local actions"
             )
+        for item in normalized:
+            item._bind_owner_bank(bank_id)
         self.bank_id = bank_id
         self.query = query
         self.actions = nn.ModuleList(normalized)
@@ -794,17 +842,7 @@ class TensorViewFormulaProgram(nn.Module):
         self.input_pattern = input_pattern
         self.exit_pattern = exit_pattern
         self.terminal_abi = terminal_abi
-        effect_actions = tuple(
-            item for item in normalized if isinstance(item, TensorViewNeuralPlasticityAction)
-        )
-        effectful = bool(effect_actions)
-        effect_fabric_refs = {
-            component_ref(item.action.fabric) for item in effect_actions
-        }
-        if len(effect_fabric_refs) > 1:
-            raise FederalRecallError(
-                "one TensorView Formula program cannot mix effect Fabric versions"
-            )
+        effectful = bool(self.effect_actions)
         self._signature = BankExecutionSignatureV3.from_program(
             self,
             input_pattern=input_pattern,
@@ -817,7 +855,7 @@ class TensorViewFormulaProgram(nn.Module):
             score_contract="sum of Bank-local TensorView action log probabilities",
             gradient_contract=GradientContract.autograd(),
             local_formula_ref=(
-                next(iter(effect_fabric_refs)) if effectful else "arti/formula-fabric@2"
+                "arti/formula-fabric@4" if effectful else "arti/formula-fabric@2"
             ),
             local_refine_ref=component_ref(local_refine),
             execution_capabilities=(
@@ -825,7 +863,7 @@ class TensorViewFormulaProgram(nn.Module):
                 "fixed-k-wide",
                 "latest-tensor-view-requery",
                 "variable-rank-local-refine",
-                *(("winner-committed-neural-plasticity",) if effectful else ()),
+                *(("winner-committed-predecessor-bank-slots",) if effectful else ()),
             ),
         )
 
@@ -838,21 +876,27 @@ class TensorViewFormulaProgram(nn.Module):
         return tuple(item.action_id for item in self.actions) + (self.terminal_action.action_id,)
 
     @property
-    def effect_sites(self) -> tuple[BankLocalNeuralPlasticityAction, ...]:
+    def plastic_actions(self) -> tuple[TensorViewFormulaAction, ...]:
         return tuple(
-            item.effect_site
+            item
             for item in self.actions
-            if isinstance(item, TensorViewNeuralPlasticityAction)
+            if isinstance(item, TensorViewFormulaAction) and item.bank_slot_ref is not None
         )
 
     @property
-    def state_sources(self) -> tuple[BankLocalNeuralPlasticityAction, ...]:
+    def effect_actions(self) -> tuple[TensorViewFormulaEffectAction, ...]:
         return tuple(
-            dict.fromkeys(
-                source
-                for item in self.actions
-                for source in item.state_sources
-            )
+            item for item in self.actions if isinstance(item, TensorViewFormulaEffectAction)
+        )
+
+    def initial_bank_state(self) -> FormulaProgramBankState:
+        actions = self.plastic_actions
+        refs = tuple(item.bank_slot_ref for item in actions)
+        assert all(item is not None for item in refs)
+        return FormulaProgramBankState(
+            refs,  # type: ignore[arg-type]
+            tuple(item.action.initial_bank_value() for item in actions),
+            tuple(item.action.initial_revision() for item in actions),
         )
 
     def contract_config(self) -> dict[str, object]:
@@ -864,6 +908,7 @@ class TensorViewFormulaProgram(nn.Module):
             "input_pattern": self.input_pattern.to_dict(),
             "exit_pattern": self.exit_pattern.to_dict(),
             "terminal_abi_fingerprint": self.terminal_abi.fingerprint,
+            "pending_visibility": "write-only-until-federal-winner-commit",
         }
 
     @staticmethod
@@ -901,19 +946,12 @@ class TensorViewFormulaProgram(nn.Module):
         exit_reason: str | None,
     ) -> TensorViewLocalRefineTraceStep:
         target = candidate.next_view
-        effect_site = None
-        if candidate.effect_site_id is not None:
-            effect_site = next(
-                (
-                    item.effect_site
-                    for item in self.actions
-                    if isinstance(item, TensorViewNeuralPlasticityAction)
-                    and item.action_id == candidate.effect_site_id
-                ),
-                None,
-            )
-            if effect_site is None:
-                raise FederalRecallError("effect trace references an unknown Bank-local site")
+        proposal = candidate.effect_proposal
+        formula_ref = (
+            "arti/formula-fabric@4"
+            if proposal is not None
+            else "arti/formula-fabric@2"
+        )
         return TensorViewLocalRefineTraceStep(
             bank_id=self.bank_id,
             local_step=step,
@@ -926,43 +964,43 @@ class TensorViewFormulaProgram(nn.Module):
             ),
             query_ref=self.query.signature.query_ref,
             query_state_fingerprint=self.query.signature.state_fingerprint,
-            formula_ref=(
-                component_ref(effect_site.fabric)
-                if effect_site is not None
-                else "arti/formula-fabric@2"
-            ),
+            formula_ref=formula_ref,
             exit_reason=exit_reason,
             input_view_fingerprint=source.descriptor_fingerprint,
             output_view_fingerprint=(None if target is None else target.descriptor_fingerprint),
             input_axes=tuple(axis.name for axis in source.axes),
             output_axes=(None if target is None else tuple(axis.name for axis in target.axes)),
-            effect_site_id=candidate.effect_site_id,
-            effect_site_ref=(
-                None
-                if candidate.effect_site_id is None
-                else f"{self.bank_id}/{candidate.effect_site_id}"
+            effect_action_id=None if proposal is None else proposal.effect_action_id,
+            effect_action_ref=(
+                None if proposal is None else f"{self.bank_id}/{proposal.effect_action_id}"
             ),
+            predecessor_action_id=(
+                None if proposal is None else proposal.predecessor_action_id
+            ),
+            target_bank_slot=None if proposal is None else proposal.target,
             effect_program_fingerprint=(
-                None if effect_site is None else effect_site.effect_program.fingerprint
+                None if proposal is None else proposal.effect_program_fingerprint
             ),
-            effect_instruction_id=(
-                None
-                if effect_site is None
-                else effect_site.effect_program.effect_instruction.instruction_id
-            ),
-            effect_atom_ref=(
-                None
-                if effect_site is None
-                else effect_site.effect_program.effect_instruction.atom_ref
-            ),
-            effect_visibility=(None if effect_site is None else "next-dispatch"),
+            effect_instruction_id=None if proposal is None else proposal.instruction_id,
+            effect_atom_ref=None if proposal is None else proposal.effect_atom_ref,
+            effect_visibility=None if proposal is None else "next-dispatch",
             effect_state_change_norm=(
                 None
-                if candidate.effect_state_change_norm is None
-                else float(candidate.effect_state_change_norm.detach().reshape(()).cpu())
+                if proposal is None
+                else float(
+                    torch.linalg.vector_norm(
+                        (proposal.successor - proposal.previous).detach().to(torch.float32)
+                    )
+                    .cpu()
+                    .reshape(())
+                )
             ),
-            effect_previous_revision=candidate.effect_previous_revision,
-            effect_successor_revision=candidate.effect_successor_revision,
+            effect_previous_revision=(
+                None if proposal is None else proposal.previous_revision
+            ),
+            effect_successor_revision=(
+                None if proposal is None else proposal.successor_revision
+            ),
         )
 
     def _execute_once(
@@ -971,7 +1009,9 @@ class TensorViewFormulaProgram(nn.Module):
         query: TensorViewQueryResult,
         *,
         max_candidates: int,
-        state_overlays: _StateOverlays,
+        bank_state: FormulaProgramBankState,
+        bank_proposals: _BankSlotProposals,
+        producer: _TensorViewProducerLineage | None,
     ) -> tuple[TensorViewFederalCandidate, ...]:
         if view.value.shape[view.batch_axis] != 1:
             raise FederalRecallError("TensorView Formula programs execute one sample at a time")
@@ -992,10 +1032,19 @@ class TensorViewFormulaProgram(nn.Module):
                     self.terminal_action.action_id,
                     local_log_score=score,
                     outputs=self.terminal_action(view.value, score),
-                    state_overlays=state_overlays,
+                    bank_proposals=bank_proposals,
+                    producer=producer,
                 ),
             )
-        eligible = [index for index, action in enumerate(self.actions) if action.accepts(view)]
+        eligible = [
+            index
+            for index, candidate in enumerate(self.actions)
+            if (
+                candidate.accepts(view, producer)
+                if isinstance(candidate, TensorViewFormulaEffectAction)
+                else candidate.accepts(view)
+            )
+        ]
         if (max_candidates > 1 or exit_requested) and terminal_accepted:
             eligible.append(len(self.actions))
         if not eligible:
@@ -1015,43 +1064,48 @@ class TensorViewFormulaProgram(nn.Module):
                         self.terminal_action.action_id,
                         local_log_score=score,
                         outputs=self.terminal_action(view.value, score),
-                        state_overlays=state_overlays,
+                        bank_proposals=bank_proposals,
+                        producer=producer,
                     )
                 )
                 continue
-            action = self.actions[index]
-            execution = action._execute(view, state_overlays)
-            next_view = execution.view
-            effect_site_id = (
-                None if execution.effect_site is None else execution.effect_site.action_id
-            )
-            if action.result_kind == "continue":
+            selected = self.actions[index]
+            if isinstance(selected, TensorViewFormulaEffectAction):
+                execution = selected._execute(
+                    view,
+                    bank_state=bank_state,
+                    proposals=bank_proposals,
+                    producer=producer,
+                )
+            else:
+                execution = selected._execute(
+                    view,
+                    bank_state=bank_state,
+                    proposals=bank_proposals,
+                )
+            if selected.result_kind == "continue":
                 result.append(
                     TensorViewFederalCandidate.local_view(
-                        action.action_id,
+                        selected.action_id,
                         local_log_score=score,
-                        next_view=next_view,
-                        state_overlays=execution.state_overlays,
-                        effect_site_id=effect_site_id,
-                        effect_state_change_norm=execution.state_change_norm,
-                        effect_previous_revision=execution.previous_revision,
-                        effect_successor_revision=execution.successor_revision,
+                        next_view=execution.view,
+                        bank_proposals=execution.bank_proposals,
+                        producer=execution.producer,
+                        effect_proposal=execution.effect_proposal,
                     )
                 )
             else:
-                assert action.next_bank_id is not None
-                self.exit_pattern.validate(next_view, name=f"{self.bank_id}.exit")
+                assert selected.next_bank_id is not None
+                self.exit_pattern.validate(execution.view, name=f"{self.bank_id}.exit")
                 result.append(
                     TensorViewFederalCandidate.child_view(
-                        action.action_id,
+                        selected.action_id,
                         local_log_score=score,
-                        next_bank_id=action.next_bank_id,
-                        next_view=next_view,
-                        state_overlays=execution.state_overlays,
-                        effect_site_id=effect_site_id,
-                        effect_state_change_norm=execution.state_change_norm,
-                        effect_previous_revision=execution.previous_revision,
-                        effect_successor_revision=execution.successor_revision,
+                        next_bank_id=selected.next_bank_id,
+                        next_view=execution.view,
+                        bank_proposals=execution.bank_proposals,
+                        producer=execution.producer,
+                        effect_proposal=execution.effect_proposal,
                     )
                 )
         return tuple(result)
@@ -1061,12 +1115,23 @@ class TensorViewFormulaProgram(nn.Module):
         view: TensorView,
         *,
         max_candidates: int,
-        _state_overlays: _StateOverlays = (),
+        _bank_state: FormulaProgramBankState | None = None,
+        _bank_proposals: _BankSlotProposals = (),
+        _producer: _TensorViewProducerLineage | None = None,
     ) -> FederalBankStep:
         self.input_pattern.validate(view, name=f"{self.bank_id}.input")
         if type(max_candidates) is not int or max_candidates <= 0:
             raise FederalRecallError("max_candidates must be a positive integer")
-        active = (_LocalViewPath(view, view.value.new_zeros(()), (), _state_overlays),)
+        bank_state = self.initial_bank_state() if _bank_state is None else _bank_state
+        active = (
+            _LocalViewPath(
+                view,
+                view.value.new_zeros(()),
+                (),
+                _bank_proposals,
+                _producer,
+            ),
+        )
         completed: tuple[tuple[TensorViewFederalCandidate, tuple[str, ...]], ...] = ()
         trace: list[TensorViewLocalRefineTraceStep] = []
         for local_step in range(1, self.local_refine.max_steps + 1):
@@ -1079,7 +1144,9 @@ class TensorViewFormulaProgram(nn.Module):
                     branch.view,
                     query,
                     max_candidates=max_candidates,
-                    state_overlays=branch.state_overlays,
+                    bank_state=bank_state,
+                    bank_proposals=branch.bank_proposals,
+                    producer=branch.producer,
                 )
                 for candidate in candidates:
                     lineage = (*branch.lineage, candidate.candidate_id)
@@ -1110,7 +1177,8 @@ class TensorViewFormulaProgram(nn.Module):
                                     candidate.next_view,
                                     cumulative,
                                     lineage,
-                                    candidate.state_overlays,
+                                    candidate.bank_proposals,
+                                    candidate.producer,
                                 )
                             )
                         continue
@@ -1124,16 +1192,15 @@ class TensorViewFormulaProgram(nn.Module):
                             source=branch.view,
                             query=query,
                             action=(
-                                "terminal" if candidate.terminal_outputs is not None else "descend"
+                                "terminal"
+                                if candidate.terminal_outputs is not None
+                                else "descend"
                             ),
                             exit_reason="formula-exit",
                         )
                     )
                     next_completed.append(
-                        (
-                            replace(trace_candidate, local_log_score=cumulative),
-                            lineage,
-                        )
+                        (replace(trace_candidate, local_log_score=cumulative), lineage)
                     )
             choices: list[
                 tuple[str, _LocalViewPath | TensorViewFederalCandidate, tuple[str, ...]]
@@ -1170,7 +1237,6 @@ class TensorViewFormulaProgram(nn.Module):
             "TensorView Bank-local Refine reached max_steps without a valid exit"
         )
 
-
 class _TensorViewBankCollection(nn.Module, Mapping[str, TensorViewFormulaProgram]):
     __hash__ = object.__hash__
 
@@ -1203,11 +1269,12 @@ class _ViewFederalPath:
     cumulative_log_score: Tensor
     path: tuple[str, ...]
     terminal: FederalTerminalRecord | None = None
-    state_overlays: _StateOverlays = ()
+    bank_proposals: _BankSlotProposals = ()
+    producer: _TensorViewProducerLineage | None = None
 
 
 class FederalRecallV3(nn.Module):
-    """K-wide Federation over Banks with arbitrary-rank local TensorView Refine."""
+    """K-wide TensorView Federation with winner-owned predecessor Bank writes."""
 
     _component_reference: ClassVar[str] = "arti/federal-recall@3"
     recommended_breadth: ClassVar[int] = 8
@@ -1236,17 +1303,6 @@ class FederalRecallV3(nn.Module):
                 raise FederalRecallError("Bank mapping key must match program.bank_id")
             program.signature.validate_terminal_abi(terminal_abi)
             modules[bank_id] = program
-        effect_sites = tuple(site for program in modules.values() for site in program.effect_sites)
-        if len({id(site) for site in effect_sites}) != len(effect_sites):
-            raise FederalRecallError(
-                "each NeuralPlasticity execution site must have one owning Bank action"
-            )
-        known_sites = {id(site) for site in effect_sites}
-        for program in modules.values():
-            if any(id(source) not in known_sites for source in program.state_sources):
-                raise FederalRecallError(
-                    "path-state Formula operands must reference sites mounted in this Federation"
-                )
         roots = tuple(root_bank_ids)
         if not roots or len(roots) != len(set(roots)) or any(root not in modules for root in roots):
             raise FederalRecallError("root_bank_ids must be unique declared Banks")
@@ -1268,6 +1324,13 @@ class FederalRecallV3(nn.Module):
             raise FederalRecallError(
                 "TerminalOutputABI must define one score and one validity field"
             )
+        plastic_actions = tuple(
+            action for program in modules.values() for action in program.plastic_actions
+        )
+        slot_refs = tuple(action.bank_slot_ref for action in plastic_actions)
+        assert all(item is not None for item in slot_refs)
+        if len(set(slot_refs)) != len(slot_refs):
+            raise FederalRecallError("Federation plastic Bank-slot references must be unique")
         self.banks = _TensorViewBankCollection(modules)
         self.terminal_abi = terminal_abi
         self.root_bank_ids = roots
@@ -1276,15 +1339,26 @@ class FederalRecallV3(nn.Module):
         self.winner_policy = winner_policy
         self._score_field = score_fields[0]
         self._validity_field = validity_fields[0]
-        self._effect_site_bank_ids = {
-            id(site): bank_id
-            for bank_id, program in modules.items()
-            for site in program.effect_sites
-        }
+        self._plastic_actions = plastic_actions
 
     @property
-    def effect_sites(self) -> tuple[BankLocalNeuralPlasticityAction, ...]:
-        return tuple(site for program in self.banks.values() for site in program.effect_sites)
+    def effect_actions(self) -> tuple[TensorViewFormulaEffectAction, ...]:
+        return tuple(
+            action for program in self.banks.values() for action in program.effect_actions
+        )
+
+    def initial_bank_state(self) -> FormulaProgramBankState:
+        refs = tuple(action.bank_slot_ref for action in self._plastic_actions)
+        assert all(item is not None for item in refs)
+        return FormulaProgramBankState(
+            refs,  # type: ignore[arg-type]
+            tuple(action.action.initial_bank_value() for action in self._plastic_actions),
+            tuple(action.action.initial_revision() for action in self._plastic_actions),
+        )
+
+    def _install_bank_state(self, state: FormulaProgramBankState) -> None:
+        for action in self._plastic_actions:
+            action.action.install_(action.owner_bank_id, state)
 
     def contract_config(self) -> dict[str, object]:
         return {
@@ -1330,15 +1404,18 @@ class FederalRecallV3(nn.Module):
         root_bank_id: str,
         max_levels: int,
         max_k: int,
-        _initial_state_overlays: _StateOverlays = (),
-    ) -> tuple[FederalTerminalRecord, tuple[FederalTraceStep, ...], _StateOverlays]:
+        entry_bank_state: FormulaProgramBankState,
+    ) -> tuple[
+        FederalTerminalRecord,
+        tuple[FederalTraceStep, ...],
+        _BankSlotProposals,
+    ]:
         paths = (
             _ViewFederalPath(
                 root_bank_id,
                 view,
                 view.value.new_zeros(()),
                 (root_bank_id,),
-                state_overlays=_initial_state_overlays,
             ),
         )
         receipts: list[FederalTraceStep] = []
@@ -1353,7 +1430,9 @@ class FederalRecallV3(nn.Module):
                 step = self.banks[current.bank_id](
                     current.view,
                     max_candidates=max_k,
-                    _state_overlays=current.state_overlays,
+                    _bank_state=entry_bank_state,
+                    _bank_proposals=current.bank_proposals,
+                    _producer=current.producer,
                 )
                 local_receipts.extend(step.local_trace)
                 for raw_candidate in step.candidates:
@@ -1378,7 +1457,8 @@ class FederalRecallV3(nn.Module):
                                 cumulative,
                                 next_path,
                                 terminal=terminal,
-                                state_overlays=candidate.state_overlays,
+                                bank_proposals=candidate.bank_proposals,
+                                producer=candidate.producer,
                             )
                         )
                         continue
@@ -1396,7 +1476,8 @@ class FederalRecallV3(nn.Module):
                             candidate.next_view,
                             cumulative,
                             (*next_path, candidate.next_bank_id),
-                            state_overlays=candidate.state_overlays,
+                            bank_proposals=candidate.bank_proposals,
+                            producer=candidate.producer,
                         )
                     )
             if not expanded:
@@ -1433,7 +1514,7 @@ class FederalRecallV3(nn.Module):
             ),
         )
         assert winner_path.terminal is not None
-        return winner_path.terminal, tuple(receipts), winner_path.state_overlays
+        return winner_path.terminal, tuple(receipts), winner_path.bank_proposals
 
     def forward(
         self,
@@ -1460,23 +1541,25 @@ class FederalRecallV3(nn.Module):
         if type(width) is not int or not 0 < width <= self.max_k:
             raise FederalRecallError("max_k must be within the configured bound")
         self.banks[root].input_pattern.validate(view, name=f"{root}.input")
-        if self.effect_sites and view.value.shape[view.batch_axis] != 1:
+        if self.effect_actions and view.value.shape[view.batch_axis] != 1:
             raise FederalRecallError(
-                "NeuralPlasticity state commits currently require one invocation row"
+                "winner-owned Bank-slot commits currently require one invocation row"
             )
+        entry_bank_state = self.initial_bank_state()
         winners: list[FederalTerminalRecord] = []
-        winner_states: list[_StateOverlays] = []
+        winner_proposals: list[_BankSlotProposals] = []
         steps: list[FederalTraceStep] = []
         for sample_index in range(view.value.shape[view.batch_axis]):
-            winner, sample_steps, state_overlays = self._run_sample(
+            winner, sample_steps, proposals = self._run_sample(
                 view.slice_batch(sample_index),
                 sample_index=sample_index,
                 root_bank_id=root,
                 max_levels=levels,
                 max_k=width,
+                entry_bank_state=entry_bank_state,
             )
             winners.append(winner)
-            winner_states.append(state_overlays)
+            winner_proposals.append(proposals)
             steps.extend(sample_steps)
         outputs: dict[str, Tensor] = {}
         for field in self.terminal_abi.fields:
@@ -1489,47 +1572,39 @@ class FederalRecallV3(nn.Module):
                     f"terminal field {field.name!r} cannot be explicitly batched"
                 ) from exc
         self.terminal_abi.validate_outputs(outputs)
-        pending_commits: list[
-            tuple[
-                BankLocalNeuralPlasticityAction,
-                Tensor,
-                int,
-                NeuralPlasticityCommitReceipt | None,
-            ]
-        ] = []
-        for winner, state_overlays in zip(winners, winner_states, strict=True):
-            for site, successor, revision in state_overlays:
-                previous = site.initial_state()
-                previous_revision = site.initial_revision()
-                receipt = None
-                if return_trace and revision > previous_revision:
-                    receipt = NeuralPlasticityCommitReceipt(
-                        bank_id=self._effect_site_bank_ids[id(site)],
-                        action_id=site.action_id,
-                        effect_program_fingerprint=site.effect_program.fingerprint,
-                        instruction_id=(
-                            site.effect_program.effect_instruction.instruction_id
-                        ),
-                        effect_atom_ref=(
-                            site.effect_program.effect_instruction.atom_ref
-                        ),
-                        previous_revision=previous_revision,
-                        successor_revision=revision,
-                        state_change_norm=float(
-                            torch.linalg.vector_norm(
-                                (successor - previous).detach().to(torch.float32)
-                            )
-                            .cpu()
-                            .reshape(())
-                        ),
-                        winner_path="/".join(winner.path),
-                    )
-                pending_commits.append((site, successor, revision, receipt))
+
         committed_effects: list[NeuralPlasticityCommitReceipt] = []
-        for site, successor, revision, receipt in pending_commits:
-            site._commit_successor(successor, revision)
-            if receipt is not None:
-                committed_effects.append(receipt)
+        for winner, proposals in zip(winners, winner_proposals, strict=True):
+            if not proposals:
+                continue
+            successor_state = _committed_state(entry_bank_state, proposals)
+            if return_trace:
+                for proposal in proposals:
+                    committed_effects.append(
+                        NeuralPlasticityCommitReceipt(
+                            bank_id=proposal.owner_bank_id,
+                            producer_action_id=proposal.predecessor_action_id,
+                            effect_action_id=proposal.effect_action_id,
+                            bank_slot_ref=proposal.target,
+                            effect_program_fingerprint=proposal.effect_program_fingerprint,
+                            instruction_id=proposal.instruction_id,
+                            effect_atom_ref=proposal.effect_atom_ref,
+                            previous_revision=proposal.previous_revision,
+                            successor_revision=proposal.successor_revision,
+                            state_change_norm=float(
+                                torch.linalg.vector_norm(
+                                    (proposal.successor - proposal.previous)
+                                    .detach()
+                                    .to(torch.float32)
+                                )
+                                .cpu()
+                                .reshape(())
+                            ),
+                            winner_path="/".join(winner.path),
+                        )
+                    )
+            self._install_bank_state(successor_state)
+
         frozen = MappingProxyType(outputs)
         if not return_trace:
             return frozen
@@ -1548,12 +1623,10 @@ __all__ = [
     "FederalRecallV3",
     "NeuralPlasticityCommitReceipt",
     "TensorViewFederalCandidate",
+    "TensorViewFormulaEffectAction",
     "TensorViewFormulaAction",
     "TensorViewFormulaProgram",
     "TensorViewFederalTrace",
     "TensorViewLayoutTransition",
     "TensorViewLocalRefineTraceStep",
-    "TensorViewNeuralPlasticityAction",
-    "TensorViewNeuralPlasticityActionV2",
-    "TensorViewNeuralPlasticityActionV3",
 ]

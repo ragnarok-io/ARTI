@@ -266,21 +266,27 @@ instruction: an ordinary tensor instruction must precede it, another ordinary
 tensor instruction must consume it, and the public output cannot be the effect
 itself.
 
-Each effect returns its local tensor operand unchanged while updating the
-owning execution site's implicit state. Multiple effects in the same program
-apply their state transitions in program order. They are part of one forward
-execution and do not increment Bank-local Refine depth. A downstream ordinary
-Formula action can consume the updated path state through the existing state
-operand overlay during the same federated forward.
+Each effect returns its local tensor operand unchanged. In a predecessor-owned
+program, its target is the actual Bank slot consumed by the arriving ordinary
+Formula producer, resolved from execution lineage. The effect owns no separate
+memory and accepts no caller-selected target. Multiple effects apply their
+transitions in program order without incrementing Bank-local Refine depth.
 
-This separation is deliberate:
+Visibility is versioned. `FormulaProgramQueryV3` and
+`TensorViewFormulaProgram` keep proposals write-only until the selected stopped
+execution is committed. `FormulaProgramQueryV4` permits a later execution of
+the same producer owner to use the branch-local successor immediately. Neither
+version exposes effect state as an extra tensor input to the router.
+
+For the commit-visible version:
 
 ```text
 ordinary tensor Formula
 -> identity-data self effect
 -> ordinary tensor Formula
 -> identity-data self effect
--> ordinary tensor Formula using the adapted path state
+-> winner Bank-slot commit
+-> later invocation re-executes the adapted ordinary Formula
 ```
 
 The downstream task loss trains the complete path. There is no state target,
@@ -288,34 +294,42 @@ update teacher, or requirement to repeat one route. Refine remains responsible
 for repeated Bank queries, not for choosing the in-path effect topology. The
 number and placement of in-path effects are a separate architecture dimension.
 
-The alpha identities are `arti/formula-effect-program@3`,
-`arti/formula-fabric@5`, and
-`arti/bank-local-neural-plasticity-action@3`.
+The low-level ordered-effect executor identities are
+`arti/formula-effect-program@3` and `arti/formula-fabric@5`. Federation search
+uses `arti/bank-local-formula-effect-action@1` inside
+`arti/tensor-view-formula-program@2`; the effect owns no state and accepts no
+caller-selected target.
 
 `FormulaEffectProgramV3` is only the executor contract for an already selected
 path. It is not evidence that the path topology was discovered. Use
-`FormulaProgramQueryV2` when NeuralPlasticity nodes themselves belong to the
-search space:
+`FormulaProgramQueryV3` when NeuralPlasticity nodes themselves belong to the
+search space. A normal Formula producer explicitly declares the Bank binding
+that it owns and consumes; an effect resolves that binding from runtime producer
+lineage rather than accepting a state or target identifier:
 
 ```python
-query = mechanisms.FormulaProgramQueryV2(
+producer = mechanisms.FormulaProgramTensorCandidateV2(
+    ordinary_formula_candidate,
+    plastic_bank_slot="memory",
+)
+
+query = mechanisms.FormulaProgramQueryV3(
     slot_ids=("x", "hidden", "adapted", "output"),
-    state_ids=("path-state",),
     candidates=(
-        ordinary_formula_candidate,
+        producer,
         neural_plasticity_candidate,
-        downstream_state_reader,
     ),
-    terminal_slot="output",
+    terminal_slot="adapted",
     max_steps=6,
 )
 
-loss = mechanisms.ExactFormulaProgramQueryTrainingV2(
+loss = mechanisms.ExactFormulaProgramQueryTrainingV3(
     exploration_probability=0.25,
 ).loss(
     query,
-    initial={"x": x},
-    states={"path-state": initial_state},
+    event1={"x": support},
+    event2={"x": query_value},
+    event2_candidate_id=producer.candidate_id,
     target=target,
     task_loss=task_loss,
 )
@@ -323,15 +337,82 @@ loss = mechanisms.ExactFormulaProgramQueryTrainingV2(
 
 The candidate catalog declares local typed edges, not a prebuilt complete
 effect chain. ProgramQuery chooses the number, order, placement, and wiring of
-ordinary and self-effect nodes from final task loss. Query summaries exclude
-implicit network state. An effect can use the state only through its
-execution-site transition, while a downstream ordinary Formula must explicitly
-declare a state operand to observe the updated network. Program steps and
-Bank-local Refine steps remain separate accounting dimensions.
+ordinary and self-effect nodes from the later event's final task loss. Query
+summaries have no direct Bank-state input. The effect changes the Bank slot used
+by its actual ordinary predecessor, but preserves the current data tensor. The
+change becomes observable only after the winning state is committed and that
+ordinary predecessor is executed again. Program steps and Bank-local Refine
+steps remain separate accounting dimensions.
 
-`FormulaProgramQueryV2` returns the successor states and revisions without
-mutating parameters in place. The owning Bank runtime decides whether a
-selected successor becomes persistent state.
+`FormulaProgramQueryV3` returns the successor Bank state without mutating
+parameters in place. `commit_()` accepts only a stopped winner produced by the
+same Query. Saved state contains predecessor-owned Formula Bank slots, not an
+effect-owned state arena.
+
+### Branch-Visible Producer Re-Execution
+
+`FormulaProgramQueryV4` separates a producer's persistent `bank_owner_id` from
+its individual SSA occurrences. Wrap ordinary candidates with
+`FormulaProgramTensorCandidateV3(..., plastic_bank_slot="weight",
+bank_owner_id="producer")` and effects with `FormulaProgramEffectCandidateV3`.
+Repeated occurrences with the same compatible owner share one registered
+`FormulaProgramBankOwnerV1` buffer, not multiple trainable copies.
+
+```text
+ordinary producer using Bank revision r
+-> identity-data effect proposes revision r+1
+-> same producer re-executes using revision r+1
+-> ordinary output changes
+-> query observes that output
+-> stopped winner may be committed
+```
+
+Pending successors are branch-local. They do not modify the registered Bank
+until `query.commit_(execution)`; losing branches do not write persistent
+state. An effect does not retroactively change an already computed tensor.
+The Bank's influence is expressed by executing its ordinary Formula again.
+`state_dict()` retains the shared Bank values and revisions for fresh reload.
+Persistent commit detaches the installed buffers. Differentiable cross-event
+training passes the returned functional Bank state instead of committing it.
+These forward-written buffers cannot also be optimizer-owned parameters.
+
+Six effect families are available: additive/multiplicative, blend, outer,
+transport, polynomial, and proximal. An effect candidate may carry a scalar
+`execution_count` and an explicit `max_executions` bound. Forward execution
+rounds the clamped count to an integer. A trainable generic count evaluates
+the selected hard path with gradients, then probes detached successor states
+for count credit. The probe stops before including a non-finite successor;
+only the finite prefix participates in the straight-through count surrogate.
+An invalid selected hard transition is not clipped or repaired. Training may
+still evaluate through `max_executions`, so the selected count is not the
+physical training cost. Generic counts repeat the transition over
+the latest successor, not by multiplying one precomputed delta. `Outer@2`
+instead carries its count directly among its Formula operands and computes
+`state + count * update`, which is exactly repeated addition of a fixed update
+without an actual repetition loop. Do not wrap it in a second count mechanism.
+Neither straight-through rule is the true derivative of integer execution.
+One proposal advances the logical Bank revision once, regardless of its count.
+
+`FormulaProgramQueryTensorEncoderV1` is an optional content-sensitive input
+encoder for routing. It sees ordinary SSA tensors, not a direct Bank-state
+read. Frozen routing parameters can therefore still produce different routes
+after a producer re-executes with an updated Bank.
+
+The previous alpha `FormulaProgramQueryV2` effect-owned state arena has been
+removed. Rebuild its programs with explicit ordinary producer Bank ownership;
+its state artifacts are not silently reinterpreted. The alpha effect metadata
+now identifies `runtime-predecessor-bank` binding and `effect-operands-only`
+access; rebuild older effect contracts rather than treating their former
+execution-site labels as current ownership. `FormulaProgramQuery@1`
+ordinary program search remains available. The new identities are
+`arti/formula-program-query@3` and `arti/formula-program-query@4`.
+Hard ProgramQuery execution currently supports one sample per persistent Bank
+state. Batched summaries do not imply batched independent state commits or a
+compiled whole-search executor.
+
+See `examples/predecessor_bank_plasticity.py` for a complete deterministic
+composition and state-dict round trip. Its fixed candidate graph illustrates
+execution semantics, not learned architecture-search effectiveness.
 
 ## Compiled Topology Sources
 
