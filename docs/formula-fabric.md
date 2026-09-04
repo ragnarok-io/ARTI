@@ -414,6 +414,33 @@ See `examples/predecessor_bank_plasticity.py` for a complete deterministic
 composition and state-dict round trip. Its fixed candidate graph illustrates
 execution semantics, not learned architecture-search effectiveness.
 
+### Grouped Candidate Execution
+
+`FormulaProgramQueryV4.execute_many(requests, chunk_size=16)` is a low-level
+execution entry point for an existing scheduler. Each request contains a
+candidate and its existing branch arena; results preserve request order.
+It does not rank candidates, search, select a winner, or commit persistent state.
+
+Under `torch.no_grad()` or `torch.inference_mode()`, compatible pure-tensor
+programs share the existing checked Formula execution plan. Chunking happens
+before stacking operands, bounding additional input copies without reducing
+the search width, Bank size, or execution depth. Unsupported programs and
+custom execution hooks retain native execution. Intermediate non-finite values
+remain errors, even if a later saturating operation would hide them.
+
+With gradients enabled, each supported request uses a separate checked plan
+execution and its own numerical autograd graph. Only Boolean validity flags
+are aggregated. This preserves both gradient values and absent gradients for
+parameters belonging to unused candidates; materializing zeros in those
+positions could change optimizer updates. Unsupported requests remain native,
+and `serial=True` explicitly selects the native reference path for all requests.
+This is not vectorized training or whole-search compilation.
+Immutable program fingerprints are cached for both training and inference;
+runtime Tensor admission and live operand metadata are never cached.
+
+See `examples/batched_formula_candidates.py` for independent branches,
+predecessor effects, same-owner re-execution and a serial comparison.
+
 ## Compiled Topology Sources
 
 Caller-owned topology sources may remain outside a Pulse artifact. Before

@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.13a2"
+uv add "arti-fit==3.0.13a3"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.13a2"
-uv add "arti-fit[qwen]==3.0.13a2"
-uv add "arti-fit[sd]==3.0.13a2"
-uv add "arti-fit[web]==3.0.13a2"
+uv add "arti-fit[jax]==3.0.13a3"
+uv add "arti-fit[qwen]==3.0.13a3"
+uv add "arti-fit[sd]==3.0.13a3"
+uv add "arti-fit[web]==3.0.13a3"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,9 +41,20 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Alpha 3.0.13a2
+## Alpha 3.0.13a3
 
-This corrective prerelease makes NeuralPlasticity modify the actual Bank Value
+This prerelease adds `FormulaProgramQueryV4.execute_many(...)`: compatible
+inference candidates share a checked Formula execution plan, with optional
+chunking before input stacking. Training keeps each candidate's autograd graph
+independent while aggregating finite-value checks. Immutable program fingerprints
+are cached; live tensor and Bank validation is not. Neither path changes
+search width, Bank capacity, predecessor ownership, or commit semantics.
+
+See the [candidate execution guide](docs/formula-fabric.md#grouped-candidate-execution)
+and [batching example](examples/batched_formula_candidates.py). This low-level
+entry point does not implement a new searcher or automatically commit state.
+
+The 3.0.13a2 correction makes NeuralPlasticity modify the actual Bank Value
 used by its ordinary Formula predecessor. The effect's data output remains
 the same tensor. It has no separate effect-owned memory or caller-selected
 write target.
@@ -284,8 +295,9 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a2
-在 3.0.12 稳定表面之上纠正 alpha 级 NeuralPlasticity 的前序 Bank 写回与
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a3
+新增候选分组推理、独立训练计算图的汇总校验和不可变程序指纹缓存，并保留
+在 3.0.12 稳定表面之上完成的 alpha 级 NeuralPlasticity 前序 Bank 写回纠正与
 可搜索的自修改程序拓扑：网络从局部候选中学习自修改节点的数量、顺序、位置
 和连接，而不是由调用者预先拼好完整链。应用负责张量的业务语义，ARTI 负责
 张量的观察、路由、变换、记忆与组合。

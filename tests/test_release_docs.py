@@ -47,3 +47,6 @@ def test_current_install_version_and_plasticity_correction() -> None:
     assert not hasattr(mechanisms, "FormulaProgramQueryV2")
     assert callable(mechanisms.FormulaProgramQueryV3)
     assert callable(mechanisms.FormulaProgramQueryV4)
+    assert callable(mechanisms.FormulaProgramQueryV4.execute_many)
+    assert "Grouped Candidate Execution" in guide
+    assert "serial=True" in guide

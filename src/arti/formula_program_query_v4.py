@@ -414,6 +414,11 @@ class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
             raise ValueError(f"SSA output slot {self.output_slot!r} is already occupied")
         inputs, banks = self._bindings(arena)
         value = self.candidate.fabric(inputs=inputs, banks=banks).values[0]
+        return self._finish(arena, value)
+
+    def _finish(
+        self, arena: _FormulaProgramExecutionArenaV4, value: Tensor
+    ) -> _FormulaProgramExecutionArenaV4:
         slot_ref = self.bank_slot_ref
         current: Tensor | None = None
         revision: int | None = None
@@ -606,12 +611,22 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
         if arena.values.get(self.output_slot) is not None:
             raise ValueError(f"SSA output slot {self.output_slot!r} is already occupied")
         inputs, banks = self._bindings(arena)  # type: ignore[arg-type]
-        lineage, previous, revision = self._target(arena)
+        target = self._target(arena)
         result = self.fabric._execute_owned(inputs=inputs, banks=banks)
-        value = inputs[self.effect_program.data_input_name]
-        if result.value is not value:
+        if result.value is not inputs[self.effect_program.data_input_name]:
             raise RuntimeError("NeuralPlasticity data lane must preserve Tensor identity")
-        proposal = self._proposal(result.effect, lineage, previous, revision)
+        return self._finish(arena, result.value, result.effect, target=target)
+
+    def _finish(
+        self,
+        arena: _FormulaProgramExecutionArenaV4,
+        value: Tensor,
+        effect: NeuralPlasticityEffectV2,
+        *,
+        target: tuple[_FormulaProducerLineageV2, Tensor, int] | None = None,
+    ) -> _FormulaProgramExecutionArenaV4:
+        lineage, previous, revision = self._target(arena) if target is None else target
+        proposal = self._proposal(effect, lineage, previous, revision)
         updated = arena.append_proposal(proposal)
         next_lineage = replace(
             lineage,
@@ -619,7 +634,7 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
             plastic_revision=proposal.successor_revision,
             plastic_value=proposal.successor,
         )
-        return updated.write(self.output_slot, result.value, producer=next_lineage)
+        return updated.write(self.output_slot, value, producer=next_lineage)
 
 
 FormulaProgramSearchCandidateV4 = (
@@ -852,6 +867,38 @@ class FormulaProgramQueryV4(nn.Module):
         output = executed.values.get(producer.output_slot)
         assert output is not None
         return output
+
+    def execute_many(
+        self,
+        requests: Sequence[
+            tuple[FormulaProgramSearchCandidateV4, _FormulaProgramExecutionArenaV4]
+        ],
+        *,
+        chunk_size: int | None = None,
+        serial: bool = False,
+    ) -> tuple[_FormulaProgramExecutionArenaV4, ...]:
+        """Execute independent candidate requests, without selecting or committing.
+
+        Under no_grad/inference_mode, compatible pure-tensor programs share
+        the existing execution plan. Grad-enabled calls execute each checked plan
+        independently so unused candidates keep absent (not zero) gradients.
+        Other programs also retain native execution. ``chunk_size`` bounds the
+        number of requests stacked together, not the search width or depth.
+        Set ``serial=True`` to use the original candidate calls throughout.
+        """
+        from ._formula_candidate_batch import execute_many
+
+        rows = tuple(requests)
+        candidates = {id(candidate) for candidate in self.candidates}
+        expected_refs = tuple(owner.slot_ref for owner in self.owner_states)
+        for candidate, arena in rows:
+            if id(candidate) not in candidates:
+                raise ValueError("batch candidate must belong to this ProgramQuery")
+            if not isinstance(arena, _FormulaProgramExecutionArenaV4):
+                raise TypeError("batch requests require ProgramQuery@4 execution arenas")
+            if arena.values.slot_ids != self.slot_ids or arena.bank_state.slot_refs != expected_refs:
+                raise ValueError("batch arena does not match this ProgramQuery")
+        return execute_many(rows, chunk_size=chunk_size, serial=serial)
 
     def contract_config(self) -> dict[str, object]:
         return {

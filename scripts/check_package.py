@@ -80,6 +80,7 @@ def main() -> None:
             "arti/formula_program_query.py",
             "arti/formula_program_query_v3.py",
             "arti/formula_program_query_v4.py",
+            "arti/_formula_candidate_batch.py",
             "arti/formula_v3.py",
             "arti/tensor_view.py",
             "arti/shape_query.py",
@@ -273,6 +274,7 @@ def main() -> None:
                     "assert callable(arti.alpha.FormulaProgramQueryV3); "
                     "assert callable(arti.alpha.ExactFormulaProgramQueryTrainingV3); "
                     "assert callable(arti.alpha.FormulaProgramQueryV4); "
+                    "assert callable(arti.alpha.FormulaProgramQueryV4.execute_many); "
                     "assert callable(arti.alpha.FormulaProgramTensorCandidateV3); "
                     "assert callable(arti.alpha.FormulaProgramEffectCandidateV3); "
                     "assert callable(arti.alpha.FormulaProgramQueryTensorEncoderV1); "

@@ -1,8 +1,9 @@
 # Stable Release Surface
 
 ARTI 3.0.12 keeps the composable mechanism runtime as the stable default.
-The 3.0.13a2 prerelease corrects optional alpha NeuralPlasticity effects and
-self-effect topology search without changing that stable surface.
+The 3.0.13a3 prerelease optimizes optional alpha Formula candidate execution
+while retaining the predecessor-Bank corrections from 3.0.13a2. Neither
+prerelease changes that stable surface.
 
 ## Default Layer
 

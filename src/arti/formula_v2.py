@@ -7,6 +7,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, replace
+from functools import cached_property
 from typing import Callable, ClassVar, Literal, Mapping, NamedTuple, Sequence
 
 import torch
@@ -1047,8 +1048,12 @@ class FormulaProgram:
             FormulaLimits.from_dict(value["limits"]),
         )
 
-    @property
+    @cached_property
     def fingerprint(self) -> str:
+        # The validated program and its recursively frozen attributes are
+        # immutable. Keep this cache outside dataclass fields and the wire schema:
+        # equality/hash/replace retain their structural semantics, and runtime
+        # Tensor/Bank admission is still performed on every bind_tensors call.
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(payload).hexdigest()
 
@@ -2623,14 +2628,41 @@ class FormulaExecutionPlanV2(nn.Module):
         self.binding_names = tuple(binding.name for binding in program.bindings)
         self._binding_types = tuple(binding.value_type for binding in program.bindings)
         self._operations = tuple(operations)
+        self._output_types = tuple(
+            slot_types[instruction.output_slot] for instruction in program.instructions
+        )
         self._output_indices = tuple(slot_indices[name] for name in program.outputs)
 
     def forward(self, prepared: PreparedFormulaBindings) -> tuple[Tensor, ...]:
+        outputs, _ = self._execute_prepared(prepared, checked=False)
+        return outputs
+
+    def forward_checked(
+        self, prepared: PreparedFormulaBindings,
+    ) -> tuple[tuple[Tensor, ...], Tensor]:
+        """Execute admitted bindings and return a scalar tensor validity flag.
+
+        Inputs still require ``FormulaFabricV2.bind_tensors`` admission/preflight
+        or its internal ``_bind_for_checked_execution`` metadata-only variant.
+        Runtime dtype, output metadata and allocation checks match the reference
+        executor; input/intermediate finiteness is accumulated without a host
+        scalar read. A grouped caller must reject false flags outside ``vmap``
+        before using outputs for backward or installing any state. Instruction-
+        specific checks (including dynamic index checks) are not bypassed.
+        """
+        outputs, finite = self._execute_prepared(prepared, checked=True)
+        assert finite is not None
+        return outputs, finite
+
+    def _execute_prepared(
+        self, prepared: PreparedFormulaBindings, *, checked: bool,
+    ) -> tuple[tuple[Tensor, ...], Tensor | None]:
         if not isinstance(prepared, PreparedFormulaBindings):
             raise TypeError("FormulaExecutionPlanV2 requires PreparedFormulaBindings")
         prepared.verify(self.program_fingerprint, self.binding_names)
         bindings = prepared.values
         slots = list(bindings)
+        finite = torch.ones((), dtype=torch.bool, device=bindings[0].device) if checked else None
         dimension_extents: dict[str, int] = {}
         for name, value, value_type in zip(
             self.binding_names,
@@ -2638,28 +2670,50 @@ class FormulaExecutionPlanV2(nn.Module):
             self._binding_types,
             strict=True,
         ):
+            if checked:
+                _validate_tensor_metadata_against_type(value, value_type, name=name)
+                _validate_tensor_limits(value, self.program.limits, name=name)
+                finite = finite & torch.isfinite(value).all()
             _bind_axis_extents(
                 dimension_extents,
                 value,
                 value_type,
                 name=name,
             )
-        for instruction, input_indices, input_types in self._operations:
+        for operation_index, (instruction, input_indices, input_types) in enumerate(self._operations):
             operands = tuple(slots[index] for index in input_indices)
+            output_type = self._output_types[operation_index]
+            if checked:
+                _validate_instruction_dtypes(instruction, operands, input_types)
+                _preflight_output_allocation(
+                    output_type,
+                    dimension_extents,
+                    operands[0].element_size(),
+                    self.program.limits,
+                    name=instruction.output_slot,
+                )
             candidate = _execute_instruction(
                 instruction,
                 operands,
                 input_types,
                 dimension_extents,
             )
+            if checked:
+                _validate_tensor_metadata_against_type(
+                    candidate, output_type, name=instruction.output_slot,
+                )
+                _validate_tensor_limits(
+                    candidate, self.program.limits, name=instruction.output_slot,
+                )
+                finite = finite & torch.isfinite(candidate).all()
             _bind_axis_extents(
                 dimension_extents,
                 candidate,
-                self.program.slot_types[instruction.output_slot],
+                output_type,
                 name=instruction.output_slot,
             )
             slots.append(candidate)
-        return tuple(slots[index] for index in self._output_indices)
+        return tuple(slots[index] for index in self._output_indices), finite
 
 
 class FormulaFabricV2(nn.Module):
@@ -2690,6 +2744,29 @@ class FormulaFabricV2(nn.Module):
         banks: Mapping[str, FormulaBankOperand],
     ) -> PreparedFormulaBindings:
         slots, axis_extents = _bind_runtime_values(self.program, inputs=inputs, banks=banks)
+        _preflight_program_shapes(self.program, slots, axis_extents)
+        names = tuple(binding.name for binding in self.program.bindings)
+        return PreparedFormulaBindings(
+            self.program.fingerprint,
+            names,
+            tuple(slots[name] for name in names),
+        )
+
+    def _bind_for_checked_execution(
+        self,
+        *,
+        inputs: Mapping[str, Tensor],
+        banks: Mapping[str, FormulaBankOperand],
+    ) -> PreparedFormulaBindings:
+        """Admit metadata while deferring finiteness to ``forward_checked``.
+
+        Internal checked-plan callers must execute ``forward_checked`` next and
+        reject false flags before backward or state installation. These bindings
+        must not be sent to the ordinary execution-plan ``forward`` path.
+        """
+        slots, axis_extents = _bind_runtime_values(
+            self.program, inputs=inputs, banks=banks, defer_finite=True,
+        )
         _preflight_program_shapes(self.program, slots, axis_extents)
         names = tuple(binding.name for binding in self.program.bindings)
         return PreparedFormulaBindings(
@@ -3941,7 +4018,7 @@ def _validate_instruction_dtypes(
     )
 
 
-def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name: str) -> None:
+def _validate_tensor_metadata_against_type(value: Tensor, value_type: TensorType, *, name: str) -> None:
     if not isinstance(value, Tensor):
         raise FormulaBindingError("FF2_BINDING_NOT_TENSOR", f"{name!r} must be a Tensor")
     if value.ndim != len(value_type.axis_names):
@@ -3966,6 +4043,10 @@ def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name
         raise FormulaBindingError(
             "FF2_BINDING_DTYPE", f"{name!r} does not satisfy dtype {value_type.dtype!r}"
         )
+
+
+def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name: str) -> None:
+    _validate_tensor_metadata_against_type(value, value_type, name=name)
     if not bool(torch.isfinite(value).all()):
         raise FormulaBindingError("FF2_NONFINITE", f"{name!r} must contain finite values")
 
@@ -3975,6 +4056,7 @@ def _bind_runtime_values(
     *,
     inputs: Mapping[str, Tensor],
     banks: Mapping[str, FormulaBankOperand],
+    defer_finite: bool = False,
 ) -> tuple[dict[str, Tensor], dict[str, int]]:
     if not isinstance(inputs, Mapping) or not isinstance(banks, Mapping):
         raise TypeError("inputs and banks must be mappings")
@@ -3995,7 +4077,10 @@ def _bind_runtime_values(
             value = bound_value.consume(binding)
         else:
             value = bound_value
-        _validate_tensor_against_type(value, binding.value_type, name=binding.name)
+        if defer_finite:
+            _validate_tensor_metadata_against_type(value, binding.value_type, name=binding.name)
+        else:
+            _validate_tensor_against_type(value, binding.value_type, name=binding.name)
         _validate_tensor_limits(value, program.limits, name=binding.name)
         _bind_axis_extents(axis_extents, value, binding.value_type, name=binding.name)
         if execution_device is None:
