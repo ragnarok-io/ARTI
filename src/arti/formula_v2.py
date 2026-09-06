@@ -6,9 +6,12 @@ import hashlib
 import json
 import math
 import re
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from functools import cached_property
-from typing import Callable, ClassVar, Literal, Mapping, NamedTuple, Sequence
+from functools import cached_property, lru_cache
+from typing import Callable, ClassVar, Iterator, Literal, Mapping, NamedTuple, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -40,7 +43,37 @@ _DTYPES = frozenset(
 )
 _ACCUMULATION_DTYPES = frozenset({"activation", "float32"})
 _SCALAR_MAP_MODES = frozenset({"gelu", "relu", "rsqrt", "sigmoid", "silu", "tanh"})
+_SCALAR_MAP_V2_MODES = _SCALAR_MAP_MODES | frozenset(
+    {"abs", "exp", "expm1", "log", "log1p", "softplus", "reciprocal", "sin", "cos"}
+)
+_REDUCE_V2_MODES = frozenset({"sum", "mean", "amax", "logsumexp"})
+_FLOATING_DTYPES = frozenset({"float16", "bfloat16", "float32", "float64"})
+_ELEMENT_SIZES = {torch.float16: 2, torch.bfloat16: 2, torch.float32: 4, torch.float64: 8,
+                  torch.int64: 8, torch.bool: 1}
+_INDEX_ATOM_SIGNATURES = {
+    "arti/formula-atom-axis-index@1": (1, frozenset({"axis"})),
+    "arti/formula-atom-compare@1": (2, frozenset({"mode"})),
+    "arti/formula-atom-boolean-binary@1": (2, frozenset({"mode"})),
+    "arti/formula-atom-boolean-not@1": (1, frozenset()),
+    "arti/formula-atom-gather@2": (2, frozenset({"axis", "index_axis"})),
+    "arti/formula-atom-scatter@2": (3, frozenset({"axis", "index_axis", "mode", "accumulation_dtype"})),
+    "arti/formula-atom-segment@1": (
+        3, frozenset({"axis", "segment_axis", "num_segments", "mode", "accumulation_dtype"}),
+    ),
+}
+_OBSERVATION_ATOM_SIGNATURES = {
+    "arti/formula-atom-observe-identity@1": (4, frozenset()),
+    "arti/formula-atom-observe-affine@1": (6, frozenset({"scale"})),
+    "arti/formula-atom-observe-fourier@1": (
+        4, frozenset({"spatial_shape", "state_mode", "direction_epsilon", "compile_policy"})
+    ),
+}
 _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
+    **_OBSERVATION_ATOM_SIGNATURES,
+    **_INDEX_ATOM_SIGNATURES,
+    "arti/formula-atom-window@1": (1, frozenset({
+        "axis", "output_axis", "window_axis", "kernel_size", "stride", "dilation", "padding", "output_size",
+    })),
     "arti/formula-atom-contract@1": (
         2,
         frozenset({"reduce_axes", "output_axes", "accumulation_dtype"}),
@@ -51,6 +84,10 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     ),
     "arti/formula-atom-add@1": (2, frozenset({"accumulation_dtype"})),
     "arti/formula-atom-reduce@1": (
+        1,
+        frozenset({"axis", "mode", "accumulation_dtype"}),
+    ),
+    "arti/formula-atom-reduce@2": (
         1,
         frozenset({"axis", "mode", "accumulation_dtype"}),
     ),
@@ -71,6 +108,8 @@ _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
         frozenset({"axis", "index_axis", "mode"}),
     ),
     "arti/formula-atom-scalar-map@1": (1, frozenset({"mode"})),
+    "arti/formula-atom-scalar-map@2": (1, frozenset({"mode", "accumulation_dtype"})),
+    "arti/formula-atom-cast@1": (1, frozenset({"dtype"})),
     "arti/formula-atom-broadcast@1": (
         1,
         frozenset({"output_axes", "output_sizes"}),
@@ -916,6 +955,10 @@ class FormulaProgram:
     def bank_names(self) -> tuple[str, ...]:
         return tuple(binding.name for binding in self.bindings if isinstance(binding, BankBinding))
 
+    @cached_property
+    def _binding_plan(self) -> _FormulaBindingPlan:
+        return _FormulaBindingPlan(self)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_ref": FORMULA_PROGRAM_V2_SCHEMA_REF,
@@ -1258,6 +1301,33 @@ def reduce_sum(
         "arti/formula-atom-reduce@1",
         (value_expr,),
         (("axis", axis), ("mode", "sum"), ("accumulation_dtype", accumulation_dtype)),
+    )
+
+
+def reduce_tensor(
+    value: FormulaOperand,
+    *,
+    axis: str,
+    mode: str = "sum",
+    accumulation_dtype: str = "float32",
+) -> _FormulaExpr:
+    """Native Reduce@2; sum need not use Reduce@1's sequential addition order."""
+
+    value_expr = _as_expr(value)
+    if value_expr.value_type.dtype in {"int64", "boolean"}:
+        raise FormulaTypeError("FF2_VALUE_DTYPE", "Reduce@2 requires floating values")
+    if axis not in value_expr.value_type.axis_names:
+        raise FormulaTypeError("FF2_AXIS_MISMATCH", f"Reduce axis {axis!r} is absent")
+    if mode not in _REDUCE_V2_MODES:
+        raise FormulaTypeError("FF2_REDUCE_MODE", f"unsupported Reduce@2 mode {mode!r}")
+    if accumulation_dtype not in _ACCUMULATION_DTYPES:
+        raise FormulaTypeError("FF2_INVALID_ACCUMULATION", "unsupported accumulation dtype")
+    output_axes = tuple(item for item in value_expr.value_type.axis_names if item != axis)
+    return _FormulaExpr(
+        value_expr.value_type.with_axes(output_axes),
+        "arti/formula-atom-reduce@2",
+        (value_expr,),
+        (("axis", axis), ("mode", mode), ("accumulation_dtype", accumulation_dtype)),
     )
 
 
@@ -1727,6 +1797,40 @@ def scalar_map(value: FormulaOperand, *, mode: str) -> _FormulaExpr:
     )
 
 
+def scalar_map_v2(
+    value: FormulaOperand, *, mode: str, accumulation_dtype: str = "float32"
+) -> _FormulaExpr:
+    """ScalarMap@2 with stable elementary functions and explicit compute precision."""
+
+    value_expr = _as_expr(value)
+    if value_expr.value_type.dtype in {"int64", "boolean"}:
+        raise FormulaTypeError("FF2_VALUE_DTYPE", "ScalarMap requires floating values")
+    if mode not in _SCALAR_MAP_V2_MODES:
+        raise FormulaTypeError("FF2_SCALAR_MAP_MODE", f"unsupported ScalarMap mode {mode!r}")
+    if accumulation_dtype not in _ACCUMULATION_DTYPES:
+        raise FormulaTypeError("FF2_INVALID_ACCUMULATION", "unsupported accumulation dtype")
+    return _FormulaExpr(
+        value_expr.value_type,
+        "arti/formula-atom-scalar-map@2",
+        (value_expr,),
+        (("mode", mode), ("accumulation_dtype", accumulation_dtype)),
+    )
+
+
+def cast(value: FormulaOperand, *, dtype: str) -> _FormulaExpr:
+    """Explicit floating conversion; intermediate precision is part of the program."""
+
+    value_expr = _as_expr(value)
+    if value_expr.value_type.dtype in {"int64", "boolean"} or dtype not in _FLOATING_DTYPES:
+        raise FormulaTypeError("FF2_CAST_DTYPE", "Cast requires concrete floating output dtype")
+    return _FormulaExpr(
+        replace(value_expr.value_type, dtype=dtype),
+        "arti/formula-atom-cast@1",
+        (value_expr,),
+        (("dtype", dtype),),
+    )
+
+
 def broadcast(
     value: FormulaOperand,
     *,
@@ -2185,6 +2289,36 @@ class ReduceAtom(nn.Module):
         return result
 
 
+class ReduceAtomV2(nn.Module):
+    """Native floating reduction over one named axis, preserving storage dtype."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-reduce@2"
+
+    def __init__(
+        self, value_type: TensorType, *, axis: str, mode: str = "sum",
+        accumulation_dtype: str = "float32",
+    ) -> None:
+        super().__init__()
+        expression = reduce_tensor(
+            InputBinding("value", value_type), axis=axis, mode=mode,
+            accumulation_dtype=accumulation_dtype,
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.axis = axis
+        self.mode = mode
+        self.accumulation_dtype = accumulation_dtype
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _native_reduce(
+            value, self.value_type.axis_names.index(self.axis), self.mode,
+            self.accumulation_dtype,
+        )
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
 class ReshapeAtom(nn.Module):
     """Repartition tensor elements into an explicitly typed shape."""
 
@@ -2352,6 +2486,49 @@ class ScalarMapAtom(nn.Module):
     def forward(self, value: Tensor) -> Tensor:
         _validate_atom_operands((value,), (self.value_type,))
         result = _execute_scalar_map(value, self.mode)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class ScalarMapAtomV2(nn.Module):
+    """Extended scalar functions with explicit computation precision."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-scalar-map@2"
+
+    def __init__(
+        self, value_type: TensorType, *, mode: str, accumulation_dtype: str = "float32"
+    ) -> None:
+        super().__init__()
+        expression = scalar_map_v2(
+            InputBinding("value", value_type), mode=mode, accumulation_dtype=accumulation_dtype
+        )
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.mode = mode
+        self.accumulation_dtype = accumulation_dtype
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = _computed_scalar_map(value, self.mode, self.accumulation_dtype)
+        _validate_tensor_against_type(result, self.output_type, name="output")
+        return result
+
+
+class CastAtom(nn.Module):
+    """Explicitly convert floating storage dtype without changing axes or domain."""
+
+    _component_reference: ClassVar[str] = "arti/formula-atom-cast@1"
+
+    def __init__(self, value_type: TensorType, *, dtype: str) -> None:
+        super().__init__()
+        expression = cast(InputBinding("value", value_type), dtype=dtype)
+        self.value_type = value_type
+        self.output_type = expression.value_type
+        self.dtype = dtype
+
+    def forward(self, value: Tensor) -> Tensor:
+        _validate_atom_operands((value,), (self.value_type,))
+        result = value.to(getattr(torch, self.dtype))
         _validate_tensor_against_type(result, self.output_type, name="output")
         return result
 
@@ -2683,21 +2860,29 @@ class FormulaExecutionPlanV2(nn.Module):
         for operation_index, (instruction, input_indices, input_types) in enumerate(self._operations):
             operands = tuple(slots[index] for index in input_indices)
             output_type = self._output_types[operation_index]
+            _bind_instruction_derived_extents(
+                instruction, tuple(v.shape for v in operands), input_types, output_type, dimension_extents,
+            )
             if checked:
                 _validate_instruction_dtypes(instruction, operands, input_types)
                 _preflight_output_allocation(
                     output_type,
                     dimension_extents,
-                    operands[0].element_size(),
+                    _instruction_output_element_size(instruction, operands, output_type),
                     self.program.limits,
                     name=instruction.output_slot,
                 )
+            conditions: list[Tensor] | None = [] if checked else None
             candidate = _execute_instruction(
                 instruction,
                 operands,
                 input_types,
                 dimension_extents,
+                condition_sink=conditions,
             )
+            if conditions is not None:
+                for condition in conditions:
+                    finite = finite & condition
             if checked:
                 _validate_tensor_metadata_against_type(
                     candidate, output_type, name=instruction.output_slot,
@@ -2743,8 +2928,7 @@ class FormulaFabricV2(nn.Module):
         inputs: Mapping[str, Tensor],
         banks: Mapping[str, FormulaBankOperand],
     ) -> PreparedFormulaBindings:
-        slots, axis_extents = _bind_runtime_values(self.program, inputs=inputs, banks=banks)
-        _preflight_program_shapes(self.program, slots, axis_extents)
+        slots, _ = _bind_runtime_values(self.program, inputs=inputs, banks=banks)
         names = tuple(binding.name for binding in self.program.bindings)
         return PreparedFormulaBindings(
             self.program.fingerprint,
@@ -2764,10 +2948,9 @@ class FormulaFabricV2(nn.Module):
         reject false flags before backward or state installation. These bindings
         must not be sent to the ordinary execution-plan ``forward`` path.
         """
-        slots, axis_extents = _bind_runtime_values(
+        slots, _ = _bind_runtime_values(
             self.program, inputs=inputs, banks=banks, defer_finite=True,
         )
-        _preflight_program_shapes(self.program, slots, axis_extents)
         names = tuple(binding.name for binding in self.program.bindings)
         return PreparedFormulaBindings(
             self.program.fingerprint,
@@ -2803,7 +2986,6 @@ class FormulaFabricV2(nn.Module):
                 "effect-bearing Formula execution requires an execution-site effect sink",
             )
         slots, axis_extents = _bind_runtime_values(self.program, inputs=inputs, banks=banks)
-        _preflight_program_shapes(self.program, slots, axis_extents)
 
         slot_types = self.program.slot_types
         grouped: dict[int, list[FormulaInstructionV2]] = {}
@@ -2817,10 +2999,13 @@ class FormulaFabricV2(nn.Module):
                 input_types = tuple(slot_types[slot] for slot in instruction.input_slots)
                 output_type = slot_types[instruction.output_slot]
                 _validate_instruction_dtypes(instruction, operands, input_types)
+                _bind_instruction_derived_extents(
+                    instruction, tuple(v.shape for v in operands), input_types, output_type, axis_extents,
+                )
                 _preflight_output_allocation(
                     output_type,
                     axis_extents,
-                    operands[0].element_size(),
+                    _instruction_output_element_size(instruction, operands, output_type),
                     self.program.limits,
                     name=instruction.output_slot,
                 )
@@ -2975,6 +3160,18 @@ def _infer_instruction_output_type(
     instruction: FormulaInstructionV2, operand_types: tuple[TensorType, ...]
 ) -> TensorType:
     attributes = dict(instruction.attributes)
+    if instruction.atom_ref == "arti/formula-atom-window@1":
+        from .formula_window import window_output_type
+
+        return window_output_type(operand_types[0], attributes)
+    if instruction.atom_ref in _INDEX_ATOM_SIGNATURES:
+        from .formula_indexing import indexing_output_type
+
+        return indexing_output_type(instruction.atom_ref, operand_types, attributes)
+    if instruction.atom_ref in _OBSERVATION_ATOM_SIGNATURES:
+        from .formula_observation import observation_output_type
+
+        return observation_output_type(instruction.atom_ref, operand_types, attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1" and len(operand_types) == 2:
         try:
             reduce_axes = tuple(tuple(pair) for pair in attributes["reduce_axes"])
@@ -3053,10 +3250,22 @@ def _infer_instruction_output_type(
             axis=attributes["axis"],
             index_axis=attributes["index_axis"],
         ).value_type
+    if instruction.atom_ref == "arti/formula-atom-reduce@2" and len(operand_types) == 1:
+        return reduce_tensor(
+            InputBinding("value", operand_types[0]), axis=attributes["axis"],
+            mode=attributes["mode"], accumulation_dtype=attributes["accumulation_dtype"],
+        ).value_type
     if instruction.atom_ref == "arti/formula-atom-scalar-map@1" and len(operand_types) == 1:
         return scalar_map(
             InputBinding("value", operand_types[0]), mode=attributes["mode"]
         ).value_type
+    if instruction.atom_ref == "arti/formula-atom-scalar-map@2" and len(operand_types) == 1:
+        return scalar_map_v2(
+            InputBinding("value", operand_types[0]), mode=attributes["mode"],
+            accumulation_dtype=attributes["accumulation_dtype"],
+        ).value_type
+    if instruction.atom_ref == "arti/formula-atom-cast@1" and len(operand_types) == 1:
+        return cast(InputBinding("value", operand_types[0]), dtype=attributes["dtype"]).value_type
     if instruction.atom_ref == "arti/formula-atom-broadcast@1" and len(operand_types) == 1:
         return broadcast(
             InputBinding("value", operand_types[0]),
@@ -3209,8 +3418,26 @@ def _execute_instruction(
     dimension_extents: Mapping[str, int],
     *,
     effect_sink: Callable[[FormulaInstructionV2, tuple[Tensor, ...]], None] | None = None,
+    condition_sink: list[Tensor] | None = None,
 ) -> Tensor:
     attributes = dict(instruction.attributes)
+    if instruction.atom_ref == "arti/formula-atom-window@1":
+        from .formula_window import execute_window
+
+        return execute_window(operands[0], operand_types[0], attributes)
+    if instruction.atom_ref in _INDEX_ATOM_SIGNATURES:
+        from .formula_indexing import execute_indexing
+
+        result, valid = execute_indexing(instruction.atom_ref, operands, operand_types, attributes)
+        if condition_sink is None:
+            _require_runtime_condition(valid, code="FF2_INDEX_RANGE", message="active indices are outside the indexed axis")
+        else:
+            condition_sink.append(valid)
+        return result
+    if instruction.atom_ref in _OBSERVATION_ATOM_SIGNATURES:
+        from .formula_observation import execute_observation
+
+        return execute_observation(instruction.atom_ref, operands, attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1":
         return _named_contract(
             operands[0],
@@ -3240,6 +3467,9 @@ def _execute_instruction(
     if instruction.atom_ref == "arti/formula-atom-reduce@1":
         axis = operand_types[0].axis_names.index(attributes["axis"])
         return _ordered_sum(operands[0], axis, attributes["accumulation_dtype"])
+    if instruction.atom_ref == "arti/formula-atom-reduce@2":
+        axis = operand_types[0].axis_names.index(attributes["axis"])
+        return _native_reduce(operands[0], axis, attributes["mode"], attributes["accumulation_dtype"])
     if instruction.atom_ref == "arti/formula-atom-reshape@1":
         output_type = TensorType(
             tuple(attributes["output_axes"]),
@@ -3277,6 +3507,10 @@ def _execute_instruction(
         )
     if instruction.atom_ref == "arti/formula-atom-scalar-map@1":
         return _execute_scalar_map(operands[0], attributes["mode"])
+    if instruction.atom_ref == "arti/formula-atom-scalar-map@2":
+        return _computed_scalar_map(operands[0], attributes["mode"], attributes["accumulation_dtype"])
+    if instruction.atom_ref == "arti/formula-atom-cast@1":
+        return operands[0].to(getattr(torch, attributes["dtype"]))
     if instruction.atom_ref == "arti/formula-atom-broadcast@1":
         output_type = TensorType(
             tuple(attributes["output_axes"]),
@@ -3303,6 +3537,7 @@ def _execute_instruction(
             operand_types[1],
             table_axis=attributes["table_axis"],
             output_axes=tuple(attributes["output_axes"]),
+            condition_sink=condition_sink,
         )
     if instruction.atom_ref == "arti/formula-atom-slice@1":
         return _named_slice(
@@ -3433,6 +3668,23 @@ def _ordered_sum(value: Tensor, axis: int, accumulation_dtype: str) -> Tensor:
     for term in terms[1:]:
         result = result + term
     return result.to(original_dtype)
+
+
+def _native_reduce(value: Tensor, axis: int, mode: str, accumulation_dtype: str) -> Tensor:
+    if value.shape[axis] == 0:
+        raise FormulaTypeError("FF2_EMPTY_REDUCTION", "Reduce does not accept an empty axis")
+    compute = value.to(_accumulation_dtype(value.dtype, accumulation_dtype))
+    if mode == "sum":
+        result = torch.sum(compute, dim=axis)
+    elif mode == "mean":
+        result = torch.mean(compute, dim=axis)
+    elif mode == "amax":
+        result = torch.amax(compute, dim=axis)
+    elif mode == "logsumexp":
+        result = torch.logsumexp(compute, dim=axis)
+    else:
+        raise FormulaProgramError("FF2_REDUCE_MODE", f"unsupported Reduce@2 mode {mode!r}")
+    return result.to(value.dtype)
 
 
 def _typed_reshape(
@@ -3591,7 +3843,30 @@ def _execute_scalar_map(value: Tensor, mode: str) -> Tensor:
         return torch.nn.functional.silu(value)
     if mode == "tanh":
         return torch.tanh(value)
+    if mode == "abs":
+        return torch.abs(value)
+    if mode == "exp":
+        return torch.exp(value)
+    if mode == "expm1":
+        return torch.expm1(value)
+    if mode == "log":
+        return torch.log(value)
+    if mode == "log1p":
+        return torch.log1p(value)
+    if mode == "softplus":
+        return torch.nn.functional.softplus(value, beta=1.0, threshold=20.0)
+    if mode == "reciprocal":
+        return torch.reciprocal(value)
+    if mode == "sin":
+        return torch.sin(value)
+    if mode == "cos":
+        return torch.cos(value)
     raise FormulaProgramError("FF2_SCALAR_MAP_MODE", f"unsupported ScalarMap mode {mode!r}")
+
+
+def _computed_scalar_map(value: Tensor, mode: str, accumulation_dtype: str) -> Tensor:
+    compute = value.to(_accumulation_dtype(value.dtype, accumulation_dtype))
+    return _execute_scalar_map(compute, mode).to(value.dtype)
 
 
 def _named_broadcast(
@@ -3636,6 +3911,7 @@ def _named_lookup(
     *,
     table_axis: str,
     output_axes: tuple[str, ...],
+    condition_sink: list[Tensor] | None = None,
 ) -> Tensor:
     if indices.dtype != torch.int64:
         raise FormulaBindingError("FF2_INDEX_DTYPE", "Lookup indices must use torch.int64")
@@ -3645,11 +3921,13 @@ def _named_lookup(
         table_type.axis_names.index(axis) for axis in value_axes
     )
     ordered = table.permute(permutation)
-    _require_runtime_condition(
-        ((indices >= 0) & (indices < ordered.shape[0])).all(),
-        code="FF2_INDEX_RANGE",
-        message="Lookup indices are outside the table",
-    )
+    in_range = (indices >= 0) & (indices < ordered.shape[0])
+    if condition_sink is None:
+        _require_runtime_condition(in_range.all(), code="FF2_INDEX_RANGE", message="Lookup indices are outside the table")
+    else:
+        condition_sink.append(in_range.all())
+        # Checked callers reject the whole invalid row before using its values.
+        indices = torch.where(in_range, indices, 0)
     flattened = ordered.reshape(ordered.shape[0], -1)
     selected = flattened.index_select(0, indices.reshape(-1))
     result = selected.reshape(*indices.shape, *ordered.shape[1:])
@@ -3705,9 +3983,12 @@ def _named_masked_softmax(
     dimension = logits_type.axis_names.index(axis)
     maximum = masked.amax(dim=dimension, keepdim=True)
     maximum = torch.where(torch.isfinite(maximum), maximum, torch.zeros_like(maximum))
-    exponent = torch.where(visible, torch.exp(compute - maximum), torch.zeros_like(compute))
+    # Mask before exp: an invisible large logit must not create Inf * 0 in backward.
+    shifted = torch.where(visible, compute - maximum, torch.zeros_like(compute))
+    exponent = torch.where(visible, torch.exp(shifted), torch.zeros_like(compute))
     denominator = exponent.sum(dim=dimension, keepdim=True)
-    result = torch.where(denominator > 0, exponent / denominator.clamp_min(1e-30), exponent)
+    denominator = torch.where(denominator > 0, denominator, torch.ones_like(denominator))
+    result = exponent / denominator
     return result.to(original_dtype)
 
 
@@ -3817,8 +4098,9 @@ def _validate_index_contract(
     *,
     axis: str,
     index_axis: str,
+    allow_integer_values: bool = False,
 ) -> None:
-    if value_type.dtype == "int64":
+    if value_type.dtype == "int64" and not allow_integer_values:
         raise FormulaTypeError(
             "FF2_VALUE_DTYPE",
             "Gather and Scatter values cannot use the int64 index dtype",
@@ -3855,17 +4137,45 @@ def _validate_index_contract(
         _require_axis_extent_equal(value_type, shared_axis, index_type, shared_axis)
 
 
+def _instruction_output_dtype(
+    instruction: FormulaInstructionV2, dtypes: tuple[torch.dtype, ...], output_type: TensorType,
+) -> torch.dtype:
+    if output_type.dtype == "boolean":
+        return torch.bool
+    if output_type.dtype != "floating":
+        return getattr(torch, output_type.dtype)
+    return dtypes[1] if instruction.atom_ref == "arti/formula-atom-select@1" else dtypes[0]
+
+
+def _instruction_output_element_size(
+    instruction: FormulaInstructionV2, operands: tuple[Tensor, ...], output_type: TensorType,
+) -> int:
+    dtype = _instruction_output_dtype(instruction, tuple(value.dtype for value in operands), output_type)
+    return _ELEMENT_SIZES[dtype]
+
+
 def _validate_instruction_dtype_contract(
     instruction: FormulaInstructionV2,
     dtypes: tuple[torch.dtype, ...],
     operand_types: tuple[TensorType, ...],
 ) -> None:
     atom_ref = instruction.atom_ref
+    if atom_ref in _INDEX_ATOM_SIGNATURES:
+        from .formula_indexing import validate_indexing_dtypes
+
+        validate_indexing_dtypes(atom_ref, dtypes)
+        return
+    if atom_ref in _OBSERVATION_ATOM_SIGNATURES:
+        from .formula_observation import validate_observation_dtypes
+
+        validate_observation_dtypes(atom_ref, dtypes)
+        return
     if atom_ref in {
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
         "arti/formula-atom-add@1",
         "arti/formula-atom-reduce@1",
+        "arti/formula-atom-reduce@2",
     }:
         if len(set(dtypes)) != 1:
             raise FormulaBindingError(
@@ -3877,6 +4187,9 @@ def _validate_instruction_dtype_contract(
         "arti/formula-atom-reshape@1",
         "arti/formula-atom-permute@1",
         "arti/formula-atom-scalar-map@1",
+        "arti/formula-atom-scalar-map@2",
+        "arti/formula-atom-cast@1",
+        "arti/formula-atom-window@1",
         "arti/formula-atom-broadcast@1",
         "arti/formula-atom-slice@1",
     }:
@@ -4045,13 +4358,163 @@ def _validate_tensor_metadata_against_type(value: Tensor, value_type: TensorType
         )
 
 
+_FINITE_VALIDATION_MEMO: ContextVar[dict[object, tuple[Tensor, int]] | None] = ContextVar(
+    "arti_formula_finite_validation_memo", default=None,
+)
+
+
+@contextmanager
+def _finite_validation_scope() -> Iterator[None]:
+    """Deduplicate finite scans during synchronous, read-only candidate admission.
+
+    No tensor/storage mutation bypassing PyTorch version tracking is allowed
+    inside this private scope. It must not span execution or asynchronous work.
+    """
+    token = _FINITE_VALIDATION_MEMO.set({})
+    try:
+        yield
+    finally:
+        _FINITE_VALIDATION_MEMO.reset(token)
+
+
+_FINITE_VALIDATION_CAPTURE: ContextVar[list[Tensor] | None] = ContextVar(
+    "arti_formula_finite_validation_capture", default=None,
+)
+
+
+@contextmanager
+def _capture_finite_validation() -> Iterator[list[Tensor]]:
+    """Internal deferred checks; caller must apply every captured requirement.
+
+    Used for candidate admission and native branch-local effect finishing only.
+    No captured candidate/successor may enter selection or subsequent execution
+    before its checks pass. Never wrap custom callbacks or mutable execution.
+    """
+    values: list[Tensor] = []
+    token = _FINITE_VALIDATION_CAPTURE.set(values)
+    try:
+        yield values
+    finally:
+        _FINITE_VALIDATION_CAPTURE.reset(token)
+
+
 def _validate_tensor_against_type(value: Tensor, value_type: TensorType, *, name: str) -> None:
     _validate_tensor_metadata_against_type(value, value_type, name=name)
+    _validate_tensor_finite(value, name=name)
+
+
+def _validate_tensor_finite(value: Tensor, *, name: str) -> None:
+    captured = _FINITE_VALIDATION_CAPTURE.get()
+    if captured is not None and type(value) in (Tensor, nn.Parameter) and value.layout == torch.strided:
+        captured.append(value)
+        return
+    memo = _FINITE_VALIDATION_MEMO.get()
+    version = None
+    key: object = id(value)
+    if memo is not None and type(value) in (Tensor, nn.Parameter) and value.layout == torch.strided:
+        try:
+            version = value._version
+        except RuntimeError:
+            pass  # Inference tensors have no mutation version; check normally.
+        # Repeated batch-broadcast views share a versioned base, but different
+        # regions must never share finite facts. Retaining the view keeps its
+        # base alive for this read-only admission scope.
+        base = value._base
+        if base is not None and type(base) in (Tensor, nn.Parameter):
+            key = (id(base), value.data_ptr(), value.storage_offset(), tuple(value.shape), value.stride(), value.dtype, value.device)
+        previous = memo.get(key)
+        if version is not None and previous is not None and previous[1] == version:
+            return
     if not bool(torch.isfinite(value).all()):
         raise FormulaBindingError("FF2_NONFINITE", f"{name!r} must contain finite values")
+    if memo is not None and version is not None:
+        memo[key] = (value, version)
+
+
+def _binding_tensor_metadata(value: Tensor) -> tuple[object, ...] | None:
+    if type(value) not in (Tensor, nn.Parameter) or value.layout != torch.strided:
+        return None
+    return (tuple(value.shape), value.dtype, value.element_size(), value.device, value.stride())
+
+
+class _FormulaBindingPlan:
+    """Program-local static bindings and bounded, tensor-free metadata cache."""
+
+    def __init__(self, program: FormulaProgram) -> None:
+        self.program = program
+        self.bindings = tuple((binding, isinstance(binding, BankBinding)) for binding in program.bindings)
+        self.names = tuple(binding.name for binding in program.bindings)
+        self.input_names = program.input_names
+        self.bank_names = program.bank_names
+        self.metadata: OrderedDict[tuple[object, ...], tuple[tuple[str, int], ...]] = OrderedDict()
+
+    def bind(self, *, inputs, banks, defer_finite):
+        # Extension mappings/tensors keep their normal per-call behavior.
+        if type(inputs) is not dict or type(banks) is not dict or any(
+            type(operand) is not FormulaBankOperand for operand in banks.values()
+        ):
+            return _bind_runtime_values_uncached(self.program, inputs=inputs, banks=banks, defer_finite=defer_finite)
+        _require_exact_keys(inputs, self.input_names, source="inputs")
+        _require_exact_keys(banks, self.bank_names, source="banks")
+        values = []
+        for binding, is_bank in self.bindings:
+            value = banks[binding.name].consume(binding) if is_bank else inputs[binding.name]
+            if type(value) not in (Tensor, nn.Parameter) or value.layout != torch.strided:
+                return _bind_runtime_values_uncached(self.program, inputs=inputs, banks=banks, defer_finite=defer_finite)
+            values.append(value)
+        key = tuple(_binding_tensor_metadata(value) for value in values)
+        axes = self.metadata.get(key)
+        if axes is None:
+            slots, extents = _bind_runtime_values_uncached(
+                self.program, inputs=inputs, banks=banks, defer_finite=defer_finite,
+            )
+            self.metadata[key] = tuple(extents.items())
+            if len(self.metadata) > 32:
+                self.metadata.popitem(last=False)
+            return slots, extents
+        self.metadata.move_to_end(key)
+        if not defer_finite:
+            for name, value in zip(self.names, values, strict=True):
+                _validate_tensor_finite(value, name=name)
+        return dict(zip(self.names, values, strict=True)), dict(axes)
+
+    def has_checked_metadata(self, values: Sequence[Tensor], *, metadata_cache=None) -> bool:
+        """For native prepared sources only; never certifies current values."""
+        if len(values) != len(self.bindings):
+            return False
+        metadata = []
+        for value in values:
+            cached = None if metadata_cache is None else metadata_cache.get(id(value))
+            if cached is None:
+                signature = _binding_tensor_metadata(value)
+                if signature is None:
+                    return False
+                if metadata_cache is not None:
+                    # The caller owns one read-only native admission segment.
+                    metadata_cache[id(value)] = (value, signature)
+            else:
+                _, signature = cached
+            metadata.append(signature)
+        key = tuple(metadata)
+        if key not in self.metadata:
+            return False
+        self.metadata.move_to_end(key)
+        return True
 
 
 def _bind_runtime_values(
+    program: FormulaProgram,
+    *,
+    inputs: Mapping[str, Tensor],
+    banks: Mapping[str, FormulaBankOperand],
+    defer_finite: bool = False,
+) -> tuple[dict[str, Tensor], dict[str, int]]:
+    if type(program) is FormulaProgram:
+        return program._binding_plan.bind(inputs=inputs, banks=banks, defer_finite=defer_finite)
+    return _bind_runtime_values_uncached(program, inputs=inputs, banks=banks, defer_finite=defer_finite)
+
+
+def _bind_runtime_values_uncached(
     program: FormulaProgram,
     *,
     inputs: Mapping[str, Tensor],
@@ -4090,6 +4553,7 @@ def _bind_runtime_values(
                 "FF2_DEVICE_MISMATCH", "all Formula bindings must use the same device"
             )
         slots[binding.name] = value
+    _preflight_program_shapes(program, slots, axis_extents)
     return slots, axis_extents
 
 
@@ -4098,13 +4562,35 @@ def _preflight_program_shapes(
     binding_slots: Mapping[str, Tensor],
     axis_extents: Mapping[str, int],
 ) -> None:
-    slot_shapes = {name: tuple(value.shape) for name, value in binding_slots.items()}
-    slot_element_sizes = {
-        name: value.element_size() for name, value in binding_slots.items()
-    }
-    slot_dtypes = {name: value.dtype for name, value in binding_slots.items()}
+    metadata = tuple(
+        (name, tuple(value.shape), value.dtype, value.element_size(), value.device,
+         value.layout, tuple(value.stride()) if value.layout == torch.strided else None)
+        for name, value in binding_slots.items()
+    )
+    ordinary = all(
+        type(value) in {Tensor, nn.Parameter} and value.layout == torch.strided
+        for value in binding_slots.values()
+    )
+    preflight = (
+        _preflight_program_shape_metadata if ordinary
+        else _preflight_program_shape_metadata.__wrapped__
+    )
+    preflight(program, metadata, tuple(sorted(axis_extents.items())))
+
+
+@lru_cache(maxsize=2048)
+def _preflight_program_shape_metadata(
+    program: FormulaProgram,
+    metadata: tuple[tuple[object, ...], ...],
+    axis_items: tuple[tuple[str, int], ...],
+) -> None:
+    """Cache successful pure metadata checks, never Tensor values or bindings."""
+    axis_extents = dict(axis_items)
+    slot_shapes = {row[0]: row[1] for row in metadata}
+    slot_dtypes = {row[0]: row[2] for row in metadata}
+    slot_element_sizes = {row[0]: row[3] for row in metadata}
     persistent_bytes = sum(
-        value.numel() * value.element_size() for value in binding_slots.values()
+        math.prod(shape) * slot_element_sizes[name] for name, shape in slot_shapes.items()
     )
     _validate_working_bytes(
         persistent_bytes,
@@ -4133,19 +4619,25 @@ def _preflight_program_shapes(
                         f"{right_axis}={right_extent}",
                     )
         output_type = slot_types[instruction.output_slot]
+        _bind_instruction_derived_extents(instruction, input_shapes, input_types, output_type, axis_extents)
         output_shape = _resolved_type_shape(
             output_type,
             axis_extents,
             name=instruction.output_slot,
         )
+        output_dtype = _instruction_output_dtype(instruction, input_dtypes, output_type)
+        output_element_size = torch.empty((), dtype=output_dtype).element_size()
         attributes = dict(instruction.attributes)
         accumulation_dtype = attributes.get("accumulation_dtype")
         compute_dtype = (
-            input_dtypes[0]
+            output_dtype
             if accumulation_dtype is None
             else _accumulation_dtype(input_dtypes[0], accumulation_dtype)
         )
         compute_element_size = torch.empty((), dtype=compute_dtype).element_size()
+        if instruction.atom_ref == "arti/formula-atom-observe-fourier@1":
+            # The expanded FFT product/inverse is complex even for bf16 input.
+            compute_element_size = 16 if input_dtypes[0] == torch.float64 else 8
         for input_slot, input_shape, input_dtype in zip(
             instruction.input_slots,
             input_shapes,
@@ -4154,7 +4646,7 @@ def _preflight_program_shapes(
         ):
             working_element_size = (
                 compute_element_size
-                if accumulation_dtype is not None
+                if accumulation_dtype is not None and input_dtype.is_floating_point
                 else torch.empty((), dtype=input_dtype).element_size()
             )
             _preflight_shape_bytes(
@@ -4172,9 +4664,8 @@ def _preflight_program_shapes(
         )
         output_elements = math.prod(output_shape)
         output_compute_bytes = output_elements * compute_element_size
-        output_storage_bytes = output_elements * slot_element_sizes[
-            instruction.input_slots[0]
-        ]
+        output_storage_bytes = output_elements * output_element_size
+        retained_output_bytes = output_storage_bytes
         if accumulation_dtype is None:
             input_working_bytes = sum(
                 math.prod(shape) * torch.empty((), dtype=dtype).element_size()
@@ -4182,27 +4673,68 @@ def _preflight_program_shapes(
             )
         else:
             input_working_bytes = sum(
-                math.prod(shape) * compute_element_size for shape in input_shapes
+                math.prod(shape) * (compute_element_size if dtype.is_floating_point else torch.empty((), dtype=dtype).element_size())
+                for shape, dtype in zip(input_shapes, input_dtypes, strict=True)
             )
         working_bytes = persistent_bytes + input_working_bytes
         # Runtime accumulation can hold both the compute-dtype result and its
         # activation-dtype cast until the instruction returns.
         working_bytes += output_compute_bytes + output_storage_bytes
+        if instruction.atom_ref == "arti/formula-atom-lookup@1":
+            # Range predicates and the checked path's safe int64 indices.
+            working_bytes += math.prod(input_shapes[1]) * (3 + 8)
+        if instruction.atom_ref == "arti/formula-atom-window@1":
+            from .formula_window import window_padding_shape, window_scratch_bytes
+
+            if any(attributes["padding"]):
+                _preflight_shape_bytes(
+                    window_padding_shape(input_shapes[0], input_types[0], attributes),
+                    output_element_size, program.limits, name=f"{instruction.output_slot}:padding",
+                )
+            padded_bytes = window_scratch_bytes(input_shapes[0], input_types[0], attributes, output_element_size)
+            working_bytes += padded_bytes
+            # A sparse window view can retain a larger padded base than its
+            # logical output. Keep that base in the subsequent SSA budget.
+            retained_output_bytes = max(retained_output_bytes, padded_bytes)
+        if instruction.atom_ref in _OBSERVATION_ATOM_SIGNATURES:
+            from .formula_observation import observation_scratch_bytes
+
+            working_bytes += observation_scratch_bytes(
+                instruction.atom_ref, input_shapes, input_dtypes[0]
+            )
+        if instruction.atom_ref in _INDEX_ATOM_SIGNATURES:
+            from .formula_indexing import indexing_scratch_bytes
+
+            working_bytes += indexing_scratch_bytes(
+                instruction.atom_ref, input_shapes, input_types, compute_element_size, attributes,
+            )
         if instruction.atom_ref == "arti/formula-atom-reduce@1":
             # Ordered reduction can briefly retain the previous accumulator
             # while materializing the next one.
             working_bytes += output_compute_bytes
+        if (
+            instruction.atom_ref == "arti/formula-atom-reduce@2"
+            and attributes["mode"] == "logsumexp"
+        ):
+            # Native LSE materializes (input - max).exp_(), max, abs(max), and
+            # a reduced boolean mask. These are tensors, not allocator scratch.
+            working_bytes += math.prod(input_shapes[0]) * compute_element_size
+            working_bytes += 2 * output_compute_bytes + output_elements
+        if instruction.atom_ref == "arti/formula-atom-masked-softmax@1":
+            axis = input_types[0].axis_names.index(attributes["axis"])
+            rows = math.prod(input_shapes[0]) // input_shapes[0][axis]
+            # Masked/shifted/exponent buffers and transient where operands can
+            # coexist. Backend workspace and autograd saved tensors are separate.
+            working_bytes += 4 * output_compute_bytes + rows * (4 * compute_element_size + 1)
         _validate_working_bytes(
             working_bytes,
             program.limits,
             name=f"instruction {instruction.instruction_id!r}",
         )
         slot_shapes[instruction.output_slot] = output_shape
-        slot_element_sizes[instruction.output_slot] = slot_element_sizes[
-            instruction.input_slots[0]
-        ]
-        slot_dtypes[instruction.output_slot] = slot_dtypes[instruction.input_slots[0]]
-        persistent_bytes += output_elements * slot_element_sizes[instruction.output_slot]
+        slot_element_sizes[instruction.output_slot] = output_element_size
+        slot_dtypes[instruction.output_slot] = output_dtype
+        persistent_bytes += retained_output_bytes
         _validate_working_bytes(
             persistent_bytes,
             program.limits,
@@ -4267,6 +4799,13 @@ def _preflight_shape_bytes(
             "FF2_LIMIT_EXCEEDED",
             f"{name!r} output allocation exceeds the Formula tensor byte limit",
         )
+
+
+def _bind_instruction_derived_extents(instruction, shapes, types, output_type, extents):
+    if instruction.atom_ref == "arti/formula-atom-window@1":
+        from .formula_window import bind_window_extents
+
+        bind_window_extents(shapes[0], types[0], output_type, dict(instruction.attributes), extents)
 
 
 def _resolved_type_shape(
@@ -4423,6 +4962,7 @@ __all__ = [
     "AddAtom",
     "BankBinding",
     "BroadcastAtom",
+    "CastAtom",
     "ConcatAtom",
     "ContractAtom",
     "DEFAULT_FORMULA_LIMITS",
@@ -4457,9 +4997,11 @@ __all__ = [
     "PermuteAtom",
     "PreparedFormulaBindings",
     "ReduceAtom",
+    "ReduceAtomV2",
     "ReshapeAtom",
     "ScaleAtom",
     "ScalarMapAtom",
+    "ScalarMapAtomV2",
     "ScatterAtom",
     "SelectAtom",
     "SliceAtom",
@@ -4467,6 +5009,7 @@ __all__ = [
     "add",
     "build_lora_program",
     "broadcast",
+    "cast",
     "concat",
     "contract",
     "dot",
@@ -4485,9 +5028,11 @@ __all__ = [
     "neural_plasticity_transport",
     "permute",
     "reduce_sum",
+    "reduce_tensor",
     "reshape",
     "scale",
     "scalar_map",
+    "scalar_map_v2",
     "scatter",
     "select",
     "slice_tensor",

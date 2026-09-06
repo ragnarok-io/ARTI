@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 import hashlib
 import json
 import math
@@ -120,11 +121,12 @@ class FormulaProgramBankState:
     def empty(cls) -> FormulaProgramBankState:
         return cls((), (), ())
 
+    @cached_property
+    def _slot_positions(self) -> dict[BankSlotRef, int]:
+        return {slot_ref: index for index, slot_ref in enumerate(self.slot_refs)}
+
     def _index(self, slot_ref: BankSlotRef) -> int:
-        try:
-            return self.slot_refs.index(slot_ref)
-        except ValueError as exc:
-            raise KeyError(slot_ref) from exc
+        return self._slot_positions[slot_ref]
 
     def value(self, slot_ref: BankSlotRef) -> Tensor:
         return self.values[self._index(slot_ref)]
@@ -139,21 +141,28 @@ class FormulaProgramBankState:
         *,
         revision: int,
     ) -> FormulaProgramBankState:
-        index = self._index(slot_ref)
-        current = self.values[index]
-        if (
-            not isinstance(value, Tensor)
-            or value.shape != current.shape
-            or value.dtype != current.dtype
-            or value.device != current.device
-        ):
-            raise ValueError("successor must exactly match its predecessor Bank slot")
-        if type(revision) is not int or revision <= self.revisions[index]:
-            raise ValueError("successor revision must advance the Bank slot")
+        return self._replace_sequence(((slot_ref, value, revision),))
+
+    def _replace_sequence(
+        self, updates: Iterable[tuple[BankSlotRef, Tensor, int]]
+    ) -> FormulaProgramBankState:
+        """Apply ordered replacements while constructing the immutable state once."""
         values = list(self.values)
         revisions = list(self.revisions)
-        values[index] = value
-        revisions[index] = revision
+        for slot_ref, value, revision in updates:
+            index = self._index(slot_ref)
+            current = values[index]
+            if (
+                not isinstance(value, Tensor)
+                or value.shape != current.shape
+                or value.dtype != current.dtype
+                or value.device != current.device
+            ):
+                raise ValueError("successor must exactly match its predecessor Bank slot")
+            if type(revision) is not int or revision <= revisions[index]:
+                raise ValueError("successor revision must advance the Bank slot")
+            values[index] = value
+            revisions[index] = revision
         return FormulaProgramBankState(self.slot_refs, tuple(values), tuple(revisions))
 
 
@@ -185,8 +194,7 @@ class FormulaProgramCandidateV2(nn.Module):
         _require_name(output_slot, field="output_slot")
         if not isinstance(program, FormulaProgram):
             raise TypeError("program must be FormulaProgram")
-        if len(program.outputs) != 1:
-            raise ValueError("FormulaProgramCandidateV2 requires exactly one public output")
+        self._validate_program_outputs(program)
         input_bindings = tuple(
             binding for binding in program.bindings if isinstance(binding, InputBinding)
         )
@@ -223,6 +231,10 @@ class FormulaProgramCandidateV2(nn.Module):
             trainable=tuple(trainable_operands),
         )
         self.batch_broadcast_operands = batch_broadcast
+
+    def _validate_program_outputs(self, program: FormulaProgram) -> None:
+        if len(program.outputs) != 1:
+            raise ValueError("FormulaProgramCandidateV2 requires exactly one public output")
 
     @property
     def program(self) -> FormulaProgram:
@@ -409,7 +421,9 @@ class _FormulaProgramExecutionArena:
         return result
 
 
-def _program_output_dependencies(program: FormulaProgram) -> frozenset[str]:
+def _program_output_dependencies(
+    program: FormulaProgram, output: str | None = None,
+) -> frozenset[str]:
     dependencies: dict[str, frozenset[str]] = {
         binding.name: frozenset((binding.name,)) for binding in program.bindings
     }
@@ -419,7 +433,9 @@ def _program_output_dependencies(program: FormulaProgram) -> frozenset[str]:
             for input_slot in instruction.input_slots
             for dependency in dependencies[input_slot]
         )
-    return dependencies[program.outputs[0]]
+    return frozenset().union(*(dependencies[name] for name in (
+        program.outputs if output is None else (output,)
+    )))
 
 
 FormulaProgramCandidateLike = FormulaProgramCandidate | FormulaProgramCandidateV2
@@ -429,6 +445,7 @@ class FormulaProgramTensorCandidateV2(nn.Module):
     """Ordinary Formula node that may own one plastic Bank binding."""
 
     _component_reference: ClassVar[str] = "arti/formula-program-tensor-candidate@2"
+    _allows_multiple_outputs: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -439,6 +456,8 @@ class FormulaProgramTensorCandidateV2(nn.Module):
         super().__init__()
         if not isinstance(candidate, (FormulaProgramCandidate, FormulaProgramCandidateV2)):
             raise TypeError("candidate must be FormulaProgramCandidate@1 or @2")
+        if len(candidate.program.outputs) != 1 and not self._allows_multiple_outputs:
+            raise ValueError("multiple outputs require a named-output Tensor candidate")
         if plastic_bank_slot is not None:
             _require_name(plastic_bank_slot, field="plastic_bank_slot")
             if plastic_bank_slot not in candidate._bank_bindings:

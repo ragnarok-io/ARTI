@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import Tensor, nn
+from torch.nn.modules import module as module_runtime
 
+from ._formula_finite_rows import _FiniteTensorRows
 from .formula_program_query import FormulaProgramArena, FormulaProgramQueryResult
 from .formula_program_query_v3 import (
     BankSlotRef,
@@ -22,13 +26,36 @@ from .formula_program_query_v3 import (
     _require_name,
     _SUMMARY_WIDTH,
 )
-from .formula_v2 import FormulaBankOperand, FormulaV2Error
+from .formula_v2 import FormulaBankOperand, FormulaV2Error, TensorType, _validate_tensor_against_type
 from .formula_v3 import (
     FormulaEffectProgramV2,
     NEURAL_PLASTICITY_OUTER_V2_ATOM_REF,
     NeuralPlasticityEffectV2,
     apply_neural_plasticity_effect,
 )
+
+if TYPE_CHECKING:
+    from .formula_program_query_v5 import FormulaProgramQueryTraceV5
+
+
+_CANDIDATE_STRUCTURE_PLANS: ContextVar[dict | None] = ContextVar(
+    "arti_candidate_structure_plans", default=None,
+)
+
+
+@contextmanager
+def _candidate_structure_scope() -> Iterator[None]:
+    """Reuse declared wiring during one synchronous, fixed-graph search.
+
+    Candidate wiring and action identities stay fixed inside this private scope. Bank values,
+    revisions, operands, scores and selected paths remain fully dynamic.
+    Plans contain only structural groups/layouts/action indices, not admission verdicts.
+    """
+    token = _CANDIDATE_STRUCTURE_PLANS.set({})
+    try:
+        yield
+    finally:
+        _CANDIDATE_STRUCTURE_PLANS.reset(token)
 
 
 @dataclass(frozen=True)
@@ -46,6 +73,26 @@ class _FormulaProducerLineageV2:
 
 
 @dataclass(frozen=True)
+class _BankSlotEffectTransition:
+    """An executed Formula's operands, reusable without querying another Bank.
+
+    This is an in-memory autograd record, not a second persistent state. Its
+    operands retain the generating branch's computation and execution count.
+    """
+
+    effect: NeuralPlasticityEffectV2
+    state_type: TensorType
+    execution_count: Tensor | None
+    max_executions: int
+
+    def apply(self, value: Tensor) -> Tensor:
+        return apply_neural_plasticity_effect(
+            self.effect, value, state_type=self.state_type,
+            execution_count=self.execution_count, max_executions=self.max_executions,
+        )
+
+
+@dataclass(frozen=True)
 class _BankSlotEffectProposalV2:
     """A branch-local successor retaining both occurrence and owner identity."""
 
@@ -59,6 +106,7 @@ class _BankSlotEffectProposalV2:
     successor_revision: int
     previous: Tensor
     successor: Tensor
+    transition: _BankSlotEffectTransition | None = None
 
     _runtime_contract_ref: ClassVar[str] = "arti/bank-slot-effect-proposal@2"
 
@@ -83,6 +131,10 @@ class _FormulaProgramExecutionArenaV4:
     producers: tuple[_FormulaProducerLineageV2 | None, ...]
     bank_state: FormulaProgramBankState
     proposals: tuple[_BankSlotEffectProposalV2, ...] = ()
+    tensor_steps: int = 0
+    effect_steps: int = 0
+    invocation_path: tuple[str, ...] = ()
+    call_traces: tuple[FormulaProgramQueryTraceV5, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "producers", tuple(self.producers))
@@ -106,21 +158,38 @@ class _FormulaProgramExecutionArenaV4:
         except ValueError as exc:
             raise KeyError(slot_id) from exc
 
+    def execution_id(self, candidate_id: str) -> str:
+        return "/".join((*self.invocation_path, candidate_id))
+
     def write(
         self,
         slot_id: str,
         value: Tensor,
         *,
         producer: _FormulaProducerLineageV2 | None,
+        is_effect: bool = False,
     ) -> _FormulaProgramExecutionArenaV4:
-        index = self.values.slot_ids.index(slot_id)
-        producers = list(self.producers)
-        producers[index] = producer
-        return _FormulaProgramExecutionArenaV4(
-            self.values.write(slot_id, value),
-            tuple(producers),
-            self.bank_state,
-            self.proposals,
+        return self.write_many({slot_id: value}, producers={slot_id: producer}, is_effect=is_effect)
+
+    def write_many(
+        self,
+        outputs: Mapping[str, Tensor],
+        *,
+        producers: Mapping[str, _FormulaProducerLineageV2 | None],
+        is_effect: bool = False,
+    ) -> _FormulaProgramExecutionArenaV4:
+        if set(outputs) != set(producers):
+            raise ValueError("each SSA output must have an explicit producer entry")
+        lineage = list(self.producers)
+        for slot_id, producer in producers.items():
+            index = self.values.slot_ids.index(slot_id)
+            lineage[index] = producer
+        return replace(
+            self,
+            values=self.values.write_many(outputs),
+            producers=tuple(lineage),
+            tensor_steps=self.tensor_steps + int(not is_effect),
+            effect_steps=self.effect_steps + int(is_effect),
         )
 
     def effect_state(self, slot_ref: BankSlotRef) -> tuple[Tensor, int]:
@@ -136,22 +205,15 @@ class _FormulaProgramExecutionArenaV4:
         current, revision = self.effect_state(proposal.target)
         if proposal.previous is not current or proposal.previous_revision != revision:
             raise ValueError("effect proposal must extend the latest branch-local Bank revision")
-        return _FormulaProgramExecutionArenaV4(
-            self.values,
-            self.producers,
-            self.bank_state,
-            (*self.proposals, proposal),
-        )
+        return replace(self, proposals=(*self.proposals, proposal))
 
     def committed_state(self) -> FormulaProgramBankState:
-        result = self.bank_state
-        for proposal in self.proposals:
-            result = result.replace(
-                proposal.target,
-                proposal.successor,
-                revision=proposal.successor_revision,
-            )
-        return result
+        if not self.proposals:
+            return self.bank_state
+        return self.bank_state._replace_sequence(
+            (proposal.target, proposal.successor, proposal.successor_revision)
+            for proposal in self.proposals
+        )
 
 
 class FormulaProgramBankOwnerV1(nn.Module):
@@ -193,6 +255,78 @@ class FormulaProgramBankOwnerV1(nn.Module):
         }
 
 
+class _ScaledPopulationStd(torch.autograd.Function):
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(value: Tensor, dim: int):
+        # Bound Welford's unnormalized second moment, preserving original units.
+        peak = value.detach().abs().amax(dim=dim, keepdim=True)
+        limit = math.sqrt(torch.finfo(value.dtype).max / (4 * value.shape[dim]))
+        scale = torch.where(peak > limit, peak, torch.ones_like(peak))
+        deviation = (value / scale).std(dim=dim, unbiased=False, keepdim=True)
+        return (deviation * scale).squeeze(dim), scale, deviation
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        value, ctx.dim = inputs
+        _, scale, deviation = output
+        ctx.save_for_backward(value, scale, deviation)
+        ctx.mark_non_differentiable(scale, deviation)
+
+    @staticmethod
+    def backward(ctx, gradient: Tensor, _scale_gradient, _deviation_gradient) -> tuple[Tensor, None]:
+        value, scale, deviation = ctx.saved_tensors
+        dim = ctx.dim
+        normalized = value / scale
+        if torch.is_grad_enabled():
+            deviation = normalized.std(dim=dim, unbiased=False, keepdim=True)
+        denominator = torch.where(deviation == 0, torch.ones_like(deviation), deviation)
+        standardized = (normalized - normalized.mean(dim=dim, keepdim=True)) / denominator
+        standardized = torch.where(deviation == 0, torch.zeros_like(standardized), standardized)
+        # The forward scale cancels analytically. Multiplying gradient by scale
+        # first could overflow even when the correct input gradient is finite.
+        return standardized * (gradient.unsqueeze(dim) / value.shape[dim]), None
+
+
+def _scaled_population_std(value: Tensor, *, dim: int) -> Tensor:
+    return _ScaledPopulationStd.apply(value, dim)[0]
+
+
+class _ScaledRootMeanSquare(torch.autograd.Function):
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(value: Tensor, dim: int):
+        peak = value.detach().abs().amax(dim=dim, keepdim=True)
+        limit = math.sqrt(torch.finfo(value.dtype).max / value.shape[dim])
+        scale = torch.where(peak > limit, peak, torch.ones_like(peak))
+        rms = (value / scale).square().mean(dim=dim, keepdim=True).sqrt()
+        return (rms * scale).squeeze(dim), scale, rms
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        value, ctx.dim = inputs
+        _, scale, rms = output
+        ctx.save_for_backward(value, scale, rms)
+        ctx.mark_non_differentiable(scale, rms)
+
+    @staticmethod
+    def backward(ctx, gradient: Tensor, _scale_gradient, _rms_gradient) -> tuple[Tensor, None]:
+        value, scale, rms = ctx.saved_tensors
+        dim = ctx.dim
+        normalized = value / scale
+        if torch.is_grad_enabled():
+            rms = normalized.square().mean(dim=dim, keepdim=True).sqrt()
+        denominator = torch.where(rms == 0, torch.ones_like(rms), rms)
+        # Cancel the scale before multiplying by upstream gradients, as in std.
+        return (normalized / denominator) * (gradient.unsqueeze(dim) / value.shape[dim]), None
+
+
+def _scaled_root_mean_square(value: Tensor, *, dim: int) -> Tensor:
+    return _ScaledRootMeanSquare.apply(value, dim)[0]
+
+
 class FormulaProgramQueryTensorEncoderV1(nn.Module):
     """Content-sensitive fixed-width summary for dynamic-length SSA tensors."""
 
@@ -225,7 +359,7 @@ class FormulaProgramQueryTensorEncoderV1(nn.Module):
             "observes": "ssa-tensor-values-only",
         }
 
-    def forward(self, value: Tensor) -> Tensor:
+    def _prepare_tokens(self, value: Tensor) -> Tensor:
         parameter = next(self.network.parameters())
         if (
             not isinstance(value, Tensor)
@@ -243,8 +377,11 @@ class FormulaProgramQueryTensorEncoderV1(nn.Module):
             -1,
             self.input_dim,
         )
-        if tokens.shape[1] == 0 or not bool(torch.isfinite(tokens).all()):
+        if tokens.shape[1] == 0:
             raise ValueError("Query tensor encoder input must be non-empty and finite")
+        return tokens
+
+    def _encode_tokens(self, tokens: Tensor) -> Tensor:
         encoded = self.network(tokens)
         return torch.cat(
             (
@@ -252,7 +389,7 @@ class FormulaProgramQueryTensorEncoderV1(nn.Module):
                 encoded[:, 0],
                 encoded[:, -1],
                 encoded.mean(dim=1),
-                encoded.std(dim=1, unbiased=False),
+                _scaled_population_std(encoded, dim=1),
                 encoded.new_full(
                     (encoded.shape[0], 1),
                     math.log1p(tokens.shape[1]),
@@ -260,6 +397,55 @@ class FormulaProgramQueryTensorEncoderV1(nn.Module):
             ),
             dim=-1,
         )
+
+    def forward(self, value: Tensor) -> Tensor:
+        tokens = self._prepare_tokens(value)
+        if not bool(torch.isfinite(tokens).all()):
+            raise ValueError("Query tensor encoder input must be non-empty and finite")
+        return self._encode_tokens(tokens)
+
+
+_NATIVE_ENCODER_METHODS = {
+    name: getattr(FormulaProgramQueryTensorEncoderV1, name)
+    for name in ("forward", "_prepare_tokens", "_encode_tokens")
+}
+_NATIVE_ENCODER_FORWARDS = {cls: cls.forward for cls in (nn.Sequential, nn.Linear, nn.SiLU)}
+
+
+def _native_summary_encoder(encoder: nn.Module | None) -> bool:
+    if encoder is None:
+        return True
+    if type(encoder) is not FormulaProgramQueryTensorEncoderV1 or any(
+        name in encoder.__dict__ or getattr(type(encoder), name) is not method
+        for name, method in _NATIVE_ENCODER_METHODS.items()
+    ):
+        return False
+    if any((module_runtime._global_forward_hooks, module_runtime._global_forward_pre_hooks,
+            module_runtime._global_backward_hooks, module_runtime._global_backward_pre_hooks)):
+        return False
+    if any(type(parameter) not in (Tensor, nn.Parameter) for parameter in encoder.parameters()):
+        return False
+    return all(
+        (module is encoder or type(module) in _NATIVE_ENCODER_FORWARDS
+         and type(module).forward is _NATIVE_ENCODER_FORWARDS[type(module)])
+        and not any(getattr(module, name) for name in (
+            "_forward_hooks", "_forward_pre_hooks", "_backward_hooks", "_backward_pre_hooks",
+        )) and "forward" not in module.__dict__
+        for module in encoder.modules()
+    )
+
+
+def _numeric_summary(numeric: Tensor) -> Tensor:
+    return torch.cat((
+        numeric.new_ones((numeric.shape[0], 1)),
+        (numeric / numeric.shape[-1]).sum(dim=-1, keepdim=True),
+        _scaled_population_std(numeric, dim=-1).unsqueeze(-1),
+        (numeric.abs() / numeric.shape[-1]).sum(dim=-1, keepdim=True),
+        numeric.amax(dim=-1, keepdim=True),
+        numeric.amin(dim=-1, keepdim=True),
+        _scaled_root_mean_square(numeric, dim=-1).unsqueeze(-1),
+        numeric.new_full((numeric.shape[0], 1), math.log1p(numeric.shape[-1])),
+    ), dim=-1)
 
 
 class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
@@ -341,6 +527,10 @@ class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
     def initial_revision(self) -> int:
         return int(self.bank_owner.revision.detach().cpu())
 
+    @property
+    def output_slot_ids(self) -> tuple[str, ...]:
+        return (self.output_slot,)
+
     def install_(self, state: FormulaProgramBankState) -> None:
         if self.plastic_bank_slot is not None:
             self.bank_owner.install_(state)
@@ -358,10 +548,13 @@ class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
     def _bindings(
         self,
         arena: _FormulaProgramExecutionArenaV4,
+        input_values: Mapping[str, Tensor] | None = None,
     ) -> tuple[dict[str, Tensor], dict[str, FormulaBankOperand]]:
+        if input_values is not None and set(input_values) != set(self.input_slots):
+            raise ValueError("input values must bind every named Formula port")
         inputs: dict[str, Tensor] = {}
         for input_name, slot_id in self.input_slots.items():
-            value = arena.values.get(slot_id)
+            value = arena.values.get(slot_id) if input_values is None else input_values[input_name]
             if value is None:
                 raise ValueError(f"candidate input slot {slot_id!r} is empty")
             inputs[input_name] = value
@@ -409,10 +602,11 @@ class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
     def forward(
         self,
         arena: _FormulaProgramExecutionArenaV4,
+        *, _input_values: Mapping[str, Tensor] | None = None,
     ) -> _FormulaProgramExecutionArenaV4:
         if arena.values.get(self.output_slot) is not None:
             raise ValueError(f"SSA output slot {self.output_slot!r} is already occupied")
-        inputs, banks = self._bindings(arena)
+        inputs, banks = self._bindings(arena) if _input_values is None else self._bindings(arena, _input_values)
         value = self.candidate.fabric(inputs=inputs, banks=banks).values[0]
         return self._finish(arena, value)
 
@@ -425,7 +619,7 @@ class FormulaProgramTensorCandidateV3(FormulaProgramTensorCandidateV2):
         if slot_ref is not None:
             current, revision = arena.effect_state(slot_ref)
         lineage = _FormulaProducerLineageV2(
-            self.candidate_id,
+            arena.execution_id(self.candidate_id),
             self.bank_owner_id,
             self.output_slot,
             slot_ref,
@@ -498,6 +692,10 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
         if "execution.count" in self.operand_store.names:
             return self.operand_store.tensor("execution.count")
         return None
+
+    @property
+    def output_slot_ids(self) -> tuple[str, ...]:
+        return (self.output_slot,)
 
     def hard_execution_count(self) -> int:
         count = self.execution_count_tensor()
@@ -577,19 +775,21 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
         lineage: _FormulaProducerLineageV2,
         previous: Tensor,
         revision: int,
+        *,
+        successor: Tensor | None = None,
     ) -> _BankSlotEffectProposalV2:
         assert lineage.plastic_slot is not None
         count = self.execution_count_tensor()
-        successor = apply_neural_plasticity_effect(
-            effect,
-            previous,
-            state_type=self.effect_program.state_type,
-            execution_count=(
-                None
-                if self.atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF
-                else count
-            ),
-            max_executions=self.max_executions,
+        transition = _BankSlotEffectTransition(
+            effect, self.effect_program.state_type,
+            None if self.atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF else count,
+            self.max_executions,
+        )
+        if successor is None:
+            successor = transition.apply(previous)
+        _validate_tensor_against_type(
+            successor, self.effect_program.state_type,
+            name=f"{self.candidate_id}.successor_bank_slot",
         )
         return _BankSlotEffectProposalV2(
             lineage.plastic_slot,
@@ -602,6 +802,7 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
             revision + 1,
             previous,
             successor,
+            transition,
         )
 
     def forward(
@@ -624,9 +825,15 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
         effect: NeuralPlasticityEffectV2,
         *,
         target: tuple[_FormulaProducerLineageV2, Tensor, int] | None = None,
+        successor: Tensor | None = None,
     ) -> _FormulaProgramExecutionArenaV4:
         lineage, previous, revision = self._target(arena) if target is None else target
-        proposal = self._proposal(effect, lineage, previous, revision)
+        proposal = (
+            self._proposal(effect, lineage, previous, revision) if successor is None
+            else self._proposal(effect, lineage, previous, revision, successor=successor)
+        )
+        if arena.invocation_path:
+            proposal = replace(proposal, effect_candidate_id=arena.execution_id(self.candidate_id))
         updated = arena.append_proposal(proposal)
         next_lineage = replace(
             lineage,
@@ -634,7 +841,7 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
             plastic_revision=proposal.successor_revision,
             plastic_value=proposal.successor,
         )
-        return updated.write(self.output_slot, value, producer=next_lineage)
+        return updated.write(self.output_slot, value, producer=next_lineage, is_effect=True)
 
 
 FormulaProgramSearchCandidateV4 = (
@@ -671,9 +878,19 @@ class FormulaProgramQueryExecutionV4:
 
 
 class FormulaProgramQueryV4(nn.Module):
-    """Search ordinary and self-operation occurrences with branch-visible state."""
+    """Search ordinary and self-operation occurrences with branch-visible state.
+
+    ``max_steps`` bounds non-STOP dispatches. Optional tensor/effect bounds
+    count their respective occurrences, not an effect's internal repetitions.
+    A populated terminal enables STOP; it does not force the search to stop.
+    """
 
     _component_reference: ClassVar[str] = "arti/formula-program-query@4"
+    _allows_multiple_outputs: ClassVar[bool] = False
+    _uses_external_query: ClassVar[bool] = True
+    _candidate_types: ClassVar[tuple[type[nn.Module], ...]] = (
+        FormulaProgramTensorCandidateV3, FormulaProgramEffectCandidateV3,
+    )
 
     def __init__(
         self,
@@ -683,6 +900,9 @@ class FormulaProgramQueryV4(nn.Module):
         terminal_slot: str,
         min_steps: int = 1,
         max_steps: int = 8,
+        min_tensor_steps: int = 0,
+        max_tensor_steps: int | None = None,
+        max_effect_steps: int | None = None,
         hidden_dim: int = 64,
         tensor_encoder: FormulaProgramQueryTensorEncoderV1 | None = None,
     ) -> None:
@@ -697,7 +917,7 @@ class FormulaProgramQueryV4(nn.Module):
             raise ValueError("terminal_slot must name one declared slot")
         normalized_candidates = tuple(candidates)
         if not normalized_candidates or any(
-            not isinstance(item, (FormulaProgramTensorCandidateV3, FormulaProgramEffectCandidateV3))
+            not isinstance(item, self._candidate_types)
             for item in normalized_candidates
         ):
             raise TypeError("candidates must contain Formula ProgramQuery@4 candidates")
@@ -705,9 +925,11 @@ class FormulaProgramQueryV4(nn.Module):
         if len(set(candidate_ids)) != len(candidate_ids) or "stop" in candidate_ids:
             raise ValueError("candidate ids must be unique and must not use 'stop'")
         for candidate in normalized_candidates:
+            if len(candidate.output_slot_ids) != 1 and not self._allows_multiple_outputs:
+                raise ValueError("multiple outputs require ProgramQuery@5")
             referenced = {
                 *candidate.input_slots.values(),
-                candidate.output_slot,
+                *candidate.output_slot_ids,
                 *candidate.requires_empty_slots,
             }
             if not referenced.issubset(normalized_slots):
@@ -721,6 +943,19 @@ class FormulaProgramQueryV4(nn.Module):
             or max_steps < max(1, min_steps)
         ):
             raise ValueError("ProgramQuery step bounds are invalid")
+        for name, limit in (
+            ("min_tensor_steps", min_tensor_steps),
+            ("max_tensor_steps", max_tensor_steps),
+            ("max_effect_steps", max_effect_steps),
+        ):
+            if limit is not None and (
+                isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer or None")
+        if min_tensor_steps is None or (
+            max_tensor_steps is not None and min_tensor_steps > max_tensor_steps
+        ):
+            raise ValueError("tensor step bounds are invalid")
         if isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int) or hidden_dim <= 0:
             raise ValueError("hidden_dim must be a positive integer")
         if tensor_encoder is not None and not isinstance(
@@ -734,6 +969,18 @@ class FormulaProgramQueryV4(nn.Module):
         self.terminal_slot = terminal_slot
         self.min_steps = int(min_steps)
         self.max_steps = int(max_steps)
+        self.min_tensor_steps = min_tensor_steps
+        self.max_tensor_steps = max_tensor_steps
+        self.max_effect_steps = max_effect_steps
+        self._terminal_requires_tensor = all(
+            isinstance(item, FormulaProgramTensorCandidateV3)
+            for item in normalized_candidates if item.output_slot == terminal_slot
+        )
+        self._terminal_closes_tensor = all(
+            item.output_slot == terminal_slot or terminal_slot in item.requires_empty_slots
+            for item in normalized_candidates
+            if isinstance(item, FormulaProgramTensorCandidateV3)
+        )
         self.hidden_dim = int(hidden_dim)
         self.tensor_encoder = tensor_encoder
         self._owner_token = object()
@@ -743,11 +990,12 @@ class FormulaProgramQueryV4(nn.Module):
             if self.tensor_encoder is None
             else self.tensor_encoder.output_width
         )
-        self.network = nn.Sequential(
-            nn.Linear(len(normalized_slots) * summary_width, self.hidden_dim),
-            nn.SiLU(),
-            nn.Linear(self.hidden_dim, len(normalized_candidates) + 1),
-        )
+        if self._uses_external_query:
+            self.network = nn.Sequential(
+                nn.Linear(len(normalized_slots) * summary_width, self.hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.hidden_dim, len(normalized_candidates) + 1),
+            )
         action_ids = candidate_ids + ("stop",)
         lexical_rank = {item: rank for rank, item in enumerate(sorted(action_ids))}
         self.register_buffer(
@@ -827,6 +1075,8 @@ class FormulaProgramQueryV4(nn.Module):
                 raise ValueError("shared Bank owner occurrences must start from identical state")
             candidate._bind_bank_owner(owner)
         self.owner_states = nn.ModuleList(tuple(owners[slot_ref] for slot_ref in sorted(owners)))
+        for owner in self.owner_states:
+            owner._is_query_owned = True
         self._validate_bank_owners()
 
     def initial_bank_state(self) -> FormulaProgramBankState:
@@ -908,6 +1158,9 @@ class FormulaProgramQueryV4(nn.Module):
             "terminal_slot": self.terminal_slot,
             "min_steps": self.min_steps,
             "max_steps": self.max_steps,
+            "min_tensor_steps": self.min_tensor_steps,
+            "max_tensor_steps": self.max_tensor_steps,
+            "max_effect_steps": self.max_effect_steps,
             "hidden_dim": self.hidden_dim,
             "tensor_encoder_ref": (
                 None
@@ -934,17 +1187,120 @@ class FormulaProgramQueryV4(nn.Module):
         arena = FormulaProgramArena.from_mapping(self.slot_ids, values)
         return _FormulaProgramExecutionArenaV4(arena, (None,) * len(self.slot_ids), state)
 
+    def _candidate_eligible(
+        self,
+        candidate: FormulaProgramSearchCandidateV4,
+        arena: _FormulaProgramExecutionArenaV4,
+        *,
+        steps: int,
+    ) -> bool:
+        return self._candidate_budget_eligible(candidate, arena, steps=steps) and candidate.accepts(arena)
+
+    def _candidate_budget_eligible(
+        self, candidate: FormulaProgramSearchCandidateV4, arena: _FormulaProgramExecutionArenaV4,
+        *, steps: int,
+    ) -> bool:
+        if steps >= self.max_steps:
+            return False
+        if (
+            self._terminal_closes_tensor
+            and candidate.output_slot == self.terminal_slot
+            and arena.tensor_steps + int(isinstance(candidate, FormulaProgramTensorCandidateV3))
+            < self.min_tensor_steps
+        ):
+            return False
+        if isinstance(candidate, FormulaProgramEffectCandidateV3):
+            if self.max_effect_steps is not None and arena.effect_steps >= self.max_effect_steps:
+                return False
+        elif self.max_tensor_steps is not None:
+            remaining = self.max_tensor_steps - arena.tensor_steps
+            if remaining <= 0:
+                return False
+            if (
+                remaining == 1 and self._terminal_requires_tensor
+                and arena.values.get(self.terminal_slot) is None
+                and candidate.output_slot != self.terminal_slot
+            ):
+                return False
+        return True
+
+    def _stop_eligible(self, arena: _FormulaProgramExecutionArenaV4, *, steps: int) -> bool:
+        return (
+            steps >= self.min_steps and arena.tensor_steps >= self.min_tensor_steps
+            and arena.values.get(self.terminal_slot) is not None
+        )
+
+    def _structural_candidates(
+        self, arenas: Sequence[_FormulaProgramExecutionArenaV4],
+        candidates: Sequence[FormulaProgramSearchCandidateV4] | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Prefilter wiring; never reuse Bank or numerical admission."""
+        from .formula_program_query_v5 import FormulaProgramQueryV5
+        from .formula_program_query_v6 import FormulaProgramQueryV6
+
+        candidates = tuple(self.candidates if candidates is None else candidates)
+        all_indices = tuple(range(len(candidates)))
+        if type(self) not in (FormulaProgramQueryV4, FormulaProgramQueryV5, FormulaProgramQueryV6) or "_candidate_eligible" in self.__dict__:
+            return (all_indices,) * len(arenas)
+        cache = _CANDIDATE_STRUCTURE_PLANS.get()
+        key = (self, self.slot_ids, tuple(map(id, candidates)))
+        plan = None if cache is None else cache.get(key)
+        if plan is None:
+            plan = (self._compile_candidate_wiring(candidates), {}, candidates)
+            if cache is not None:
+                cache[key] = plan
+        groups, layouts, _ = plan
+        rows = []
+        for arena in arenas:
+            if arena.values.slot_ids != self.slot_ids:
+                raise ValueError("arena layout does not match ProgramQuery@4")
+            occupied = sum(1 << i for i, value in enumerate(arena.values.values) if value is not None)
+            if occupied not in layouts:
+                layouts[occupied] = tuple(sorted(
+                    i for (required, empty), indices in groups.items()
+                    if occupied & required == required and not occupied & empty
+                    for i in indices
+                ))
+            rows.append(layouts[occupied])
+        return tuple(rows)
+
+    def _compile_candidate_wiring(self, candidates):
+        from .formula_program_call import FormulaProgramCallCandidateV1
+        from .formula_program_query_v5 import FormulaProgramTensorCandidateV4
+
+        builtins = (FormulaProgramTensorCandidateV3, FormulaProgramTensorCandidateV4,
+                    FormulaProgramEffectCandidateV3, FormulaProgramCallCandidateV1)
+        bits = {slot: 1 << i for i, slot in enumerate(self.slot_ids)}
+        groups: dict[tuple[int, int], list[int]] = {}
+        for i, candidate in enumerate(candidates):
+            if type(candidate) in builtins and not any(
+                name in candidate.__dict__ for name in ("accepts", "_bindings", "_entry")
+            ):
+                try:
+                    required = sum(bits[slot] for slot in set(candidate.input_slots.values()))
+                    empty = sum(bits[slot] for slot in set((*candidate.output_slot_ids, *candidate.requires_empty_slots)))
+                except KeyError:
+                    required = empty = 0
+            else:
+                required = empty = 0
+            groups.setdefault((required, empty), []).append(i)
+        return groups
+
+    def _has_eligible(self, arena: _FormulaProgramExecutionArenaV4, *, steps: int) -> bool:
+        """Existence check only; actual dispatch still scores the entire legal set."""
+        if self._stop_eligible(arena, steps=steps):
+            return True
+        return any(self._candidate_eligible(self.candidates[i], arena, steps=steps)
+                   for i in self._structural_candidates((arena,))[0])
+
     def eligible(self, arena: _FormulaProgramExecutionArenaV4, *, steps: int) -> Tensor:
+        from ._formula_candidate_admission import candidate_mask
+
         if arena.values.slot_ids != self.slot_ids:
             raise ValueError("arena layout does not match ProgramQuery@4")
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
             raise ValueError("steps must be a non-negative integer")
-        candidates = [
-            steps < self.max_steps and candidate.accepts(arena)
-            for candidate in self.candidates
-        ]
-        stop = steps >= self.min_steps and arena.values.get(self.terminal_slot) is not None
-        return torch.tensor((*candidates, stop), dtype=torch.bool, device=arena.device)
+        return candidate_mask(self, (arena,), self.candidates, steps=steps, include_stop=True)[0]
 
     def _summarize(self, arena: _FormulaProgramExecutionArenaV4) -> Tensor:
         return self._summarize_values(arena.values)
@@ -953,6 +1309,11 @@ class FormulaProgramQueryV4(nn.Module):
         parameter = next(self.network.parameters())
         if arena.device != parameter.device:
             raise ValueError("arena and FormulaProgramQuery must share device")
+        if _native_summary_encoder(self.tensor_encoder) and all(
+            value is None or type(value) in (Tensor, nn.Parameter) and value.layout == torch.strided
+            for value in arena.values
+        ):
+            return self._summarize_native_values(arena, parameter)
         rows: list[Tensor] = []
         for value in arena.values:
             if value is None:
@@ -976,24 +1337,45 @@ class FormulaProgramQueryV4(nn.Module):
             numeric = value.to(dtype=parameter.dtype).reshape(arena.batch_size, -1)
             if not bool(torch.isfinite(numeric).all()):
                 raise ValueError("ProgramQuery arena values must be finite")
-            rows.append(
-                torch.cat(
-                    (
-                        numeric.new_ones((arena.batch_size, 1)),
-                        numeric.mean(dim=-1, keepdim=True),
-                        numeric.std(dim=-1, unbiased=False, keepdim=True),
-                        numeric.abs().mean(dim=-1, keepdim=True),
-                        numeric.amax(dim=-1, keepdim=True),
-                        numeric.amin(dim=-1, keepdim=True),
-                        numeric.square().mean(dim=-1, keepdim=True).sqrt(),
-                        numeric.new_full(
-                            (arena.batch_size, 1),
-                            math.log1p(numeric.shape[-1]),
-                        ),
-                    ),
-                    dim=-1,
-                )
-            )
+            rows.append(_numeric_summary(numeric))
+        return torch.cat(rows, dim=-1)
+
+    def _summarize_native_values(self, arena: FormulaProgramArena, parameter: Tensor) -> Tensor:
+        encoder = self.tensor_encoder
+        numeric = tuple(
+            None if value is None else
+            value.to(dtype=parameter.dtype).reshape(arena.batch_size, -1) if encoder is None else
+            encoder._prepare_tokens(value)
+            for value in arena.values
+        )
+        checks = _FiniteTensorRows()
+        checks.add(value for value in numeric if value is not None)
+        # One boundary read for the complete summary, not one per live SSA slot.
+        if not bool(checks.evaluate(device=parameter.device).all()):
+            raise ValueError("ProgramQuery arena values must be finite" if encoder is None
+                             else "Query tensor encoder input must be non-empty and finite")
+        width = _SUMMARY_WIDTH if encoder is None else encoder.output_width
+        empty = parameter.new_zeros((arena.batch_size, width))
+        rows = [empty] * len(numeric)
+        if encoder is not None:
+            # Preserve each GEMM shape and parameter-gradient accumulation order.
+            for index, value in enumerate(numeric):
+                if value is not None:
+                    rows[index] = encoder._encode_tokens(value)
+        else:
+            groups = {}
+            for index, value in enumerate(numeric):
+                if value is not None:
+                    groups.setdefault(value.shape[-1], []).append((index, value))
+            for group in groups.values():
+                # Bound the temporary copy independently of arena capacity.
+                count = max(1, 262144 // max(1, group[0][1].numel()))
+                for start in range(0, len(group), count):
+                    chunk = group[start:start + count]
+                    packed = chunk[0][1] if len(chunk) == 1 else torch.cat(tuple(value for _, value in chunk))
+                    summaries = _numeric_summary(packed).split(arena.batch_size)
+                    for (index, _), summary in zip(chunk, summaries, strict=True):
+                        rows[index] = summary
         return torch.cat(rows, dim=-1)
 
     def query(
@@ -1005,12 +1387,19 @@ class FormulaProgramQueryV4(nn.Module):
         eligible = self.eligible(arena, steps=steps)
         if not bool(eligible.any()):
             raise RuntimeError("ProgramQuery has no shape-valid candidate or valid stop")
-        logits = self.network(self._summarize(arena))
+        logits = self.query_logits(arena)
         return FormulaProgramQueryResult(
             logits,
             logits.masked_fill(~eligible.unsqueeze(0), -torch.inf),
             eligible,
         )
+
+    def query_logits(self, arena: _FormulaProgramExecutionArenaV4) -> Tensor:
+        """Produce scores without dispatching a candidate or applying an effect."""
+        return self.network(self._summarize(arena))
+
+    def routing_mask(self, arena: _FormulaProgramExecutionArenaV4, *, steps: int) -> Tensor:
+        return torch.ones(len(self.action_ids), dtype=torch.bool, device=arena.device)
 
     def _hard_index(self, masked_logits: Tensor) -> int:
         if masked_logits.shape[0] != 1:
@@ -1020,23 +1409,43 @@ class FormulaProgramQueryV4(nn.Module):
         priority = torch.where(maxima, self._action_priority, sentinel)
         return int(priority.argmin().item())
 
+    def _walk(
+        self,
+        values: Mapping[str, Tensor],
+        *,
+        bank_state: FormulaProgramBankState | None = None,
+    ) -> Iterator[tuple[int, FormulaProgramSearchCandidateV4 | None, _FormulaProgramExecutionArenaV4]]:
+        if not isinstance(values, Mapping):
+            raise TypeError("values must be an SSA input mapping")
+        arena = self._arena(values, bank_state=bank_state)
+        yield from self._walk_arena(arena)
+
+    def _walk_arena(
+        self, arena: _FormulaProgramExecutionArenaV4,
+    ) -> Iterator[tuple[int, FormulaProgramSearchCandidateV4 | None, _FormulaProgramExecutionArenaV4]]:
+        if arena.batch_size != 1:
+            raise ValueError("hard ProgramQuery execution currently requires batch size one")
+        steps = 0
+        while True:
+            result = self.query(arena, steps=steps)
+            selected = self._hard_index(result.masked_logits)
+            if selected == len(self.candidates):
+                yield steps, None, arena
+                return
+            candidate = self.candidates[selected]
+            arena = candidate(arena)
+            yield steps, candidate, arena
+            steps += 1
+
     def forward(
         self,
         values: Mapping[str, Tensor],
         *,
         bank_state: FormulaProgramBankState | None = None,
     ) -> FormulaProgramQueryExecutionV4:
-        if not isinstance(values, Mapping):
-            raise TypeError("values must be an SSA input mapping")
-        arena = self._arena(values, bank_state=bank_state)
-        if arena.batch_size != 1:
-            raise ValueError("hard ProgramQuery execution currently requires batch size one")
         trace: list[FormulaProgramQueryTraceStepV4] = []
-        steps = 0
-        while True:
-            result = self.query(arena, steps=steps)
-            selected = self._hard_index(result.masked_logits)
-            if selected == len(self.candidates):
+        for steps, candidate, arena in self._walk(values, bank_state=bank_state):
+            if candidate is None:
                 value = arena.values.get(self.terminal_slot)
                 assert value is not None
                 trace.append(FormulaProgramQueryTraceStepV4(steps, "stop", None, (), None))
@@ -1047,8 +1456,6 @@ class FormulaProgramQueryV4(nn.Module):
                     FormulaProgramQueryTraceV4(tuple(trace), True),
                     self._owner_token,
                 )
-            candidate = self.candidates[selected]
-            arena = candidate(arena)
             proposal = (
                 arena.proposals[-1]
                 if isinstance(candidate, FormulaProgramEffectCandidateV3)
@@ -1068,7 +1475,7 @@ class FormulaProgramQueryV4(nn.Module):
                     None if proposal is None else proposal.successor_revision,
                 )
             )
-            steps += 1
+        raise RuntimeError("ProgramQuery execution ended without STOP")
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import fields
 
 import pytest
 import torch
@@ -11,7 +12,7 @@ import arti
 from arti import mechanisms
 
 
-SOURCE_REF = "arti/vouroboros-predecessor-bank@1"
+SOURCE_REF = "arti/test-predecessor-bank@1"
 SLOTS = ("x", "primary", "decoy", "after-effect")
 
 
@@ -414,6 +415,24 @@ def test_bank_state_is_canonical_and_commit_survives_fresh_reload() -> None:
     assert restored_decoy.bank_slot_ref == decoy.bank_slot_ref
 
 
+def test_bank_position_index_does_not_cache_values_or_revisions() -> None:
+    query, primary, decoy, _effect_candidate = _query()
+    original = query.initial_bank_state()
+    ref = primary.bank_slot_ref
+    before = original.value(ref)
+    assert original._index(ref) == original.slot_refs.index(ref)
+    successor = before + 1
+    changed = original.replace(ref, successor, revision=original.revision(ref) + 1)
+    assert changed.value(ref) is successor
+    assert original.value(ref) is before
+    assert changed.revision(ref) == original.revision(ref) + 1
+    assert changed.value(decoy.bank_slot_ref) is original.value(decoy.bank_slot_ref)
+    assert changed._slot_positions is not original._slot_positions
+    assert tuple(field.name for field in fields(original)) == ("slot_refs", "values", "revisions")
+    with pytest.raises(KeyError):
+        mechanisms.FormulaProgramBankState.empty().value(ref)
+
+
 def test_helpful_losing_effect_cannot_leak_into_committed_winner() -> None:
     query, primary, _decoy, effect = _query()
     support = torch.tensor([[1.5, -0.75, 0.5]])
@@ -462,6 +481,62 @@ def test_helpful_losing_effect_cannot_leak_into_committed_winner() -> None:
         winner_output,
         helpful_output,
     )
+
+
+def test_bank_replacement_sequence_keeps_order_identity_and_gradients() -> None:
+    query, primary, decoy, _effect = _query()
+    initial = query.initial_bank_state()
+    leaves = tuple(value.detach().clone().requires_grad_() for value in initial.values)
+    initial = mechanisms.FormulaProgramBankState(initial.slot_refs, leaves, initial.revisions)
+    p_ref, d_ref = primary.bank_slot_ref, decoy.bank_slot_ref
+    p, d = initial.value(p_ref), initial.value(d_ref)
+    first = 2 * p
+    other = d * 0.5
+    last = first.square() + other.sum()
+    updates = ((p_ref, first, 1), (d_ref, other, 1), (p_ref, last, 2))
+    serial = initial
+    for ref, value, revision in updates:
+        serial = serial.replace(ref, value, revision=revision)
+    together = initial._replace_sequence(iter(updates))
+
+    assert together.slot_refs == serial.slot_refs == initial.slot_refs
+    assert together.revisions == serial.revisions
+    assert together.revision(p_ref) == 2
+    assert together.revision(d_ref) == 1
+    for ref in initial.slot_refs:
+        assert together.value(ref) is serial.value(ref)
+        if ref not in (p_ref, d_ref):
+            assert together.value(ref) is initial.value(ref)
+    assert together.value(p_ref) is last
+    assert together.value(d_ref) is other
+    assert initial.value(p_ref) is p
+    assert initial.value(d_ref) is d
+    assert initial.revision(p_ref) == initial.revision(d_ref) == 0
+
+    gradients = torch.autograd.grad(together.value(p_ref).sum(), (p, d))
+    torch.testing.assert_close(gradients[0], 8 * p)
+    torch.testing.assert_close(gradients[1], torch.full_like(d, 0.5 * p.numel()))
+
+
+@pytest.mark.parametrize("invalid", ("shape", "dtype", "revision", "decreasing"))
+def test_bank_replacement_sequence_validates_intermediate_updates(invalid: str) -> None:
+    query, primary, _decoy, _effect = _query()
+    initial = query.initial_bank_state()
+    ref = primary.bank_slot_ref
+    value = initial.value(ref)
+    updates = [(ref, value + 1, 1), (ref, value + 2, 2)]
+    if invalid == "shape":
+        updates[0] = (ref, value.flatten(), 1)
+    elif invalid == "dtype":
+        updates[0] = (ref, value.double(), 1)
+    elif invalid == "revision":
+        updates[0] = (ref, value + 1, True)
+    else:
+        updates[0] = (ref, value + 1, 3)
+    with pytest.raises(ValueError, match="successor"):
+        initial._replace_sequence(iter(updates))
+    assert initial.value(ref) is value
+    assert initial.revision(ref) == 0
 
 
 def test_plastic_program_slot_cannot_also_be_optimizer_trainable() -> None:

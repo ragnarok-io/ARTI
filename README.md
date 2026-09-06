@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.13a3"
+uv add "arti-fit==3.0.13a4"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.13a3"
-uv add "arti-fit[qwen]==3.0.13a3"
-uv add "arti-fit[sd]==3.0.13a3"
-uv add "arti-fit[web]==3.0.13a3"
+uv add "arti-fit[jax]==3.0.13a4"
+uv add "arti-fit[qwen]==3.0.13a4"
+uv add "arti-fit[sd]==3.0.13a4"
+uv add "arti-fit[web]==3.0.13a4"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,9 +41,27 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Alpha 3.0.13a3
+## Alpha 3.0.13a4
 
-This prerelease adds `FormulaProgramQueryV4.execute_many(...)`: compatible
+This prerelease adds automatic CUDA grouped Formula forward/backward execution and
+prepared typed device dispatch. Compatible numerical groups can be compiled
+individually or as one ordinary dispatch graph before CUDA Graph capture.
+On supported CUDA environments, the first uncaptured call prepares compiled
+execution and later calls reuse it. The caller owns the capture boundary;
+fixed forward, loss and first-order gradient computation can share one graph.
+CPU and older PyTorch retain native execution. Explicit native mode is available
+for debugging. Neither grouping nor compilation changes Formula mathematics or Bank ownership.
+
+The execution foundation includes named-output and nested program candidates,
+typed pools, device-side routing, and the versioned Formula operands they use.
+Low-level acceleration interfaces remain experimental. Automatic compilation
+requires PyTorch 2.11 or newer. Compiled and captured
+paths require an appropriate PyTorch/compiler/device environment; they are not
+an automatic speed guarantee for arbitrary dynamic models or optimizer steps.
+See [prepared execution](docs/formula-fabric.md#prepared-numerical-group-compilation)
+and the [grouped training example](examples/grouped_formula_training.py).
+
+The preceding release added `FormulaProgramQueryV4.execute_many(...)`: compatible
 inference candidates share a checked Formula execution plan, with optional
 chunking before input stacking. Training keeps each candidate's autograd graph
 independent while aggregating finite-value checks. Immutable program fingerprints
@@ -295,8 +313,9 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a3
-新增候选分组推理、独立训练计算图的汇总校验和不可变程序指纹缓存，并保留
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a4
+在受支持的 CUDA 环境默认启用 Formula 分组前向与反向及 typed device dispatch 融合，
+并提供固定计算片段的 CUDA Graph 执行支持。张量、梯度和 Bank 归属语义保持不变，并保留
 在 3.0.12 稳定表面之上完成的 alpha 级 NeuralPlasticity 前序 Bank 写回纠正与
 可搜索的自修改程序拓扑：网络从局部候选中学习自修改节点的数量、顺序、位置
 和连接，而不是由调用者预先拼好完整链。应用负责张量的业务语义，ARTI 负责

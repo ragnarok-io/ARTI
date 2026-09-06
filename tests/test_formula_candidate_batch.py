@@ -177,6 +177,62 @@ def test_intermediate_nonfinite_is_rejected_even_after_tanh(monkeypatch):
 
 
 @pytest.mark.parametrize("serial", [False, True])
+@pytest.mark.parametrize("grad", [False, True])
+def test_search_rejects_only_nonfinite_rows_and_keeps_valid_gradients(serial, grad):
+    good = _ordinary("good", weight=torch.ones(1, 3), saturate=True)
+    bad = _ordinary("bad", weight=torch.full((1, 3), 1e20), saturate=True)
+    query = _query((good, bad))
+    with torch.set_grad_enabled(grad):
+        x = torch.full((1, 3), 1e20, requires_grad=grad)
+        arena = query._arena({"x": x})
+        requests = ((good, arena), (bad, arena), (good, arena))
+        results = batch.execute_many(requests, serial=serial, reject_nonfinite=True)
+        assert results[1] is None
+        for index in (0, 2):
+            torch.testing.assert_close(results[index].values.get("terminal"), torch.ones(1, 3))
+        assert arena.values.get("terminal") is None
+        if grad:
+            results[0].values.get("terminal").sum().backward()
+            assert bad.candidate.operand_store.tensor("weight").grad is None
+            assert torch.isfinite(x.grad).all()
+
+
+@pytest.mark.parametrize("serial", [False, True])
+def test_search_rejection_does_not_hide_dtype_or_custom_errors(serial):
+    candidate = _ordinary("dtype", dtype="floating", weight=torch.ones(1, 3, dtype=torch.float64))
+    query = _query((candidate,))
+    arena = query._arena({"x": torch.ones(1, 3)})
+    with pytest.raises(m.FormulaBindingError) as error:
+        batch.execute_many(((candidate, arena),), serial=serial, reject_nonfinite=True)
+    assert error.value.code == "FF2_RUNTIME_DTYPE_MISMATCH"
+
+    def broken(_arena):
+        raise RuntimeError("implementation error")
+
+    candidate.forward = broken
+    with pytest.raises(RuntimeError, match="implementation error"):
+        batch.execute_many(((candidate, arena),), serial=serial, reject_nonfinite=True)
+
+
+@pytest.mark.parametrize("serial", [False, True])
+def test_finite_operands_cannot_commit_overflowing_successor(serial):
+    first = _ordinary("first", "x", "made", owner="owner", weight=torch.full((1, 3), 1e20))
+    effect = _effect("effect", "made", "terminal")
+    query = _query((first, effect), slots=("x", "made", "terminal"))
+    with torch.no_grad():
+        effect.operand_store.tensor("gain").fill_(1e20)
+        root = first(query._arena({"x": torch.full((1, 3), 1e-20)}))
+        assert torch.isfinite(root.values.get("made")).all()
+        with pytest.raises(m.FormulaBindingError) as error:
+            batch.execute_many(((effect, root),), serial=serial)
+        assert error.value.code == "FF2_NONFINITE"
+        result = batch.execute_many(((effect, root),), serial=serial, reject_nonfinite=True)
+        assert result == (None,)
+    assert root.proposals == ()
+    assert root.bank_state.revision(first.bank_slot_ref) == 0
+
+
+@pytest.mark.parametrize("serial", [False, True])
 def test_runtime_instruction_dtype_checks_are_not_skipped(serial):
     candidate = _ordinary("dtype", dtype="floating", weight=torch.ones(1, 3, dtype=torch.float64))
     query = _query((candidate,))
@@ -424,3 +480,143 @@ def test_empty_and_foreign_requests():
     assert query.execute_many(()) == ()
     with pytest.raises(ValueError, match="belong"):
         query.execute_many(((_ordinary("foreign"), query._arena({"x": torch.ones(1, 3)})),))
+
+
+def _prepared_effect_rows(effects, root):
+    rows = []
+    for effect in effects:
+        prepared = batch._prepare(effect, root)
+        plan = batch._checked_plan(batch._program(effect))
+        outputs, finite = batch._run_single(prepared, plan)
+        assert bool(finite)
+        rows.append(((effect, root), prepared, dict(zip(plan.program.outputs, outputs, strict=True))))
+    return tuple(rows)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("count", [False, True])
+def test_deferred_effect_checks_preserve_independent_graphs(device, count):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    first = _ordinary("first", "x", "made", owner="owner")
+    selected, unused = _effect("selected", count=count), _effect("unused", count=count)
+    query = _query((first, selected, unused), slots=("x", "made", "changed", "terminal")).to(device)
+    value = torch.ones(1, 3, device=device, requires_grad=True)
+    root = first(query._arena({"x": value}))
+    rows = _prepared_effect_rows((selected, unused), root)
+    expected = tuple(batch._finish_checked(*row, reject_nonfinite=True) for row in rows)
+    actual = batch._finish_many_checked(rows, reject_nonfinite=True)
+    parameters = (value, selected.operand_store.tensor("writer"), unused.operand_store.tensor("writer"))
+    if count:
+        parameters += (selected.execution_count, unused.execution_count)
+    gradients = []
+    for results in (expected, actual):
+        gradients.append(torch.autograd.grad(
+            results[0].proposals[-1].successor.sum(), parameters,
+            allow_unused=True, retain_graph=True,
+        ))
+        assert results[0].values.get("changed") is root.values.get("made")
+    for reference, result in zip(expected, actual, strict=True):
+        torch.testing.assert_close(result.proposals[-1].successor, reference.proposals[-1].successor, rtol=0, atol=0)
+        assert result.proposals[-1].target == first.bank_slot_ref
+    for reference, actual_gradient in zip(*gradients, strict=True):
+        assert (reference is None) == (actual_gradient is None)
+        if reference is not None:
+            torch.testing.assert_close(actual_gradient, reference, rtol=0, atol=0)
+    assert gradients[1][2] is None
+    if count:
+        assert gradients[1][-1] is None
+    assert first.initial_revision() == 0
+
+
+def test_deferred_effect_checks_reduce_cuda_scalar_receipts():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class ScalarReads(TorchDispatchMode):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.aten._local_scalar_dense.default and args[0].is_cuda:
+                self.count += 1
+            return func(*args, **(kwargs or {}))
+
+    first = _ordinary("first", "x", "made", owner="owner")
+    effects = (_effect("a"), _effect("b"))
+    query = _query((first, *effects), slots=("x", "made", "changed", "terminal")).cuda()
+    root = first(query._arena({"x": torch.ones(1, 3, device="cuda")}))
+    rows = _prepared_effect_rows(effects, root)
+    with ScalarReads() as serial_reads:
+        expected = tuple(batch._finish_checked(*row, reject_nonfinite=True) for row in rows)
+    with ScalarReads() as deferred_reads:
+        actual = batch._finish_many_checked(rows, reject_nonfinite=True)
+    assert serial_reads.count >= 8
+    # The grouped verdict is one vector transfer, not per-Tensor scalar reads.
+    assert deferred_reads.count == 0
+    for reference, result in zip(expected, actual, strict=True):
+        torch.testing.assert_close(result.proposals[-1].successor, reference.proposals[-1].successor, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_deferred_effect_checks_reject_overflow_without_poisoning_neighbor(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    first = _ordinary("first", "x", "made", owner="owner", weight=torch.full((1, 3), 1e20))
+    good, bad = _effect("good"), _effect("bad")
+    query = _query((first, good, bad), slots=("x", "made", "changed", "terminal")).to(device)
+    with torch.no_grad():
+        bad.operand_store.tensor("gain").fill_(1e20)
+    root = first(query._arena({"x": torch.full((1, 3), 1e-20, device=device)}))
+    results = batch.execute_many(((good, root), (bad, root)), reject_nonfinite=True)
+    assert results[0] is not None and results[1] is None
+    results[0].proposals[-1].successor.sum().backward()
+    assert torch.isfinite(good.operand_store.tensor("writer").grad).all()
+    assert bad.operand_store.tensor("writer").grad is None
+    assert root.proposals == () and first.initial_revision() == 0
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_deferred_effect_checks_keep_finite_count_surrogate_prefix(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    first = _ordinary("first", "x", "made", owner="owner")
+    effect = _effect("effect", count=True)
+    query = _query((first, effect), slots=("x", "made", "changed", "terminal")).to(device)
+    with torch.no_grad():
+        effect.operand_store.tensor("gain").fill_(1e20)
+    root = first(query._arena({"x": torch.ones(1, 3, device=device)}))
+    rows = _prepared_effect_rows((effect,), root)
+    reference = batch._finish_checked(*rows[0], reject_nonfinite=True)
+    result = batch._finish_many_checked(rows, reject_nonfinite=True)[0]
+    assert result is not None  # Hard count=1 is finite; unselected count=2 overflows.
+    torch.testing.assert_close(result.proposals[-1].successor, reference.proposals[-1].successor, rtol=0, atol=0)
+    expected = torch.autograd.grad(reference.proposals[-1].successor.sum(), effect.execution_count, retain_graph=True)[0]
+    actual = torch.autograd.grad(result.proposals[-1].successor.sum(), effect.execution_count)[0]
+    assert torch.isfinite(actual)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("method", ["_finish", "_target", "_proposal", "execution_count_tensor", "apply"])
+def test_overridden_effect_finish_does_not_capture_checks(monkeypatch, method):
+    from arti import formula_v2
+
+    first = _ordinary("first", "x", "made", owner="owner")
+    effect = _effect("effect")
+    query = _query((first, effect), slots=("x", "made", "changed", "terminal"))
+    root = first(query._arena({"x": torch.ones(1, 3)}))
+    rows = _prepared_effect_rows((effect,), root)
+    owner, name = (batch.query_runtime, "apply_neural_plasticity_effect") if method == "apply" else (type(effect), method)
+    original = getattr(owner, name)
+    calls = []
+
+    def custom(*args, **kwargs):
+        calls.append(True)
+        assert formula_v2._FINITE_VALIDATION_CAPTURE.get() is None
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, custom)
+    assert batch._finish_many_checked(rows, reject_nonfinite=True)[0] is not None
+    assert calls

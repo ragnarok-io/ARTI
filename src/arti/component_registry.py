@@ -1353,6 +1353,7 @@ def _build_default_registry() -> ComponentRegistry:
     from .formula_v2 import (
         AddAtom,
         BroadcastAtom,
+        CastAtom,
         ConcatAtom,
         ContractAtom,
         FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF,
@@ -1365,9 +1366,11 @@ def _build_default_registry() -> ComponentRegistry:
         MaskedSoftmaxAtom,
         PermuteAtom,
         ReduceAtom,
+        ReduceAtomV2,
         ReshapeAtom,
         ScaleAtom,
         ScalarMapAtom,
+        ScalarMapAtomV2,
         ScatterAtom,
         SelectAtom,
         SliceAtom,
@@ -1478,6 +1481,12 @@ def _build_default_registry() -> ComponentRegistry:
         FormulaProgramQueryV4,
         FormulaProgramTensorCandidateV3,
     )
+    from .formula_program_query_v5 import (
+        FormulaProgramCandidateV3,
+        FormulaProgramQueryV5,
+        FormulaProgramTensorCandidateV4,
+    )
+    from .formula_program_call import FormulaProgramCallCandidateV1
     from .terminal_abi import (
         BankExecutionSignature,
         BankExecutionSignatureV2,
@@ -2114,6 +2123,45 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
+        "arti/formula-atom-reduce@2",
+        ReduceAtomV2,
+        lifecycle="alpha",
+        variant="native-named-axis-floating-reduction",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "axis": component.axis,
+            "mode": component.mode,
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
+        "arti/formula-atom-cast@1",
+        CastAtom,
+        lifecycle="alpha",
+        variant="typed-explicit-floating-conversion",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "dtype": component.dtype,
+        },
+    )
+    add(
+        "arti/formula-atom-scalar-map@2",
+        ScalarMapAtomV2,
+        lifecycle="alpha",
+        variant="typed-compute-precision-scalar-function",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: {
+            "value_type": component.value_type.to_dict(),
+            "output_type": component.output_type.to_dict(),
+            "mode": component.mode,
+            "accumulation_dtype": component.accumulation_dtype,
+        },
+    )
+    add(
         "arti/formula-atom-permute@1",
         PermuteAtom,
         lifecycle=stable,
@@ -2248,6 +2296,39 @@ def _build_default_registry() -> ComponentRegistry:
             "accumulation_dtype": component.accumulation_dtype,
         },
     )
+    from .formula_observation import OBSERVATION_ATOM_CLASSES
+
+    for reference, atom_class in OBSERVATION_ATOM_CLASSES.items():
+        add(
+            reference,
+            atom_class,
+            lifecycle=stable,
+            variant="typed-original-substrate-observation",
+            capabilities=("formula.fabric.observation", "formula.fabric.typed-atom"),
+            config_builder=lambda component: component.component_config(),
+        )
+    from .formula_indexing import INDEX_ATOM_CLASSES
+
+    from .formula_window import WindowAtom
+    from .formula_scan import FormulaScan
+
+    add(
+        "arti/formula-scan@1", FormulaScan, lifecycle="alpha", variant="shared-body-ordered-sequence-scan",
+        capabilities=("formula.fabric.scan",), config_builder=lambda component: component.to_dict(),
+        dependency_builder=lambda component: formula_program_dependency_refs(component.body),
+    )
+
+    add(
+        "arti/formula-atom-window@1", WindowAtom, lifecycle="alpha", variant="typed-local-window",
+        capabilities=("formula.fabric.typed-atom",),
+        config_builder=lambda component: component.component_config(),
+    )
+    for reference, atom_class in INDEX_ATOM_CLASSES.items():
+        add(
+            reference, atom_class, lifecycle="alpha", variant="typed-index-mask-segment",
+            capabilities=("formula.fabric.typed-atom",),
+            config_builder=lambda component: component.component_config(),
+        )
     add(
         "arti/formula-fabric@2",
         FormulaFabricV2,
@@ -3235,6 +3316,93 @@ def _build_default_registry() -> ComponentRegistry:
             "formula.program-query.hard-one",
             "formula.program-query.latest-arena-requery",
             "formula.program-query.shape-valid",
+        ),
+    )
+    add(
+        "arti/formula-program-candidate@3",
+        FormulaProgramCandidateV3,
+        lifecycle="alpha",
+        variant="named-multi-output-subprogram",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=("formula.program-query.candidate", "formula.program-query.named-outputs"),
+    )
+    add(
+        "arti/formula-program-tensor-candidate@4",
+        FormulaProgramTensorCandidateV4,
+        lifecycle="alpha",
+        variant="multi-output-per-port-predecessor-bank-lineage",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_tensor_candidate_v3_dependencies,
+        capabilities=(
+            "formula.program-query.branch-overlay-read",
+            "formula.program-query.named-outputs",
+            "formula.program-query.predecessor-bank-slot-owner",
+        ),
+    )
+    from .formula_program_query_v6 import FormulaProgramQueryV6
+    from .formula_program_query_v7 import FormulaProgramQueryV7
+
+    add(
+        "arti/formula-program-query@7",
+        FormulaProgramQueryV7,
+        lifecycle="alpha",
+        variant="finite-binding-cooperative-ssa-frontiers",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_query_v4_dependencies,
+        capabilities=(
+            "formula.program-query.completed-frontier-products",
+            "formula.program-query.executed-response-frontier",
+            "formula.program-query.multi-parent-replay",
+            "formula.program-query.named-outputs",
+        ),
+    )
+
+    add(
+        "arti/formula-program-query@6",
+        FormulaProgramQueryV6,
+        lifecycle="alpha",
+        variant="federation-executed-continuation-responses",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_query_v4_dependencies,
+        capabilities=(
+            "formula.program-query.all-heads-stop",
+            "formula.program-query.branch-overlay-read-write",
+            "formula.program-query.executed-response-frontier",
+            "formula.program-query.named-outputs",
+        ),
+    )
+    add(
+        "arti/formula-program-query@5",
+        FormulaProgramQueryV5,
+        lifecycle="alpha",
+        variant="named-output-predecessor-bank-self-operation-query",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_formula_program_query_v4_dependencies,
+        capabilities=(
+            "formula.program-query.all-heads-stop",
+            "formula.program-query.branch-overlay-read-write",
+            "formula.program-query.named-outputs",
+            "formula.program-query.winner-bank-state",
+        ),
+    )
+    add(
+        "arti/formula-program-call-candidate@1",
+        FormulaProgramCallCandidateV1,
+        lifecycle="alpha",
+        variant="complete-child-query-named-call-return",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.child),),
+        capabilities=(
+            "formula.program-query.child-call",
+            "formula.program-query.functional-state-return",
+            "formula.program-query.named-outputs",
         ),
     )
     add(
@@ -5464,16 +5632,38 @@ def _validate_vnext_dependency_closure(
             )
         return
 
+    if reference == "arti/formula-scan@1":
+        from .formula_scan import FormulaScan
+        from .formula_v2 import formula_program_dependency_refs
+
+        try:
+            scan = FormulaScan.from_dict(config)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ComponentCompatibilityError("Scan config is invalid") from exc
+        if dependencies != sorted(formula_program_dependency_refs(scan.body)):
+            raise ComponentCompatibilityError("Scan body dependencies differ")
+        return
+
+    from .formula_observation import OBSERVATION_ATOM_CLASSES
+
+    from .formula_indexing import INDEX_ATOM_CLASSES
+
     formula_atom_refs = {
+        "arti/formula-atom-window@1",
+        *INDEX_ATOM_CLASSES,
+        *OBSERVATION_ATOM_CLASSES,
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
         "arti/formula-atom-add@1",
         "arti/formula-atom-reduce@1",
+        "arti/formula-atom-reduce@2",
         "arti/formula-atom-reshape@1",
         "arti/formula-atom-permute@1",
         "arti/formula-atom-gather@1",
         "arti/formula-atom-scatter@1",
         "arti/formula-atom-scalar-map@1",
+        "arti/formula-atom-scalar-map@2",
+        "arti/formula-atom-cast@1",
         "arti/formula-atom-broadcast@1",
         "arti/formula-atom-select@1",
         "arti/formula-atom-lookup@1",
@@ -5605,6 +5795,7 @@ def _validate_vnext_dependency_closure(
         from .formula_v2 import (
             AddAtom,
             BroadcastAtom,
+            CastAtom,
             ConcatAtom,
             ContractAtom,
             GatherAtom,
@@ -5612,9 +5803,11 @@ def _validate_vnext_dependency_closure(
             MaskedSoftmaxAtom,
             PermuteAtom,
             ReduceAtom,
+            ReduceAtomV2,
             ReshapeAtom,
             ScaleAtom,
             ScalarMapAtom,
+            ScalarMapAtomV2,
             ScatterAtom,
             SelectAtom,
             SliceAtom,
@@ -5624,7 +5817,32 @@ def _validate_vnext_dependency_closure(
         if not isinstance(config, Mapping) or dependencies:
             raise ComponentCompatibilityError("Formula atom config or dependency closure is invalid")
         try:
-            if reference == "arti/formula-atom-contract@1":
+            if reference == "arti/formula-atom-window@1":
+                from .formula_window import WindowAtom
+
+                if set(config) != {"value_type", "output_type", "attributes"}:
+                    raise ValueError("window config fields")
+                atom = WindowAtom(TensorType.from_dict(config["value_type"]), **config["attributes"])
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("window output type")
+            elif reference in INDEX_ATOM_CLASSES:
+                if set(config) != {"operand_types", "output_type", "attributes"}:
+                    raise ValueError("indexing config fields")
+                atom = INDEX_ATOM_CLASSES[reference](
+                    tuple(TensorType.from_dict(t) for t in config["operand_types"]), **config["attributes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("indexing output type")
+            elif reference in OBSERVATION_ATOM_CLASSES:
+                if set(config) != {"operand_types", "output_type", "attributes"}:
+                    raise ValueError("observation config fields")
+                atom = OBSERVATION_ATOM_CLASSES[reference](
+                    tuple(TensorType.from_dict(t) for t in config["operand_types"]),
+                    **config["attributes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("observation output type")
+            elif reference == "arti/formula-atom-contract@1":
                 required = {
                     "left_type",
                     "right_type",
@@ -5692,6 +5910,36 @@ def _validate_vnext_dependency_closure(
                 )
                 if atom.output_type.to_dict() != config["output_type"]:
                     raise ValueError("reshape output type")
+            elif reference == "arti/formula-atom-reduce@2":
+                required = {
+                    "value_type",
+                    "output_type",
+                    "axis", "mode", "accumulation_dtype",
+                }
+                if set(config) != required:
+                    raise ValueError("reduce@2 config fields")
+                atom = ReduceAtomV2(
+                    TensorType.from_dict(config["value_type"]),
+                    axis=config["axis"], mode=config["mode"],
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("reduce@2 output type")
+            elif reference == "arti/formula-atom-cast@1":
+                if set(config) != {"value_type", "output_type", "dtype"}:
+                    raise ValueError("cast config fields")
+                atom = CastAtom(TensorType.from_dict(config["value_type"]), dtype=config["dtype"])
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("cast output type")
+            elif reference == "arti/formula-atom-scalar-map@2":
+                if set(config) != {"value_type", "output_type", "mode", "accumulation_dtype"}:
+                    raise ValueError("scalar map@2 config fields")
+                atom = ScalarMapAtomV2(
+                    TensorType.from_dict(config["value_type"]), mode=config["mode"],
+                    accumulation_dtype=config["accumulation_dtype"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("scalar map@2 output type")
             elif reference == "arti/formula-atom-permute@1":
                 required = {"value_type", "output_type", "output_axes"}
                 if set(config) != required:

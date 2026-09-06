@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import gc
+import weakref
 from dataclasses import asdict, fields, replace
 
 import pytest
@@ -73,6 +75,90 @@ def test_program_cache_is_not_a_dataclass_or_serialized_field() -> None:
     assert lookup[restored] == "original"
     assert "fingerprint" not in vars(restored)
     assert restored.fingerprint == program.fingerprint
+
+
+def test_binding_plan_reuses_only_metadata_and_keeps_current_values(monkeypatch) -> None:
+    program = _program()
+    fabric = mechanisms.FormulaFabricV2(program)
+    inputs, banks = _values(program)
+    fabric.bind_tensors(inputs=inputs, banks=banks)
+    latest_inputs, latest_banks = _values(program)
+    with torch.no_grad():
+        latest_banks["weight"].value.add_(1.0)
+
+    def redundant(*args, **kwargs):
+        raise AssertionError("identical binding metadata was revalidated")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(formula_v2, "_validate_tensor_metadata_against_type", redundant)
+        patch.setattr(formula_v2, "_preflight_program_shapes", redundant)
+        prepared = fabric.bind_tensors(inputs=latest_inputs, banks=latest_banks)
+    bound = dict(zip(prepared.binding_names, prepared.values, strict=True))
+    assert bound["x"] is latest_inputs["x"]
+    assert bound["weight"] is latest_banks["weight"].value
+    fabric.execution_plan()(prepared)[0].sum().backward()
+    assert latest_banks["weight"].value.grad is not None
+    assert banks["weight"].value.grad is None
+    with torch.no_grad():
+        latest_banks["weight"].value.fill_(torch.nan)
+    with pytest.raises(mechanisms.FormulaBindingError, match="finite"):
+        fabric.bind_tensors(inputs=latest_inputs, banks=latest_banks)
+    checked = fabric._bind_for_checked_execution(inputs=latest_inputs, banks=latest_banks)
+    assert not bool(fabric.execution_plan().forward_checked(checked)[1])
+
+
+@pytest.mark.parametrize("change", ("shape", "dtype", "identity", "keys"))
+def test_binding_plan_hit_cannot_hide_changed_contract(change) -> None:
+    program = _program()
+    fabric = mechanisms.FormulaFabricV2(program)
+    inputs, banks = _values(program)
+    fabric.bind_tensors(inputs=inputs, banks=banks)
+    if change == "shape":
+        inputs["x"] = torch.ones(2, 4, dtype=torch.float64)
+    elif change == "dtype":
+        inputs["x"] = inputs["x"].float()
+    elif change == "identity":
+        banks["weight"] = replace(banks["weight"], partition_id="different")
+    else:
+        inputs["extra"] = inputs["x"]
+    with pytest.raises(mechanisms.FormulaBindingError):
+        fabric.bind_tensors(inputs=inputs, banks=banks)
+
+
+def test_binding_plan_is_bounded_tensor_free_and_not_serialized() -> None:
+    program = _program()
+    wire, structural = program.to_dict(), asdict(program)
+    fabric = mechanisms.FormulaFabricV2(program)
+    inputs, banks = _values(program)
+    input_ref, bank_ref = weakref.ref(inputs["x"]), weakref.ref(banks["weight"].value)
+    prepared = fabric.bind_tensors(inputs=inputs, banks=banks)
+    del inputs, banks, prepared
+    gc.collect()
+    assert input_ref() is None and bank_ref() is None
+    for batch in range(1, 36):
+        inputs, banks = _values(program, batch=batch)
+        fabric.bind_tensors(inputs=inputs, banks=banks)
+    assert len(program._binding_plan.metadata) == 32
+    assert program.to_dict() == wire and asdict(program) == structural
+    changed = replace(program, limits=replace(program.limits, max_tensor_elements=3))
+    assert changed._binding_plan is not program._binding_plan
+    with pytest.raises(mechanisms.FormulaBindingError, match="limit"):
+        mechanisms.FormulaFabricV2(changed).bind_tensors(inputs=inputs, banks=banks)
+
+
+def test_binding_plan_respects_stride_and_current_dynamic_extent() -> None:
+    program = _program()
+    fabric = mechanisms.FormulaFabricV2(program)
+    inputs, banks = _values(program)
+    fabric.bind_tensors(inputs=inputs, banks=banks)
+    transposed = torch.randn(3, 2, dtype=torch.float64).transpose(0, 1)
+    prepared = fabric.bind_tensors(inputs={"x": transposed}, banks=banks)
+    assert dict(zip(prepared.binding_names, prepared.values, strict=True))["x"] is transposed
+    assert len(program._binding_plan.metadata) == 2
+    larger_inputs, larger_banks = _values(program, batch=5)
+    prepared = fabric.bind_tensors(inputs=larger_inputs, banks=larger_banks)
+    assert fabric.execution_plan()(prepared)[0].shape == (5, 3)
+    assert len(program._binding_plan.metadata) == 3
 
 
 @pytest.mark.parametrize("change", ("none", "limits", "instruction", "bank"))

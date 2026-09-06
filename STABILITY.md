@@ -1,6 +1,6 @@
 # Stability Policy
 
-ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a3 package
+ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a4 package
 is a prerelease that adds alpha NeuralPlasticity and self-effect topology-search
 components without expanding the stable compatibility surface. Stability covers
 documented component identities, tensor contracts, artifact schemas, and
@@ -39,11 +39,22 @@ The Python-first browser exporter remains under `arti.experimental.web`, and
 the TypeScript runtime remains an alpha npm package. Web artifacts are
 deployment products, not portable training checkpoints.
 
-`FormulaProgramQuery@1`, `FormulaProgramQuery@3`, `FormulaProgramQuery@4`, `FormulaFabric@3` through
+`FormulaProgramQuery@1`, `FormulaProgramQuery@3` through `FormulaProgramQuery@7`, `FormulaFabric@3` through
 `FormulaFabric@5`, the NeuralPlasticity effect atoms, `FederalRecall@3`, and the
 shape-polymorphic TensorView query contracts ship for composition experiments
 with lifecycle `alpha`. Their presence in the package does not freeze those
 component contracts.
+
+Prepared device dispatch, grouped differentiation and caller-owned CUDA Graph
+recipes are experimental execution paths. CUDA with PyTorch 2.11 or newer uses
+automatic compilation by default; explicit native execution remains available.
+CPU and older PyTorch retain native behavior. Compiled dispatch is no-grad; differentiable execution uses
+the original Formula graph or the grouped VJP path. Whole-dispatch fusion excludes
+effect instructions. Capture requires fixed storage and gradient participation,
+and does not automatically include an optimizer. The acceleration recipes are
+validated on PyTorch 2.11; the base package's older-PyTorch support does not imply
+support for every compiler or CUDA Graph option. No private benchmark result is
+a package-wide throughput guarantee.
 
 The 3.0.13a2 correction removes the alpha `FormulaProgramQuery@2` effect-owned
 state arena. Reconstruct those programs with ordinary producer-owned Bank

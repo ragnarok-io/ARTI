@@ -11,7 +11,7 @@ import arti
 from arti import mechanisms
 
 
-SOURCE_REF = "arti/vouroboros-branch-visible-bank@1"
+SOURCE_REF = "arti/test-branch-visible-bank@1"
 
 
 def _type() -> mechanisms.TensorType:
@@ -57,6 +57,7 @@ def _effect(
     output_slot: str,
     *,
     writer_scale: float = 1.0,
+    execution_count: float | None = None,
 ) -> mechanisms.FormulaProgramEffectCandidateV3:
     value = mechanisms.InputBinding("value", _type())
     writer = _bank("writer")
@@ -80,6 +81,9 @@ def _effect(
             "gain": torch.zeros(1, 3),
         },
         trainable_operands=("writer",),
+        execution_count=None if execution_count is None else torch.tensor(execution_count),
+        trainable_execution_count=execution_count is not None,
+        max_executions=4,
     )
 
 
@@ -143,6 +147,85 @@ def test_effect_then_same_owner_reexecution_reads_branch_overlay() -> None:
     )
 
 
+@pytest.mark.parametrize("reverse_candidates", (False, True))
+def test_cooperating_ssa_branches_keep_both_banks_and_final_loss_gradients(
+    reverse_candidates: bool,
+) -> None:
+    left = _producer("left", "x", "left-value", owner_id="left-bank")
+    right = _producer(
+        "right", "x", "right-value", owner_id="right-bank", weight=torch.full((1, 3), 3.0),
+    )
+    left_write = _effect(
+        "left-write", "left-value", "left-written", writer_scale=0.1, execution_count=2.0,
+    )
+    right_write = _effect(
+        "right-write", "right-value", "right-written", writer_scale=0.2, execution_count=2.0,
+    )
+    left_read = _producer("left-read", "left-written", "left-output", owner_id="left-bank")
+    right_read = _producer(
+        "right-read", "right-written", "right-output", owner_id="right-bank",
+        weight=torch.full((1, 3), 3.0),
+    )
+    a, b = mechanisms.InputBinding("a", _type()), mechanisms.InputBinding("b", _type())
+    join = mechanisms.FormulaProgramTensorCandidateV3(mechanisms.FormulaProgramCandidate(
+        "join", mechanisms.FormulaProgram.build(outputs=(mechanisms.add(a, b),)),
+        input_slots={"a": "left-output", "b": "right-output"}, output_slot="terminal",
+    ))
+    candidates = (left, right, left_write, right_write, left_read, right_read, join)
+    query = mechanisms.FormulaProgramQueryV4(
+        slot_ids=(
+            "x", "left-value", "right-value", "left-written", "right-written",
+            "left-output", "right-output", "terminal",
+        ),
+        candidates=tuple(reversed(candidates)) if reverse_candidates else candidates,
+        terminal_slot="terminal", max_steps=7, hidden_dim=8,
+    )
+    x = torch.tensor([[0.25, -0.5, 1.0]], requires_grad=True)
+    before = query.initial_bank_state()
+    execution = query({"x": x}, bank_state=before)
+    expected_left = 2.0 + 0.4 * x
+    expected_right = 3.0 + 1.2 * x
+    torch.testing.assert_close(execution.value, 2.0 * x * expected_left + 3.0 * x * expected_right)
+    assert {step.candidate_id for step in execution.trace.steps} == {
+        *(candidate.candidate_id for candidate in candidates), "stop",
+    }
+    assert {proposal.predecessor_owner_id for proposal in execution.proposals} == {
+        "left-bank", "right-bank",
+    }
+    for producer, expected in ((left, expected_left), (right, expected_right)):
+        slot = producer.bank_slot_ref
+        assert slot is not None
+        torch.testing.assert_close(execution.bank_state.value(slot), expected)
+        assert execution.bank_state.revision(slot) == 1
+        assert before.revision(slot) == query.initial_bank_state().revision(slot) == 0
+        assert not producer.bank_owner.value.requires_grad
+    execution.value.sum().backward()
+    torch.testing.assert_close(x.grad, 13.0 + 8.8 * x.detach())
+    for effect, factor in ((left_write, 2.0), (right_write, 3.0)):
+        torch.testing.assert_close(
+            effect.operand_store.tensor("writer").grad, 2.0 * (factor * x.detach()).square(),
+        )
+        assert effect.hard_execution_count() == 2
+    query.commit_(execution)
+    for slot in before.slot_refs:
+        assert query.initial_bank_state().revision(slot) == 1
+        torch.testing.assert_close(query.initial_bank_state().value(slot), execution.bank_state.value(slot))
+
+    query.requires_grad_(False)
+    with torch.no_grad():
+        next_execution = query({"x": x.detach()})
+        left_next = expected_left * (1.0 + 0.2 * x)
+        right_next = expected_right * (1.0 + 0.4 * x)
+        torch.testing.assert_close(
+            next_execution.value,
+            x * expected_left * left_next + x * expected_right * right_next,
+        )
+    assert not next_execution.value.requires_grad
+    for slot in before.slot_refs:
+        assert next_execution.bank_state.revision(slot) == 2
+        assert query.initial_bank_state().revision(slot) == 1
+
+
 @pytest.mark.parametrize("content_encoder", [False, True])
 def test_batched_value_summary_matches_independent_branches(content_encoder: bool) -> None:
     query, first, effect, _second = _read_after_write_query(content_encoder=content_encoder)
@@ -169,6 +252,27 @@ def test_batched_value_summary_matches_independent_branches(content_encoder: boo
         torch.testing.assert_close(actual, expected)
     assert all(branch.bank_state.revisions == branches[0].bank_state.revisions for branch in branches)
     assert len({id(branch.proposals[0].successor) for branch in branches}) == len(branches)
+
+
+@pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if torch.cuda.is_available() else []))
+@pytest.mark.parametrize("magnitude", (1.0, 1e21, 1e38))
+def test_default_summary_preserves_finite_statistics_and_gradients(device, magnitude):
+    query, *_ = _read_after_write_query()
+    query.to(device)
+    value = (torch.tensor([[0.5, 0.75, 1.0]], device=device) * magnitude).requires_grad_()
+    reference = value.detach().double().requires_grad_()
+    actual = query._summarize(query._arena({"x": value}))[:, :8]
+    expected = torch.stack((
+        reference.new_ones(1), reference.mean(-1), reference.std(-1, unbiased=False),
+        reference.abs().mean(-1), reference.amax(-1), reference.amin(-1),
+        reference.square().mean(-1).sqrt(), actual[:, -1].detach().double(),
+    ), dim=-1)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual.double(), expected, rtol=2e-6, atol=1e-7)
+    actual.backward(torch.ones_like(actual) * 1e10)
+    expected.backward(torch.ones_like(expected) * 1e10)
+    assert torch.isfinite(value.grad).all()
+    torch.testing.assert_close(value.grad.double(), reference.grad, rtol=2e-6, atol=1e-7)
 
 
 def test_consecutive_effects_advance_lineage_and_bank_revision() -> None:
@@ -202,6 +306,64 @@ def test_consecutive_effects_advance_lineage_and_bank_revision() -> None:
     assert execution.trace.steps[2].execution_id == "producer-first"
     assert execution.trace.steps[3].execution_id == "producer-second"
     assert execution.trace.steps[3].bank_owner_id == "shared-producer"
+
+
+def test_many_post_output_effects_keep_data_but_receive_future_credit() -> None:
+    first = _producer("emit", "x", "terminal")
+    effects = tuple(
+        _effect(
+            f"effect-{index}", "terminal" if index == 0 else f"tail-{index - 1}",
+            f"tail-{index}", writer_scale=0.01,
+        )
+        for index in range(32)
+    )
+    query = mechanisms.FormulaProgramQueryV4(
+        slot_ids=("x", "terminal", *(f"tail-{index}" for index in range(32))),
+        candidates=(first, *effects), terminal_slot="terminal",
+        min_steps=1, max_steps=33, min_tensor_steps=1,
+        max_tensor_steps=1, max_effect_steps=32, hidden_dim=8,
+    )
+    with torch.no_grad():
+        query.network[-1].weight.zero_()
+        query.network[-1].bias.fill_(2.0)
+        query.network[-1].bias[-1] = 0.0
+    x = torch.tensor([[0.1, 0.2, 0.3]], requires_grad=True)
+    execution = query({"x": x})
+    assert len(execution.proposals) == 32
+    assert [item.successor_revision for item in execution.proposals] == list(range(1, 33))
+    assert all(item.predecessor_execution_id == "emit" for item in execution.proposals)
+    torch.testing.assert_close(execution.value, x * 2, rtol=0, atol=0)
+    assert execution.trace.steps[-1].candidate_id == "stop"
+    writers = tuple(effect.operand_store.tensor("writer") for effect in effects)
+    current_grads = torch.autograd.grad(
+        execution.value.sum(), writers, allow_unused=True, retain_graph=True,
+    )
+    assert all(value is None for value in current_grads)
+    future = first(query._arena({"x": x + 1}, bank_state=execution.bank_state))
+    future_grads = torch.autograd.grad(future.values.get("terminal").sum(), writers)
+    assert all(torch.isfinite(value).all() and value.abs().sum() > 0 for value in future_grads)
+    assert query.initial_bank_state().revision(first.bank_slot_ref) == 0
+    with torch.no_grad():
+        deployed = query({"x": x.detach()})
+    torch.testing.assert_close(deployed.value, execution.value)
+    for left, right in zip(deployed.bank_state.values, execution.bank_state.values, strict=True):
+        torch.testing.assert_close(left, right)
+
+
+def test_effect_budget_is_independent_of_tensor_budget_and_stop_is_optional() -> None:
+    first = _producer("emit", "x", "terminal")
+    effects = (_effect("effect-1", "terminal", "tail-1"), _effect("effect-2", "tail-1", "tail-2"))
+    query = mechanisms.FormulaProgramQueryV4(
+        slot_ids=("x", "terminal", "tail-1", "tail-2"), candidates=(first, *effects),
+        terminal_slot="terminal", max_steps=3, min_tensor_steps=1,
+        max_tensor_steps=1, max_effect_steps=1,
+    )
+    arena = first(query._arena({"x": torch.ones(1, 3)}))
+    assert arena.tensor_steps == 1 and arena.effect_steps == 0
+    assert query.eligible(arena, steps=1).tolist() == [False, True, False, True]
+    effected = effects[0](arena)
+    assert effected.tensor_steps == 1 and effected.effect_steps == 1
+    assert query.eligible(effected, steps=2).tolist() == [False, False, False, True]
 
 
 def test_stale_lineage_and_cross_branch_proposals_are_rejected_or_isolated() -> None:
@@ -324,6 +486,25 @@ def test_effect_data_lane_is_same_tensor_object() -> None:
     before = produced.values.get("produced")
     after = effect(produced).values.get("effected")
     assert before is after
+
+
+def test_early_terminal_is_allowed_when_later_tensor_dispatches_remain() -> None:
+    first = _producer("terminal-first", "x", "terminal")
+    later = _producer("later", "terminal", "later")
+    query = mechanisms.FormulaProgramQueryV4(
+        slot_ids=("x", "terminal", "later"), candidates=(first, later),
+        terminal_slot="terminal", min_steps=2, max_steps=2,
+        min_tensor_steps=2, max_tensor_steps=2, hidden_dim=8,
+    )
+    arena = query._arena({"x": torch.randn(1, 3)})
+    assert query._candidate_eligible(first, arena, steps=0)
+    arena = first(arena)
+    selected = arena.values.get("terminal")
+    assert not query._stop_eligible(arena, steps=1)
+    assert query._candidate_eligible(later, arena, steps=1)
+    arena = later(arena)
+    assert query._stop_eligible(arena, steps=2)
+    assert arena.values.get("terminal") is selected
 
 
 def test_query_observes_effect_only_after_an_ordinary_formula_reread() -> None:

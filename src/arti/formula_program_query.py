@@ -86,16 +86,23 @@ class FormulaProgramArena:
         return self.values[index]
 
     def write(self, slot_id: str, value: Tensor) -> FormulaProgramArena:
-        if not isinstance(value, Tensor):
-            raise TypeError("SSA slot values must be tensors")
-        try:
-            index = self.slot_ids.index(slot_id)
-        except ValueError as exc:
-            raise KeyError(slot_id) from exc
-        if self.values[index] is not None:
-            raise ValueError(f"SSA output slot {slot_id!r} is already occupied")
+        return self.write_many({slot_id: value})
+
+    def write_many(self, outputs: Mapping[str, Tensor]) -> FormulaProgramArena:
+        """Publish all outputs of one completed instruction together."""
+        if not outputs:
+            raise ValueError("SSA output mapping must not be empty")
         values = list(self.values)
-        values[index] = value
+        for slot_id, value in outputs.items():
+            if not isinstance(value, Tensor):
+                raise TypeError("SSA slot values must be tensors")
+            try:
+                index = self.slot_ids.index(slot_id)
+            except ValueError as exc:
+                raise KeyError(slot_id) from exc
+            if values[index] is not None:
+                raise ValueError(f"SSA output slot {slot_id!r} is already occupied")
+            values[index] = value
         return FormulaProgramArena(self.slot_ids, tuple(values))
 
     def occupancy(self) -> tuple[bool, ...]:

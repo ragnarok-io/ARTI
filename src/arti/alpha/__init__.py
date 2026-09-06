@@ -316,6 +316,23 @@ from ..formula_program_query_v4 import (
     FormulaProgramSearchCandidateV4,
     FormulaProgramTensorCandidateV3,
 )
+from ..formula_program_query_v5 import (
+    FormulaProgramCandidateV3,
+    FormulaProgramQueryExecutionV5,
+    FormulaProgramQueryTraceStepV5,
+    FormulaProgramQueryTraceV5,
+    FormulaProgramQueryV5,
+    FormulaProgramTensorCandidateV4,
+)
+from ..formula_program_call import FormulaProgramCallCandidateV1
+from ..formula_program_query_v6 import FormulaProgramQueryV6
+from ..formula_program_query_v7 import (
+    FormulaProgramGraphExecutionV1,
+    FormulaProgramGraphFrontierV1,
+    FormulaProgramGraphNodeV1,
+    FormulaProgramGraphTraceV1,
+    FormulaProgramQueryV7,
+)
 from ..federal_recall import (
     FEDERAL_RECALL_VERSION,
     FEDERAL_RECALL_V2_VERSION,
@@ -958,6 +975,8 @@ __all__ = [
     "ExactFormulaProgramQueryTrainingV3",
     "FormulaProgramBankState",
     "FormulaProgramCandidateV2",
+    "FormulaProgramCandidateV3",
+    "FormulaProgramCallCandidateV1",
     "FormulaProgramEffectCandidateV2",
     "FormulaProgramQueryExecutionV3",
     "FormulaProgramQueryTraceStepV3",
@@ -974,6 +993,17 @@ __all__ = [
     "FormulaProgramQueryTraceV4",
     "FormulaProgramQueryTensorEncoderV1",
     "FormulaProgramQueryV4",
+    "FormulaProgramQueryV5",
+    "FormulaProgramQueryV6",
+    "FormulaProgramQueryV7",
+    "FormulaProgramGraphExecutionV1",
+    "FormulaProgramGraphFrontierV1",
+    "FormulaProgramGraphNodeV1",
+    "FormulaProgramGraphTraceV1",
+    "FormulaProgramQueryExecutionV5",
+    "FormulaProgramQueryTraceStepV5",
+    "FormulaProgramQueryTraceV5",
+    "FormulaProgramTensorCandidateV4",
     "FormulaProgramSearchCandidateV4",
     "FormulaProgramTensorCandidateV3",
     "FEDERAL_RECALL_VERSION",

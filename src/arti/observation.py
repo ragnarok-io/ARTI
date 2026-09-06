@@ -94,6 +94,32 @@ class IdentityObservationOperator(nn.Module):
     def forward(self, substrate: Tensor, _state: Tensor) -> Tensor:
         return substrate
 
+    def forward_trajectory(self, substrate: Tensor, states: Tensor) -> Tensor:
+        return identity_observation(substrate, states)
+
+
+def identity_observation(substrate: Tensor, states: Tensor) -> Tensor:
+    """Batch the identity views without copying the substrate before masking."""
+    return substrate.unsqueeze(1).expand(-1, states.shape[1], -1, -1)
+
+
+def state_affine_observation(
+    substrate: Tensor, states: Tensor, weight: Tensor, bias: Tensor, *, scale: float
+) -> Tensor:
+    """Observe the original substrate independently at every trajectory state."""
+    raw_scale, raw_shift = torch.nn.functional.linear(states, weight, bias).chunk(2, dim=-1)
+    feature_scale = 1.0 + scale * torch.tanh(raw_scale)
+    feature_shift = scale * torch.tanh(raw_shift)
+    return substrate.unsqueeze(1) * feature_scale.unsqueeze(2) + feature_shift.unsqueeze(2)
+
+
+def apply_observation_activity(
+    values: Tensor, substrate_mask: Tensor, activity: Tensor
+) -> Tensor:
+    """Keep activity's surrogate gradient separate from the boolean output mask."""
+    weighted = values * activity.to(values).unsqueeze(-1).unsqueeze(-1)
+    return torch.where(substrate_mask[:, None, :, None], weighted, torch.zeros_like(weighted))
+
 
 class StateAffineObservationOperator(nn.Module):
     """Observe one substrate through a bounded state-conditioned feature frame."""
@@ -118,12 +144,15 @@ class StateAffineObservationOperator(nn.Module):
             raise ValueError(f"substrate must have shape [B, N, {self.dim}]")
         if state.ndim != 2 or state.shape != (substrate.shape[0], self.state_dim):
             raise ValueError(f"state must have shape [B, {self.state_dim}]")
-        raw_scale, raw_shift = self.projection(state).chunk(2, dim=-1)
-        feature_scale = 1.0 + self.scale * torch.tanh(raw_scale)
-        feature_shift = self.scale * torch.tanh(raw_shift)
-        return (
-            substrate * feature_scale.unsqueeze(1)
-            + feature_shift.unsqueeze(1)
+        return self.forward_trajectory(substrate, state.unsqueeze(1)).squeeze(1)
+
+    def forward_trajectory(self, substrate: Tensor, states: Tensor) -> Tensor:
+        if substrate.ndim != 3 or substrate.shape[-1] != self.dim:
+            raise ValueError(f"substrate must have shape [B, N, {self.dim}]")
+        if states.ndim != 3 or states.shape[0] != substrate.shape[0] or states.shape[-1] != self.state_dim:
+            raise ValueError(f"states must have shape [B, T, {self.state_dim}]")
+        return state_affine_observation(
+            substrate, states, self.projection.weight, self.projection.bias, scale=self.scale
         )
 
 
@@ -151,6 +180,36 @@ def _native_fourier_shift(
 
 
 _safe_native_fourier_shift = torch.compiler.disable(_native_fourier_shift)
+
+
+def fourier_observation(
+    substrate: Tensor,
+    states: Tensor,
+    *,
+    spatial_shape: tuple[int, int],
+    state_mode: str,
+    direction_epsilon: float,
+    compile_policy: str,
+) -> Tensor:
+    """Shared torch.fft implementation for module and Fabric execution."""
+    height, width = spatial_shape
+    compute_dtype = torch.float64 if substrate.dtype == torch.float64 else torch.float32
+    image = substrate.to(compute_dtype).reshape(
+        substrate.shape[0], height, width, substrate.shape[-1]
+    )
+    state = states.to(compute_dtype)
+    if state_mode == "cartesian":
+        dx, dy = state[..., 0], state[..., 1]
+    else:
+        radius, direction = state[..., 0], state[..., 1:3]
+        norm = torch.linalg.vector_norm(direction, dim=-1)
+        unit = direction / norm.clamp_min(direction_epsilon).unsqueeze(-1)
+        unit = torch.where((norm > direction_epsilon).unsqueeze(-1), unit, torch.zeros_like(unit))
+        dx, dy = radius * unit[..., 0], radius * unit[..., 1]
+    shift = _safe_native_fourier_shift if compile_policy == "safe_training" else _native_fourier_shift
+    return shift(image, dx, dy).reshape(
+        substrate.shape[0], states.shape[1], height * width, substrate.shape[-1]
+    ).to(substrate.dtype)
 
 
 class FourierShiftObservationOperator(nn.Module):
@@ -198,24 +257,6 @@ class FourierShiftObservationOperator(nn.Module):
             "eager_backward": True,
         }
 
-    def _displacement(self, state: Tensor) -> tuple[Tensor, Tensor]:
-        if state.shape[-1] != self.state_dim:
-            raise ValueError(
-                f"{self.state_mode} observation state must end with {self.state_dim}"
-            )
-        if self.state_mode == "cartesian":
-            return state[..., 0], state[..., 1]
-        radius = state[..., 0]
-        direction = state[..., 1:3]
-        norm = direction.square().sum(dim=-1).sqrt()
-        unit = direction / norm.clamp_min(self.direction_epsilon).unsqueeze(-1)
-        unit = torch.where(
-            (norm > self.direction_epsilon).unsqueeze(-1),
-            unit,
-            torch.zeros_like(unit),
-        )
-        return radius * unit[..., 0], radius * unit[..., 1]
-
     def forward_trajectory(self, substrate: Tensor, states: Tensor) -> Tensor:
         height, width = self.spatial_shape
         if substrate.ndim != 3 or substrate.shape[1] != height * width:
@@ -230,21 +271,10 @@ class FourierShiftObservationOperator(nn.Module):
             raise ValueError(
                 f"states must have shape [B, T, {self.state_dim}]"
             )
-        compute_dtype = torch.float64 if substrate.dtype == torch.float64 else torch.float32
-        image = substrate.to(compute_dtype).reshape(
-            substrate.shape[0], height, width, substrate.shape[-1]
+        return fourier_observation(
+            substrate, states, spatial_shape=self.spatial_shape, state_mode=self.state_mode,
+            direction_epsilon=self.direction_epsilon, compile_policy=self.compile_policy,
         )
-        displacement = states.to(compute_dtype)
-        dx, dy = self._displacement(displacement)
-        shift = (
-            _safe_native_fourier_shift
-            if self.compile_policy == "safe_training"
-            else _native_fourier_shift
-        )
-        shifted = shift(image, dx, dy)
-        return shifted.reshape(
-            substrate.shape[0], states.shape[1], height * width, substrate.shape[-1]
-        ).to(substrate.dtype)
 
     def forward(self, substrate: Tensor, state: Tensor) -> Tensor:
         if state.ndim != 2:
@@ -450,11 +480,7 @@ class AdaptiveObservation(nn.Module):
                 observations.append(observed)
             values = torch.stack(observations, dim=1)
         mask = trajectory.mask.unsqueeze(-1) & world.mask.unsqueeze(1)
-        activity = trajectory.activity_weights().to(values).unsqueeze(-1).unsqueeze(-1)
-        values = values * activity
-        values = torch.where(
-            world.mask.unsqueeze(1).unsqueeze(-1), values, torch.zeros_like(values)
-        )
+        values = apply_observation_activity(values, world.mask, trajectory.activity_weights())
         observed_domain = SupportDomain(
             domain_id=f"{world.domain.domain_id}-observed",
             owner_ref=self._component_reference,

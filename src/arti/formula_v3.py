@@ -668,11 +668,11 @@ def apply_neural_plasticity_effect(
     execution_count: Tensor | None = None,
     max_executions: int = 16,
 ) -> Tensor:
-    """Apply one Formula effect to implicit execution-site state.
+    """Apply one Formula effect to its resolved network state.
 
     The Formula atom emits operands but never receives ``state`` as a binding.
-    Keeping the application here gives Bank-local execution and architecture
-    search one implementation of the self-state transition algebra.
+    Bank-local execution and architecture search resolve the real predecessor
+    Bank value before calling this shared transition algebra.
     """
 
     if not isinstance(effect, NeuralPlasticityEffectV2):
@@ -756,6 +756,18 @@ def apply_neural_plasticity_effect(
         zero_weights = soft_weights - soft_weights.detach()
         return result + torch.einsum("k,k...->...", zero_weights, torch.stack(states, dim=0))
 
+    axis, maximum = _validate_neural_plasticity_step(effect, state, state_type)
+    return _neural_plasticity_tensor_step(
+        effect.atom_ref, state, effect.operands, axis=axis, maximum=maximum,
+    )
+
+
+def _validate_neural_plasticity_step(
+    effect: NeuralPlasticityEffectV2, state: Tensor, state_type: TensorType,
+) -> tuple[int, int]:
+    """Admit a transition before its tensor-only execution region."""
+    from .formula_v2 import _validate_tensor_against_type
+
     def matching_state_operand(value: Tensor, *, name: str) -> Tensor:
         _validate_tensor_against_type(value, state_type, name=name)
         if (
@@ -800,17 +812,17 @@ def apply_neural_plasticity_effect(
         return state_axis_index
 
     if effect.atom_ref == NEURAL_PLASTICITY_ATOM_REF:
-        additive = matching_state_operand(
+        matching_state_operand(
             effect.operands[0], name="additive-update"
         )
-        multiplicative = matching_state_operand(
+        matching_state_operand(
             effect.operands[1], name="multiplicative-update"
         )
-        return state + additive + state * multiplicative
+        return 0, 1
     if effect.atom_ref == NEURAL_PLASTICITY_BLEND_ATOM_REF:
-        target = matching_state_operand(effect.operands[0], name="blend-target")
-        amount = matching_state_operand(effect.operands[1], name="blend-amount")
-        return state + amount * (target - state)
+        matching_state_operand(effect.operands[0], name="blend-target")
+        matching_state_operand(effect.operands[1], name="blend-amount")
+        return 0, 1
     if effect.atom_ref in {
         NEURAL_PLASTICITY_OUTER_ATOM_REF,
         NEURAL_PLASTICITY_OUTER_V2_ATOM_REF,
@@ -840,8 +852,7 @@ def apply_neural_plasticity_effect(
                 "FF_EFFECT_OUTER_MISMATCH",
                 "outer operands must match execution-site dtype and device",
             )
-        update = rate * left.unsqueeze(-1) * right.unsqueeze(-2)
-        if update.shape != state.shape:
+        if (left.shape[0], right.shape[0]) != state.shape:
             raise FormulaProgramError(
                 "FF_EFFECT_OUTER_MISMATCH",
                 "outer product must exactly match execution-site state",
@@ -858,13 +869,10 @@ def apply_neural_plasticity_effect(
                     "Outer@2 max_executions must be a positive integer",
                 )
             assert execution_count is not None
-            bounded_count = execution_count.clamp(0.0, float(max_executions))
-            hard_count = bounded_count.round()
-            applied_count = bounded_count + (hard_count - bounded_count).detach()
-            return state + applied_count * update
-        return state + update
+            return 0, max_executions
+        return 0, 1
     if effect.atom_ref == NEURAL_PLASTICITY_TRANSPORT_ATOM_REF:
-        bias = matching_state_operand(effect.operands[0], name="transport-bias")
+        matching_state_operand(effect.operands[0], name="transport-bias")
         output_factor, input_factor, rate = effect.operands[1:]
         state_axis = dict(effect.attributes)["state_axis"]
         state_axis_index = matching_low_rank_factors(
@@ -873,11 +881,9 @@ def apply_neural_plasticity_effect(
             state_axis=state_axis,
             effect_name="transport",
         )
-        axis_last = state.movedim(state_axis_index, -1)
-        transported = (axis_last @ input_factor) @ output_factor.transpose(0, 1)
-        return state + bias + rate * transported.movedim(-1, state_axis_index)
+        return state_axis_index, 1
     if effect.atom_ref == NEURAL_PLASTICITY_POLYNOMIAL_ATOM_REF:
-        bias = matching_state_operand(effect.operands[0], name="polynomial-bias")
+        matching_state_operand(effect.operands[0], name="polynomial-bias")
         output_factor, left_factor, right_factor, rate = effect.operands[1:]
         state_axis = dict(effect.attributes)["state_axis"]
         state_axis_index = matching_low_rank_factors(
@@ -886,16 +892,45 @@ def apply_neural_plasticity_effect(
             state_axis=state_axis,
             effect_name="polynomial",
         )
-        axis_last = state.movedim(state_axis_index, -1)
-        left_projection = axis_last @ left_factor
-        right_projection = axis_last @ right_factor
-        feedback = (left_projection * right_projection) @ output_factor.transpose(0, 1)
-        return state + bias + rate * feedback.movedim(-1, state_axis_index)
+        return state_axis_index, 1
     if effect.atom_ref == NEURAL_PLASTICITY_PROXIMAL_ATOM_REF:
-        bias = matching_state_operand(effect.operands[0], name="proximal-bias")
-        raw_strength = matching_state_operand(
+        matching_state_operand(effect.operands[0], name="proximal-bias")
+        matching_state_operand(
             effect.operands[1], name="proximal-raw-strength"
         )
+        return 0, 1
+    raise AssertionError("unreachable NeuralPlasticity effect kind")
+
+
+def _neural_plasticity_tensor_step(
+    atom_ref: str, state: Tensor, operands: tuple[Tensor, ...], *, axis: int, maximum: int,
+) -> Tensor:
+    """Shared algebra for admitted eager and compiled transitions."""
+    if atom_ref == NEURAL_PLASTICITY_ATOM_REF:
+        additive, multiplicative = operands
+        return state + additive + state * multiplicative
+    if atom_ref == NEURAL_PLASTICITY_BLEND_ATOM_REF:
+        target, amount = operands
+        return state + amount * (target - state)
+    if atom_ref in {NEURAL_PLASTICITY_OUTER_ATOM_REF, NEURAL_PLASTICITY_OUTER_V2_ATOM_REF}:
+        left, right, rate = operands[:3]
+        update = rate * left.unsqueeze(-1) * right.unsqueeze(-2)
+        if atom_ref == NEURAL_PLASTICITY_OUTER_V2_ATOM_REF:
+            bounded = operands[3].clamp(0.0, float(maximum))
+            applied = bounded + (bounded.round() - bounded).detach()
+            return state + applied * update
+        return state + update
+    if atom_ref == NEURAL_PLASTICITY_TRANSPORT_ATOM_REF:
+        bias, output_factor, input_factor, rate = operands
+        transported = (state.movedim(axis, -1) @ input_factor) @ output_factor.transpose(0, 1)
+        return state + bias + rate * transported.movedim(-1, axis)
+    if atom_ref == NEURAL_PLASTICITY_POLYNOMIAL_ATOM_REF:
+        bias, output_factor, left_factor, right_factor, rate = operands
+        axis_last = state.movedim(axis, -1)
+        feedback = ((axis_last @ left_factor) * (axis_last @ right_factor)) @ output_factor.transpose(0, 1)
+        return state + bias + rate * feedback.movedim(-1, axis)
+    if atom_ref == NEURAL_PLASTICITY_PROXIMAL_ATOM_REF:
+        bias, raw_strength = operands
         candidate = state + bias
         threshold = torch.nn.functional.softplus(raw_strength)
         return torch.sign(candidate) * torch.relu(torch.abs(candidate) - threshold)
