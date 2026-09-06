@@ -32,7 +32,7 @@ slots, explicit Input and Bank bindings, and a bounded public atom basis:
   zeros for a fully masked row.
 - `ObserveIdentity@1`, `ObserveAffine@1`, and `ObserveFourier@1` execute the
   existing Observation operators over an explicit trajectory. See
-  [Observation inside Fabric](adaptive-observation.md#observation-inside-fabric).
+  [Adaptive Observation](adaptive-observation.md).
 
 These atoms are sufficient to express the data movement, nonlinearities,
 attention normalization, and table access used by a small Transformer. ARTI
@@ -379,9 +379,7 @@ A parameterized gated MLP can remain fully visible in that program:
 `up = Contract(x, W_up)`, `gate = Contract(x, W_gate)`,
 `hidden = up * gate * sigmoid(beta * gate)`, followed by an output Contract.
 The matrices and feature-wise beta are ordinary Bank operands, not a hidden
-activation module. `TinyTransformerConfig(gated_mlp=True)` in the repository's
-tiny Transformer example uses this composition and native Reduce@2; its
-default GELU/ordered-reduction program is unchanged.
+activation module.
 
 Lookup@1 now participates in the shared checked/grouped numerical executor.
 Ordinary calls still reject out-of-range indices. Checked execution returns
@@ -815,13 +813,14 @@ the search width, Bank size, or execution depth. Unsupported programs and
 custom execution hooks retain native execution. Intermediate non-finite values
 remain errors, even if a later saturating operation would hide them.
 
-With gradients enabled, each supported request uses a separate checked plan
-execution and its own numerical autograd graph. Only Boolean validity flags
-are aggregated. This preserves both gradient values and absent gradients for
-parameters belonging to unused candidates; materializing zeros in those
-positions could change optimizer updates. Unsupported requests remain native,
-and `serial=True` explicitly selects the native reference path for all requests.
-This is not vectorized training or whole-search compilation.
+With gradients enabled, supported CUDA requests on PyTorch 2.11 or newer use
+grouped Inductor forward and differentiation by default. Outputs retain their
+individual autograd boundaries, including absent gradients for unused inputs
+and parameters; materializing zeros there could change optimizer updates.
+CPU, older PyTorch, unsupported requests, and the explicit `native` override
+retain separate numerical autograd graphs, aggregating only Boolean validity
+flags. `serial=True` selects that native reference path for all requests.
+Grouped differentiation does not capture the caller's whole search or optimizer.
 Immutable program fingerprints are cached for both training and inference;
 runtime Tensor admission and live operand metadata are never cached.
 
