@@ -238,7 +238,7 @@ def test_reversible_runtime_record_identities_remain_registered() -> None:
     assert arti.component_ref(folded) == "arti/fold-state@1"
 
 
-def test_vhyper_runtime_types_have_nonportable_canonical_identities() -> None:
+def test_runtime_only_types_have_nonportable_canonical_identities() -> None:
     catalog = {entry["ref"]: entry for entry in arti.component_catalog()}
     expected = {
         "arti/fixed-resident-bucket@1": "runtime_only",

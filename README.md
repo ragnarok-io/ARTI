@@ -20,7 +20,7 @@ ways to observe, route, transform, remember, and compose it.
 The PyPI distribution is `arti-fit`; the Python package is `arti`:
 
 ```bash
-uv add "arti-fit==3.0.13a4"
+uv add "arti-fit==3.0.13a5"
 ```
 
 ARTI requires Python 3.10 or newer and PyTorch 2.2 or newer. The consuming
@@ -29,10 +29,10 @@ project chooses the appropriate CPU or CUDA build of PyTorch.
 Optional integrations are installed only when needed:
 
 ```bash
-uv add "arti-fit[jax]==3.0.13a4"
-uv add "arti-fit[qwen]==3.0.13a4"
-uv add "arti-fit[sd]==3.0.13a4"
-uv add "arti-fit[web]==3.0.13a4"
+uv add "arti-fit[jax]==3.0.13a5"
+uv add "arti-fit[qwen]==3.0.13a5"
+uv add "arti-fit[sd]==3.0.13a5"
+uv add "arti-fit[web]==3.0.13a5"
 ```
 
 The browser runtime remains a separate alpha package:
@@ -41,7 +41,30 @@ The browser runtime remains a separate alpha package:
 pnpm add @arti-fit/web@alpha
 ```
 
-## Alpha 3.0.13a4
+## Alpha 3.0.13a5
+
+This prerelease adds two controlled alpha compilation surfaces. Federal path
+compilation lowers an already selected, bounded Federal route into an ordinary
+layerwise PyTorch graph. Tensorized Query, Federation, stateful transition,
+and ragged-shape compilers are available from `arti.alpha`; they reject
+runtime callbacks, mutable unrepresented state, and data-dependent shapes
+instead of silently approximating them.
+
+RCC adds a host adapter that captures context from arbitrary host layers and
+consumes the compiled context at a separately selected input head. The host
+owns position and attention-mask conventions, so context remains late-bound
+and is not assigned an absolute position by ARTI. These compiler and host
+integration APIs are alpha and do not change the stable `ARTILayer` surface.
+
+The preceding 3.0.13a4 prerelease added automatic CUDA grouped Formula
+forward/backward execution and prepared typed device dispatch. Compatible
+numerical groups can be compiled
+individually or as one ordinary dispatch graph before CUDA Graph capture.
+On supported CUDA environments, the first uncaptured call prepares compiled
+execution and later calls reuse it. The caller owns the capture boundary;
+fixed forward, loss and first-order gradient computation can share one graph.
+CPU and older PyTorch retain native execution. Explicit native mode is available
+for debugging. Neither grouping nor compilation changes Formula mathematics or Bank ownership.
 
 This prerelease adds automatic CUDA grouped Formula forward/backward execution and
 prepared typed device dispatch. Compatible numerical groups can be compiled
@@ -283,6 +306,8 @@ See [Recall Artifacts](docs/recall-artifacts.md) and
 - [Reversible Topology](docs/reversible-topology.md)
 - [Formula Fabric](docs/formula-fabric.md)
 - [Federal Contracts](docs/federal-contracts.md)
+- [Federal Compilation](docs/federal-compilation.md)
+- [Recursive Context Compilation](docs/recursive-context-compilation.md)
 - [Batched Refine](docs/batched-refine.md)
 - [Flattened Refine Training](docs/flattened-refine-training.md)
 - [Refine Exit](docs/refine-exit.md)
@@ -313,7 +338,8 @@ ARTI is licensed under the [MIT License](LICENSE). Citation metadata is in
 
 ## 中文简介
 
-ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a4
+ARTI 是一个领域无关、PyTorch-first 的可组合张量动力学基础库。3.0.13a5
+新增受限的 Federal 路径、Query、状态图和 RCC 主机编译 alpha 接口；3.0.13a4
 在受支持的 CUDA 环境默认启用 Formula 分组前向与反向及 typed device dispatch 融合，
 并提供固定计算片段的 CUDA Graph 执行支持。张量、梯度和 Bank 归属语义保持不变，并保留
 在 3.0.12 稳定表面之上完成的 alpha 级 NeuralPlasticity 前序 Bank 写回纠正与

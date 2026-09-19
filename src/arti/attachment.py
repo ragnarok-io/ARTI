@@ -110,9 +110,7 @@ class ARTIAttachment:
     @property
     def layers(self) -> Mapping[str, ARTILayer]:
         self._require_attached()
-        return {
-            path: wrapper.layer for path, wrapper in self._layers.wrappers.items()
-        }
+        return {path: wrapper.layer for path, wrapper in self._layers.wrappers.items()}
 
     def summary(self) -> ARTIAttachmentSummary:
         self._require_attached()
@@ -203,6 +201,14 @@ class ARTIAttachment:
                 if self.declaration is None
                 else self.declaration.to_dict(include_source=True),
                 "host_structure": _host_structure_fingerprint(self._model),
+                "execution_surface": {
+                    "kind": "adaptive-pulse-attachment",
+                    "layers": {
+                        path: layer.runtime_provenance() for path, layer in self.layers.items()
+                    },
+                    "federal_compiler_ref": "arti/federal-static-compiler@1",
+                    "compiled_artifact_is_separate": True,
+                },
             },
             **extra,
         }
@@ -265,7 +271,9 @@ class ARTIAttachment:
         )
         config = ARTIAttachTrainingConfig(
             engine=engine or base.engine,
-            objective=base.objective if callable(objective) or objective is None else str(objective),
+            objective=base.objective
+            if callable(objective) or objective is None
+            else str(objective),
             learning_rate=base.learning_rate if learning_rate is None else learning_rate,
             steps=base.steps if steps is None else steps,
             gradient_accumulation_steps=base.gradient_accumulation_steps
@@ -536,9 +544,7 @@ def _resolve_config(
             AttachedARTILayerSpec(
                 item.path,
                 dim=dims[item.path],
-                batch_axis=None
-                if batch_axis is None
-                else int(_path_option(batch_axis, item.path)),
+                batch_axis=None if batch_axis is None else int(_path_option(batch_axis, item.path)),
                 feature_axis=None
                 if feature_axis is None
                 else int(_path_option(feature_axis, item.path)),
@@ -679,7 +685,11 @@ def _infer_attachment_dim(model: nn.Module, module: nn.Module) -> int | None:
         return direct
     config = getattr(model, "config", None)
     for attribute in ("hidden_size", "d_model", "n_embd"):
-        value = config.get(attribute) if isinstance(config, Mapping) else getattr(config, attribute, None)
+        value = (
+            config.get(attribute)
+            if isinstance(config, Mapping)
+            else getattr(config, attribute, None)
+        )
         if isinstance(value, int) and value > 0:
             return value
     candidates = []

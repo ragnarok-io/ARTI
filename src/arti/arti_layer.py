@@ -34,6 +34,18 @@ class ARTILayer(nn.Module):
 
         return self.pulse.manifest
 
+    def runtime_provenance(self) -> dict[str, object]:
+        """Describe the Pulse attachment surface and its Federal boundary."""
+
+        return {
+            "surface": "adaptive-pulse",
+            "layer_ref": self._component_reference,
+            "operation_graph_ref": self.pulse._component_reference,
+            "operation_graph_fingerprint": self.manifest.fingerprint,
+            "federal_compiler_ref": "arti/federal-static-compiler@1",
+            "federal_source_snapshot_required": True,
+        }
+
     def run(
         self,
         x: Tensor,

@@ -1,9 +1,9 @@
 # Stable Release Surface
 
 ARTI 3.0.12 keeps the composable mechanism runtime as the stable default.
-The 3.0.13a3 prerelease optimizes optional alpha Formula candidate execution
-while retaining the predecessor-Bank corrections from 3.0.13a2. Neither
-prerelease changes that stable surface.
+The 3.0.13a5 prerelease adds bounded Federal graph compilers and an RCC host
+adapter as alpha surfaces. These compilers specialize explicit paths and do
+not change the stable layer or mechanism identities.
 
 ## Default Layer
 
@@ -56,7 +56,7 @@ The new Formula atoms for scalar maps, explicit broadcast, selection, lookup,
 slicing, concatenation, and masked softmax are stable typed primitives.
 `FormulaProgramQuery@1`, `FormulaProgramQuery@3`, `FormulaProgramQuery@4`, `FormulaFabric@3` through
 `FormulaFabric@5`, NeuralPlasticity effects, `FederalRecall@3`, and the
-TensorView query family are alpha components; inspect each component lifecycle
+TensorView query family, Federal compilers, and RCC host integration are alpha components; inspect each component lifecycle
 instead of inferring it from the containing Python namespace.
 
 Stable means their versioned identity and declared contract are release APIs.

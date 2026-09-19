@@ -91,6 +91,11 @@ def main() -> None:
             "arti/tensor_view.py",
             "arti/shape_query.py",
             "arti/federal_tensor_view.py",
+            "arti/federal_compiler.py",
+            "arti/rcc_host.py",
+            "arti/recursive_context.py",
+            "arti/recursive_context_compiler.py",
+            "arti/recursive_language.py",
             "arti/batched_refine.py",
             "arti/branch_formula.py",
             "arti/branch_refine.py",
@@ -289,6 +294,14 @@ def main() -> None:
                     "assert callable(arti.alpha.TensorView); "
                     "assert callable(arti.alpha.TensorViewBankQuery); "
                     "assert callable(arti.alpha.FederalRecallV3); "
+                    "alpha = __import__('importlib').import_module('arti.alpha'); "
+                    "assert callable(alpha.FederalPathCompiler); "
+                    "assert callable(alpha.FederalTensorQueryCompiler); "
+                    "assert callable(alpha.FederalTensorFederationCompiler); "
+                    "assert callable(alpha.FederalStatefulGraphCompiler); "
+                    "assert callable(alpha.FederalRaggedShapeCompiler); "
+                    "assert callable(alpha.RecursiveContextCompiler); "
+                    "assert callable(alpha.RCCHostAdapter); "
                     "assert callable(arti.alpha.build_lora_program); "
                     "assert callable(arti.alpha.build_routed_lora_program); "
                     "assert callable(arti.alpha.hard_formula_route); "

@@ -3344,6 +3344,79 @@ def _build_default_registry() -> ComponentRegistry:
     )
     from .formula_program_query_v6 import FormulaProgramQueryV6
     from .formula_program_query_v7 import FormulaProgramQueryV7
+    from .recursive_context_compiler import (
+        FourierContextPlacementEncoder,
+        LearnedTokenPositionEncoder,
+        LanguageHead,
+        LexicalEmbedding,
+        LinearContextPlacementEncoder,
+        RecursiveContextCompiler,
+        SinusoidalTokenPositionEncoder,
+    )
+
+    add(
+        "arti/context-placement-linear@1",
+        LinearContextPlacementEncoder,
+        lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+        capabilities=("context-placement.linear",),
+    )
+    add(
+        "arti/context-placement-fourier@1",
+        FourierContextPlacementEncoder,
+        lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+        capabilities=("context-placement.fourier",),
+    )
+    add(
+        "arti/token-position-sinusoidal@1",
+        SinusoidalTokenPositionEncoder,
+        lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+        capabilities=("token-position.sinusoidal",),
+    )
+    add(
+        "arti/token-position-learned@1",
+        LearnedTokenPositionEncoder,
+        lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+        capabilities=("token-position.learned",),
+    )
+    from .recursive_context import ContextEvaluator
+    from .recursive_language import RecursiveLanguageModel
+
+    add(
+        "arti/context-evaluator@1", ContextEvaluator, lifecycle="alpha",
+        constructible=False, config_builder=lambda c: {},
+        capabilities=("context.batched-dag", "context.live-autograd", "context.local-memo"),
+    )
+    add(
+        "arti/recursive-language@1", RecursiveLanguageModel, lifecycle="alpha",
+        constructible=False, config_builder=lambda c: {},
+        capabilities=("language.prefix-nll", "language.recursive-generation"),
+    )
+
+    add(
+        "arti/recursive-context-compiler@1", RecursiveContextCompiler, lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+        capabilities=(
+            "context-compiler.bounded-placement",
+            "context-compiler.input-pseudo-tokens",
+            "context-compiler.native-context-waist",
+            "context-compiler.normal-downstream-output",
+            "context-compiler.same-level-compilation",
+            "context-compiler.variable-context-width",
+        ),
+    )
+    add(
+        "arti/lexical-embedding@1", LexicalEmbedding, lifecycle="alpha",
+        config_builder=lambda component: component.config(),
+    )
+    add(
+        "arti/rcc-language-head@1", LanguageHead, lifecycle="alpha",
+        config_builder=lambda component: {name: getattr(component, name) for name in
+                                         ("dim", "vocab_size")},
+    )
 
     add(
         "arti/formula-program-query@7",

@@ -1,8 +1,9 @@
 # Stability Policy
 
-ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a4 package
-is a prerelease that adds alpha NeuralPlasticity and self-effect topology-search
-components without expanding the stable compatibility surface. Stability covers
+ARTI 3.0.12 remains the stable public mechanism release. The 3.0.13a5 package
+is a prerelease that adds bounded Federal graph compilers, an RCC host adapter,
+alpha NeuralPlasticity, and self-effect topology-search components without
+expanding the stable compatibility surface. Stability covers
 documented component identities, tensor contracts, artifact schemas, and
 composition semantics. It does not imply a production service SLA or universal
 model-quality and performance claims.
