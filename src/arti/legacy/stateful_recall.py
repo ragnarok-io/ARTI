@@ -1,5 +1,5 @@
 """Retired stateful Recall prototype kept for explicit experiments only."""
 
-from .._stateful_recall import StatefulRecall
+from .stateful_recall_impl import StatefulRecall
 
 __all__ = ["StatefulRecall"]

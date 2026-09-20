@@ -11,7 +11,7 @@ import torch
 from torch import Tensor, nn
 
 from .observation import ObservationPlan
-from .vnext_contracts import (
+from .runtime_contracts import (
     OperandContract,
     OperandKind,
     OperandOwnership,
@@ -29,6 +29,12 @@ def _registered_component_ref(value: object) -> str:
     from .component_registry import component_ref
 
     return component_ref(value)
+
+
+def _canonical_contract_ref(reference: str) -> str:
+    from .component_registry import canonical_contract_reference
+
+    return canonical_contract_reference(reference)
 
 
 class FixedObservationQuery(nn.Module):
@@ -72,7 +78,7 @@ class FixedObservationQuery(nn.Module):
 
     def observation_query_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": _canonical_contract_ref(self._component_reference),
             "input_dim": self.input_dim,
             "key_dim": self.key_dim,
             "max_observations": self.max_observations,
@@ -127,7 +133,7 @@ class ObservationOperandBank(nn.Module):
     @property
     def structure_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": _canonical_contract_ref(self._component_reference),
             "bank_id": self.bank_id,
             "slots": self.slots,
             "key_dim": self.key_dim,
@@ -162,14 +168,14 @@ class ObservationOperandBank(nn.Module):
         domain = SupportDomain.for_tensor(
             mask,
             domain_id=f"{self.bank_id}-operands",
-            owner_ref=self._component_reference,
+            owner_ref=_canonical_contract_ref(self._component_reference),
             partition_id=self.bank_id,
             transition_id=transition_id,
             layout="dense",
         )
         contract = OperandContract(
             kind=OperandKind.OBSERVATION,
-            source_ref=self._component_reference,
+            source_ref=_canonical_contract_ref(self._component_reference),
             partition_id=self.bank_id,
             consumer_ref=(
                 getattr(consumer, "_component_reference", "")

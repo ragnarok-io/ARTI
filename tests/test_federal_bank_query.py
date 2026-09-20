@@ -8,6 +8,7 @@ from torch import Tensor, nn
 
 import arti
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 from arti.component_registry import (
     component_provenance,
     component_spec,
@@ -411,8 +412,21 @@ def test_bank_local_refine_requeries_without_consuming_federation_depth() -> Non
     assert [item.action for item in local] == ["continue-local", "terminal"]
     assert [item.local_step for item in local] == [1, 2]
     assert [item.input_shape for item in local] == [(1, 2), (1, 2)]
-    assert all(item.query_ref == "arti/linear-bank-query@1" for item in local)
-    assert all(item.formula_ref == "arti/formula-fabric@2" for item in local)
+    assert all(
+        item.query_ref == canonical_contract_reference("arti/linear-bank-query@1")
+        for item in local
+    )
+    assert all(
+        item.formula_ref == canonical_contract_reference("arti/formula-fabric@2")
+        for item in local
+    )
+    trace_payload = trace.to_dict()
+    assert trace_payload["ref"] == canonical_contract_reference("arti/federal-trace@2")
+    assert all(
+        item["ref"]
+        == canonical_contract_reference("arti/bank-local-refine-trace-step@1")
+        for item in trace_payload["steps"][0]["local_refine"]
+    )
     assert local[-1].exit_reason == "formula-exit"
     assert trace.winner_paths == ("memory/answer",)
 
@@ -431,7 +445,9 @@ def test_bank_local_refine_policy_is_versioned_and_in_provenance() -> None:
     policy = federal.banks["memory"].local_refine
 
     assert policy is not None
-    assert arti.component_ref(policy) == "arti/bank-local-refine-policy@1"
+    assert arti.component_ref(policy) == canonical_contract_reference(
+        "arti/bank-local-refine-policy@1"
+    )
     assert arti.component_spec(policy).config == {
         "min_steps": 1,
         "max_steps": 3,
@@ -441,7 +457,9 @@ def test_bank_local_refine_policy_is_versioned_and_in_provenance() -> None:
     provenance = component_provenance(federal)
     assert validate_component_provenance(provenance) == provenance
     root = next(item for item in provenance["components"] if item["path"] == "$")
-    assert "arti/bank-local-refine-policy@1" in root["dependencies"]
+    assert canonical_contract_reference("arti/bank-local-refine-policy@1") in root[
+        "dependencies"
+    ]
 
 
 def test_k1_federation_matches_explicit_serial_query_execution() -> None:
@@ -579,26 +597,31 @@ def test_federal_v2_arti_st_round_trip_and_provenance(tmp_path) -> None:
 
     torch.testing.assert_close(actual, expected)
     root = next(item for item in provenance["components"] if item["path"] == "$")
-    assert root["ref"] == "arti/federal-recall@2"
+    assert root["ref"] == canonical_contract_reference("arti/federal-recall@2")
 
 
 def test_federal_v2_has_independent_identity_and_configurable_wide_k() -> None:
     federal = make_federal()
 
-    assert arti.component_ref(federal) == "arti/federal-recall@2"
-    assert component_spec(federal).dependencies == (
-        "arti/bank-execution-signature@2",
-        "arti/formula-fabric@2",
-        "arti/gradient-contract@1",
-        "arti/linear-bank-query@1",
-        "arti/query-execution-signature@1",
-        "arti/refine-policy@2",
-        "arti/sealed-bank-query@1",
-        "arti/shape-relation@1",
-        "arti/tensor-schema@1",
-        "arti/terminal-output-abi@1",
-        "arti/test-requery-bank@1",
-        "arti/test-terminal-adapter@1",
+    assert arti.component_ref(federal) == canonical_contract_reference(
+        "arti/federal-recall@2"
+    )
+    assert component_spec(federal).dependencies == tuple(
+        canonical_contract_reference(reference)
+        for reference in (
+            "arti/bank-execution-signature@2",
+            "arti/formula-fabric@2",
+            "arti/gradient-contract@1",
+            "arti/linear-bank-query@1",
+            "arti/query-execution-signature@1",
+            "arti/refine-policy@2",
+            "arti/sealed-bank-query@1",
+            "arti/shape-relation@1",
+            "arti/tensor-schema@1",
+            "arti/terminal-output-abi@1",
+            "arti/test-requery-bank@1",
+            "arti/test-terminal-adapter@1",
+        )
     )
     wide = mechanisms.FederalRecallV2(
         {"memory": RequeryBank(terminal_abi())},

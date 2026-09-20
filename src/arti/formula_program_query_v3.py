@@ -15,6 +15,7 @@ from typing import Callable
 import torch
 from torch import Tensor, nn
 
+from .component_registry import canonical_contract_reference
 from .formula_program_query import (
     FormulaProgramArena,
     FormulaProgramCandidate,
@@ -69,8 +70,11 @@ class BankSlotRef:
             for character in self.producer_fingerprint
         ):
             raise ValueError("producer_fingerprint must be a SHA-256 hex digest")
-        if not isinstance(self.source_ref, str) or not self.source_ref:
-            raise ValueError("source_ref must be non-empty")
+        try:
+            source_ref = canonical_contract_reference(self.source_ref)
+        except ValueError as error:
+            raise ValueError("source_ref must be a component contract reference") from error
+        object.__setattr__(self, "source_ref", source_ref)
         if self.asset_fingerprint is not None and (
             len(self.asset_fingerprint) != 64
             or any(character not in "0123456789abcdef" for character in self.asset_fingerprint)
@@ -79,7 +83,7 @@ class BankSlotRef:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._runtime_contract_ref,
+            "ref": canonical_contract_reference(self._runtime_contract_ref),
             "producer_id": self.producer_id,
             "producer_fingerprint": self.producer_fingerprint,
             "binding_name": self.binding_name,

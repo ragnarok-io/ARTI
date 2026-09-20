@@ -12,6 +12,7 @@ from typing import ClassVar, Literal, Sequence
 import torch
 from torch import Tensor, nn
 
+from .component_registry import canonical_contract_reference
 from .formula_learning import FormulaOperandBank, hard_formula_route
 
 
@@ -246,7 +247,7 @@ class TensorOperationFieldSpec:
 
     def contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "support_size": self.support_size,
             "source_capacity": self.source_capacity,
             "collision_policy": self.collision_policy,
@@ -619,7 +620,7 @@ class TensorOperationQuery(nn.Module):
 
     def operation_query_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "key_dim": self.key_dim,
             "seed": self.seed,
             "basis_hash": _tensor_hash(self.basis),
@@ -919,7 +920,7 @@ class TensorOperationBank(FormulaOperandBank):
             for name, value in sorted(self.operands.items())
         }
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "schema_version": 3,
             "candidate_count": self.candidate_count,
             "key_dim": self.key_dim,
@@ -1451,7 +1452,7 @@ class TensorOperationStopPolicy:
 
 @dataclass(frozen=True)
 class TensorOperationSchedule:
-    """Requested operation depth, independent from Reader Refine depth."""
+    """Requested operation depth, independent from Reader iteration depth."""
 
     _component_reference: ClassVar[str] = "arti/tensor-operation-schedule@1"
 
@@ -1675,10 +1676,10 @@ class TensorOperationLoop(nn.Module):
 
 
 @dataclass(frozen=True)
-class ReaderRefineSchedule:
+class ReaderIterationSchedule:
     """Reader depth kept deliberately separate from operation depth."""
 
-    _component_reference: ClassVar[str] = "arti/reader-refine-schedule@1"
+    _component_reference: ClassVar[str] = "arti/reader-iteration-schedule@1"
 
     reader_steps: int = 1
 
@@ -1735,13 +1736,13 @@ class TensorInvocation(nn.Module):
         world: Tensor,
         snapshot: PortSnapshot,
         *,
-        reader_schedule: ReaderRefineSchedule | None = None,
+        reader_schedule: ReaderIterationSchedule | None = None,
         operation_schedule: TensorOperationSchedule | None = None,
         world_mask: Tensor | None = None,
     ) -> TensorInvocationResult:
-        reader_schedule = reader_schedule or ReaderRefineSchedule()
-        if not isinstance(reader_schedule, ReaderRefineSchedule):
-            raise TypeError("reader_schedule must be ReaderRefineSchedule or None")
+        reader_schedule = reader_schedule or ReaderIterationSchedule()
+        if not isinstance(reader_schedule, ReaderIterationSchedule):
+            raise TypeError("reader_schedule must be ReaderIterationSchedule or None")
         canvas = self.fold(world, snapshot, world_mask=world_mask)
         output = canvas.values
         for _ in range(reader_schedule.reader_steps):
@@ -1769,7 +1770,7 @@ __all__ = [
     "OperableTensorPort",
     "PortSnapshot",
     "PortSpec",
-    "ReaderRefineSchedule",
+    "ReaderIterationSchedule",
     "SharedCanvas",
     "SharedCanvasFold",
     "TensorEditInstruction",

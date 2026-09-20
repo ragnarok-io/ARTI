@@ -14,7 +14,7 @@ from .formula_fabric import (
     RoutedFormulaFabricCompute,
 )
 from .objective_bank import ObjectiveExposureBank, ObjectiveExposureOutput
-from .vnext_contracts import ContractLimits
+from .runtime_contracts import ContractLimits
 
 
 @dataclass(frozen=True)

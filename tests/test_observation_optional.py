@@ -137,7 +137,9 @@ def test_observation_bank_emits_consumer_bound_typed_operands() -> None:
     output = formula.evaluate_operands(operands, source=bank)
 
     assert operands.contract.kind is OperandKind.OBSERVATION
-    assert operands.contract.consumer_ref == "arti/observation-trajectory-formula@1"
+    assert operands.contract.consumer_ref.startswith(
+        "arti/observation-trajectory-formula@sha256:"
+    )
     assert output.states.shape == (2, 4, 3)
     assert output.continuation_logits.shape == (2, 4)
     torch.testing.assert_close(route.sum(dim=-1), torch.ones(2, 4))
@@ -219,11 +221,15 @@ def test_optional_observation_component_graph_and_arti_st_round_trip(
 
     torch.testing.assert_close(actual.value, expected.value, rtol=0, atol=0)
     spec = component_spec(source)
-    assert spec.reference == "arti/adaptive-observation@1"
-    assert set(spec.dependencies) == {
-        "arti/bank-observation-policy@1",
-        "arti/fourier-observation-operator@1",
-    }
+    assert spec.reference.startswith("arti/adaptive-observation@sha256:")
+    assert any(
+        ref.startswith("arti/bank-observation-policy@sha256:")
+        for ref in spec.dependencies
+    )
+    assert any(
+        ref.startswith("arti/fourier-observation-operator@sha256:")
+        for ref in spec.dependencies
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

@@ -98,6 +98,7 @@ def test_stateful_graph_manifest_exposes_host_bound_and_state_lanes():
     assert manifest["max_steps"] == 16
     assert manifest["state_semantics"] == "explicit-bank-effect-input-output"
     assert manifest["refine_semantics"] == "while-loop-stop-or-host-bound"
+    assert graph.manifest.action_sha256.startswith("sha256:")
 
 
 def test_ragged_shape_graph_exports_data_dependent_logical_length():

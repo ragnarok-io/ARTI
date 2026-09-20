@@ -13,7 +13,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 
-from ._layered_recall import LayerRecall, LayerRecallSpec, LayerRecallStack, LayeredRecallConfig
+from .legacy.layered_recall_impl import LayerRecall, LayerRecallSpec, LayerRecallStack, LayeredRecallConfig
 
 
 TRACE_KINDS = ("clean", "corrupt_single", "corrupt_combined", "unseen")
@@ -79,7 +79,7 @@ class LayeredRecallScore:
 
 
 @dataclass(frozen=True)
-class LayeredRecallTraceCache:
+class LayeredExecutionTraceCache:
     """Frozen layer-local hidden traces, independent of the source model runtime."""
 
     tensors: Mapping[str, Tensor]
@@ -132,7 +132,7 @@ class LayeredRecallTraceCache:
         return weights, manifest
 
     @classmethod
-    def load(cls, path: str | Path, *, device: str | torch.device = "cpu") -> "LayeredRecallTraceCache":
+    def load(cls, path: str | Path, *, device: str | torch.device = "cpu") -> "LayeredExecutionTraceCache":
         weights = Path(path)
         if weights.suffix != ".safetensors":
             weights = weights.with_suffix(".safetensors")
@@ -221,7 +221,7 @@ def pareto_layered_recall(scores: Iterable[LayeredRecallScore]) -> tuple[Layered
 
 def screen_layered_recall_candidate(
     candidate: LayeredRecallCandidate,
-    cache: LayeredRecallTraceCache,
+    cache: LayeredExecutionTraceCache,
     budget: LayeredRecallBudget,
     *,
     learning_rate: float = 3e-4,
@@ -355,7 +355,7 @@ __all__ = [
     "LayeredRecallCandidate",
     "LayeredRecallCost",
     "LayeredRecallScore",
-    "LayeredRecallTraceCache",
+    "LayeredExecutionTraceCache",
     "candidates_within_budget",
     "estimate_layered_recall_cost",
     "pareto_layered_recall",

@@ -353,42 +353,42 @@ def set_adapter_scale(model: nn.Module, scale: float) -> int:
     return len(wrappers)
 
 
-def set_recall_refine_steps(
+def set_retrieval_iteration_steps(
     model: nn.Module,
     steps: int,
     *,
     min_steps: int | None = None,
     tolerance: float | None = None,
 ) -> int:
-    """Set runtime Recall refinement depth for every attached adapter.
+    """Set runtime retrieval iteration depth for every attached adapter.
 
     ``steps`` is the maximum depth. With no other arguments it is also the
     exact depth. Set ``min_steps`` and ``tolerance`` to enable data-dependent
     early stopping. A depth of zero is an exact Recall bypass.
     """
 
-    resolved = _resolve_recall_refine_settings(steps, min_steps, tolerance)
+    resolved = _resolve_retrieval_iteration_settings(steps, min_steps, tolerance)
     return sum(
-        _set_wrapper_recall_refine_settings(wrapper, *resolved)
+        _set_wrapper_retrieval_iteration_settings(wrapper, *resolved)
         for wrapper in iter_adapter_wrappers(model)
     )
 
 
-def _resolve_recall_refine_settings(
+def _resolve_retrieval_iteration_settings(
     steps: int,
     min_steps: int | None,
     tolerance: float | None,
 ) -> tuple[int, int, float | None]:
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
-        raise ValueError("Recall refine steps must be a non-negative integer")
+        raise ValueError("retrieval iteration steps must be a non-negative integer")
     if tolerance is not None:
         tolerance = float(tolerance)
         if not math.isfinite(tolerance) or tolerance < 0:
-            raise ValueError("Recall refine tolerance must be finite and non-negative")
+            raise ValueError("retrieval iteration tolerance must be finite and non-negative")
     if steps == 0:
         if min_steps not in {None, 0} or tolerance is not None:
             raise ValueError(
-                "zero Recall refine steps require min_steps unset or zero and no tolerance"
+                "zero retrieval iteration steps require min_steps unset or zero and no tolerance"
             )
         resolved_min_steps = 0
     else:
@@ -402,11 +402,11 @@ def _resolve_recall_refine_settings(
             or not isinstance(resolved_min_steps, int)
             or not 1 <= resolved_min_steps <= steps
         ):
-            raise ValueError("Recall refine min_steps must be in [1, steps]")
+            raise ValueError("retrieval iteration min_steps must be in [1, steps]")
     return steps, resolved_min_steps, tolerance
 
 
-def _set_wrapper_recall_refine_settings(
+def _set_wrapper_retrieval_iteration_settings(
     wrapper: ARTIAdapterWrapper,
     steps: int,
     resolved_min_steps: int,
@@ -444,11 +444,11 @@ def _set_wrapper_recall_refine_settings(
     return 1
 
 
-def set_recall_refine_schedule(
+def set_retrieval_iteration_schedule(
     model: nn.Module,
     steps: Sequence[int] | Mapping[str, int],
 ) -> int:
-    """Set an exact Recall refinement depth for each attached adapter.
+    """Set an exact retrieval iteration depth for each attached adapter.
 
     A sequence follows ``model.named_modules()`` traversal order. A mapping
     addresses adapters by their full module paths and must cover every attached
@@ -468,26 +468,26 @@ def set_recall_refine_schedule(
         unexpected = sorted(provided - expected)
         if missing or unexpected:
             raise ValueError(
-                "Recall refine schedule paths must match attached adapters exactly; "
+                "Retrieval iteration schedule paths must match attached adapters exactly; "
                 f"missing={missing}, unexpected={unexpected}"
             )
         depths = tuple(steps[name] for name, _wrapper in named_wrappers)
     else:
         if isinstance(steps, (str, bytes)):
-            raise TypeError("Recall refine schedule must be a sequence of integers")
+            raise TypeError("Retrieval iteration schedule must be a sequence of integers")
         depths = tuple(steps)
         if len(depths) != len(named_wrappers):
             raise ValueError(
-                "Recall refine schedule length must match attached adapters; "
+                "Retrieval iteration schedule length must match attached adapters; "
                 f"expected {len(named_wrappers)}, found {len(depths)}"
             )
 
     # Validate the complete schedule before touching any adapter.
     settings = tuple(
-        _resolve_recall_refine_settings(depth, None, None) for depth in depths
+        _resolve_retrieval_iteration_settings(depth, None, None) for depth in depths
     )
     return sum(
-        _set_wrapper_recall_refine_settings(wrapper, *resolved)
+        _set_wrapper_retrieval_iteration_settings(wrapper, *resolved)
         for (_name, wrapper), resolved in zip(named_wrappers, settings, strict=True)
     )
 

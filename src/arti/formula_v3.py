@@ -10,6 +10,7 @@ from typing import ClassVar, Mapping
 import torch
 from torch import Tensor, nn
 
+from .component_registry import canonical_contract_reference
 from .formula_v2 import (
     BankBinding,
     FormulaBankOperand,
@@ -170,7 +171,7 @@ class FormulaEffectProgram:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_EFFECT_PROGRAM_V1_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_EFFECT_PROGRAM_V1_SCHEMA_REF),
             "schema_version": self.schema_version,
             "program": self.program.to_dict(),
             "program_fingerprint": self.program.fingerprint,
@@ -193,7 +194,9 @@ class FormulaEffectProgram:
                 "FF3_EFFECT_PROGRAM_SCHEMA",
                 "FormulaEffectProgram payload contains missing or unknown fields",
             )
-        if value["schema_ref"] != FORMULA_EFFECT_PROGRAM_V1_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(
+            FORMULA_EFFECT_PROGRAM_V1_SCHEMA_REF
+        ):
             raise FormulaProgramError(
                 "FF3_EFFECT_PROGRAM_SCHEMA", "FormulaEffectProgram schema reference is invalid"
             )
@@ -439,7 +442,7 @@ class FormulaEffectProgramV2:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_EFFECT_PROGRAM_V2_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_EFFECT_PROGRAM_V2_SCHEMA_REF),
             "schema_version": self.schema_version,
             "program": self.program.to_dict(),
             "program_fingerprint": self.program.fingerprint,
@@ -462,7 +465,9 @@ class FormulaEffectProgramV2:
                 "FF4_EFFECT_PROGRAM_SCHEMA",
                 "FormulaEffectProgramV2 payload contains missing or unknown fields",
             )
-        if value["schema_ref"] != FORMULA_EFFECT_PROGRAM_V2_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(
+            FORMULA_EFFECT_PROGRAM_V2_SCHEMA_REF
+        ):
             raise FormulaProgramError(
                 "FF4_EFFECT_PROGRAM_SCHEMA", "FormulaEffectProgramV2 schema reference is invalid"
             )
@@ -595,7 +600,7 @@ class FormulaEffectProgramV3(FormulaEffectProgramV2):
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_EFFECT_PROGRAM_V3_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_EFFECT_PROGRAM_V3_SCHEMA_REF),
             "schema_version": self.schema_version,
             "program": self.program.to_dict(),
             "program_fingerprint": self.program.fingerprint,
@@ -618,7 +623,9 @@ class FormulaEffectProgramV3(FormulaEffectProgramV2):
                 "FF5_EFFECT_PROGRAM_SCHEMA",
                 "FormulaEffectProgramV3 payload contains missing or unknown fields",
             )
-        if value["schema_ref"] != FORMULA_EFFECT_PROGRAM_V3_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(
+            FORMULA_EFFECT_PROGRAM_V3_SCHEMA_REF
+        ):
             raise FormulaProgramError(
                 "FF5_EFFECT_PROGRAM_SCHEMA", "FormulaEffectProgramV3 schema reference is invalid"
             )
@@ -1153,7 +1160,9 @@ class FormulaFabricV4(nn.Module):
         return {
             "effect_program": self.effect_program.to_dict(),
             "effect_program_fingerprint": self.effect_program.fingerprint,
-            "effect_atom_ref": self.effect_program.effect_instruction.atom_ref,
+            "effect_atom_ref": canonical_contract_reference(
+                self.effect_program.effect_instruction.atom_ref
+            ),
             "data_lane": "identity",
             "target_binding": "runtime-predecessor-bank",
             "state_access": "effect-operands-only",
@@ -1231,7 +1240,8 @@ class FormulaFabricV5(nn.Module):
             "effect_program": self.effect_program.to_dict(),
             "effect_program_fingerprint": self.effect_program.fingerprint,
             "effect_atom_refs": [
-                effect.atom_ref for effect in self.effect_program.effect_instructions
+                canonical_contract_reference(effect.atom_ref)
+                for effect in self.effect_program.effect_instructions
             ],
             "effect_count": len(self.effect_program.effect_instructions),
             "data_lane": "ordinary-formula-with-intermediate-effects",

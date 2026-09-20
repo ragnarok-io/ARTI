@@ -31,9 +31,17 @@ def test_component_graph_describes_nested_components_and_bindings() -> None:
     graph = component_graph(Composite(shared=False))
 
     assert graph["format"] == "arti.component.graph"
+    assert graph["schema_version"] == 2
     assert graph["root"] == "node-0000"
-    assert any(node["ref"] == "arti/recall@4" for node in graph["nodes"])
-    assert any(node["ref"] == "arti/half@1" for node in graph["nodes"])
+    assert any(node["ref"] == arti.component_ref(Composite().recall) for node in graph["nodes"])
+    assert any(
+        node["ref"] == arti.component_ref(Composite()._modules["half"])
+        for node in graph["nodes"]
+    )
+    for node in (item for item in graph["nodes"] if item["kind"] == "component"):
+        assert node["ref"] == f"{node['mechanism_id']}@{node['contract_sha256']}"
+        assert node["contract"]["mechanism_id"] == node["mechanism_id"]
+        assert node["instance_sha256"].startswith("sha256:")
     assert graph["bindings"] == [
         {"kind": "data", "from": "recall.output", "to": "half.input"}
     ]
@@ -77,6 +85,23 @@ def test_component_graph_rejects_cycles() -> None:
     graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
 
     with pytest.raises(ComponentGraphError, match="cycle"):
+        validate_component_graph(graph)
+
+
+def test_component_graph_rejects_noncanonical_or_drifting_dependencies() -> None:
+    graph = component_graph(Composite())
+    recall = next(node for node in graph["nodes"] if node["ref"] is not None)
+
+    recall["dependencies"] = ["arti/recall@1"]
+    graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
+    with pytest.raises(ComponentGraphError, match="canonical contract references"):
+        validate_component_graph(graph)
+
+    graph = component_graph(Composite())
+    recall = next(node for node in graph["nodes"] if node["ref"] is not None)
+    recall["dependencies"] = [arti.component_ref(Composite().recall)]
+    graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
+    with pytest.raises(ComponentGraphError, match="disagree with requires edges"):
         validate_component_graph(graph)
 
 

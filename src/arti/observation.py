@@ -8,7 +8,7 @@ from typing import ClassVar
 import torch
 from torch import Tensor, nn
 
-from .vnext_contracts import (
+from .runtime_contracts import (
     ContractLimits,
     DEFAULT_CONTRACT_LIMITS,
     EnvelopeRef,

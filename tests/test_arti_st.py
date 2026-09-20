@@ -11,36 +11,17 @@ import torch.nn as nn
 from safetensors import safe_open
 
 import arti
-from arti import ARTILayer, Half, LiteralSequenceDecoder
-from arti.mechanisms import AdaptivePulse
+from arti import ARTILayer, LiteralSequenceDecoder
+from arti.component_registry import canonical_contract_reference
 
 
 def core_layer() -> ARTILayer:
-    return ARTILayer(
-        AdaptivePulse(half=Half(stochastic=False, learnable=True))
-    ).eval()
+    return ARTILayer().eval()
 
 
-def test_arti_st_core_layer_round_trip_preserves_output(tmp_path: Path) -> None:
-    torch.manual_seed(3)
-    model = core_layer()
-    x = torch.randn(2, 4, 6)
-    torch.manual_seed(31)
-    expected = model(x).detach()
-
-    saved = arti.save(model, tmp_path / "arti.st")
-    restored = core_layer()
-    loaded = arti.load(saved.weights_path, model=restored)
-    torch.manual_seed(31)
-    actual = restored(x).detach()
-
-    assert torch.allclose(actual, expected)
-    assert loaded.model is restored
-    assert loaded.device == "cpu"
-    assert saved.weights_path.name == "arti.st"
-    assert saved.manifest_path.name == "arti.json"
-    assert saved.lock_path.name == "arti.lock.json"
-    assert loaded.manifest["architecture"]["class_name"] == "ARTILayer"
+def test_arti_st_identity_federal_layer_requires_attached_state(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot persist non-portable components"):
+        arti.save(core_layer(), tmp_path / "arti.st")
 
 
 def test_arti_st_literal_decoder_resources_are_strictly_separated(tmp_path: Path) -> None:
@@ -95,7 +76,7 @@ def test_arti_st_sha256_detects_weight_corruption(tmp_path: Path) -> None:
         raise AssertionError("corrupted arti.st should fail integrity validation")
 
 
-def test_arti_st_manifest_hash_and_incompatible_version_are_checked(tmp_path: Path) -> None:
+def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Path) -> None:
     saved = arti.save(nn.Linear(4, 3), tmp_path / "arti.st")
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
     manifest["package_version"] = "0.99.0"
@@ -409,6 +390,47 @@ def test_arti_st_supports_metadata_only_training_checkpoint(tmp_path: Path) -> N
     assert loaded.training_state == {"epoch": 3, "note": "warmup"}
     assert saved.checkpoint_path is not None
     assert saved.checkpoint_metadata_path is not None
+
+
+def test_arti_st_canonicalizes_component_aliases_at_every_persistence_boundary(
+    tmp_path: Path,
+) -> None:
+    saved = arti.save(
+        nn.Linear(2, 2),
+        tmp_path / "canonical.st",
+        config={"formula_ref": "arti/formula-fabric@2"},
+        vocab_metadata={"query_ref": "arti/linear-bank-query@1"},
+        training_state={"compiler_ref": "arti/federal-static-compiler@1"},
+    )
+    manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
+    checkpoint = json.loads(saved.checkpoint_metadata_path.read_text(encoding="utf-8"))
+    vocab = json.loads(saved.vocab_path.read_text(encoding="utf-8"))
+
+    assert manifest["architecture"]["config"]["formula_ref"] == canonical_contract_reference(
+        "arti/formula-fabric@2"
+    )
+    assert vocab["query_ref"] == canonical_contract_reference("arti/linear-bank-query@1")
+    training_state = checkpoint["state"]["__arti_dict__"][2][1]["__arti_dict__"]
+    assert training_state[0][1] == canonical_contract_reference(
+        "arti/federal-static-compiler@1"
+    )
+
+
+def test_arti_st_rejects_a_raw_component_alias_even_when_lock_is_rebound(
+    tmp_path: Path,
+) -> None:
+    saved = arti.save(nn.Linear(2, 2), tmp_path / "canonical.st")
+    manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
+    manifest["architecture"]["config"]["formula_ref"] = "arti/formula-fabric@2"
+    saved.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
+    lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
+    lock["manifest_sha256"] = digest
+    lock["files"]["manifest"]["sha256"] = digest
+    saved.lock_path.write_text(json.dumps(lock), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-canonical component reference"):
+        arti.load(saved.weights_path)
 
 
 def test_arti_st_cuda_map_location_moves_model_when_available(tmp_path: Path) -> None:

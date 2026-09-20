@@ -23,6 +23,7 @@ from .component_graph import (
     verify_component_graph,
 )
 from .component_registry import (
+    canonical_contract_reference,
     component_state_contract,
     component_provenance,
     get_component_registry,
@@ -223,6 +224,7 @@ def load(
     if load_resources and resources.get("vocab") is not None:
         vocab_path = _member_path(target.parent, resources["vocab"]["file"])
         vocab = _load_json(vocab_path)
+        _reject_noncanonical_persistent_contract_refs(vocab, label="ARTI vocabulary metadata")
 
     restored_training_state = None
     checkpoint = manifest.get("checkpoint")
@@ -235,6 +237,10 @@ def load(
             raise ValueError("ARTI checkpoint metadata format or version is invalid")
         if "state" not in checkpoint_tree:
             raise ValueError("ARTI checkpoint metadata is missing state")
+        _reject_noncanonical_persistent_contract_refs(
+            checkpoint_tree["state"],
+            label="ARTI checkpoint metadata",
+        )
         restored = _decode_tree(checkpoint_tree["state"], checkpoint_tensors)
         if optimizer is not None and restored.get("optimizer") is not None:
             optimizer.load_state_dict(restored["optimizer"])
@@ -304,7 +310,7 @@ def _save_state(
 
     vocab_record = None
     if vocab_metadata is not None:
-        normalized_vocab = _json_normalize(vocab_metadata)
+        normalized_vocab = _normalize_persistent_payload(vocab_metadata)
         _atomic_json(paths["vocab"], normalized_vocab)
         vocab_record = _file_record(paths["vocab"], _file_sha256(paths["vocab"]))
         files["vocab"] = vocab_record
@@ -313,11 +319,11 @@ def _save_state(
 
     checkpoint_record = None
     if optimizer is not None or scheduler is not None or training_state is not None:
-        raw_checkpoint = {
+        raw_checkpoint = _canonicalize_persistent_contract_refs({
             "optimizer": None if optimizer is None else optimizer.state_dict(),
             "scheduler": None if scheduler is None else scheduler.state_dict(),
             "training_state": training_state,
-        }
+        })
         checkpoint_tensors: dict[str, Tensor] = {}
         encoded = _encode_tree(raw_checkpoint, checkpoint_tensors, path="root")
         _atomic_safetensors(
@@ -343,7 +349,7 @@ def _save_state(
         _remove_stale(paths["checkpoint"])
         _remove_stale(paths["checkpoint_metadata"])
 
-    manifest = {
+    manifest = _canonicalize_persistent_contract_refs({
         "format": ARTI_ST_FORMAT,
         "format_version": ARTI_ST_FORMAT_VERSION,
         "package_name": "arti",
@@ -354,7 +360,7 @@ def _save_state(
         "weights": {**files["weights"], "tensor_count": len(prepared_state)},
         "resources": {"glyphs": glyph_record, "vocab": vocab_record},
         "checkpoint": checkpoint_record,
-    }
+    })
     _atomic_json(paths["manifest"], manifest)
     manifest_sha = _file_sha256(paths["manifest"])
     files["manifest"] = _file_record(paths["manifest"], manifest_sha)
@@ -407,6 +413,7 @@ def _read_and_validate_package(
 
 
 def _validate_manifest(manifest: dict[str, Any], *, allow_legacy: bool = False) -> None:
+    _reject_noncanonical_persistent_contract_refs(manifest, label="ARTI manifest")
     if manifest.get("format") != ARTI_ST_FORMAT or manifest.get("format_version") != ARTI_ST_FORMAT_VERSION:
         raise ValueError("unsupported arti.st format or version")
     if manifest.get("package_name") != "arti" or manifest.get("backend") != "torch":
@@ -518,7 +525,7 @@ def _architecture_payload(
     payload = {
         "module": model.__class__.__module__,
         "class_name": model.__class__.__qualname__,
-        "config": _json_normalize({} if resolved is None else resolved),
+        "config": _normalize_persistent_payload({} if resolved is None else resolved),
         "component_provenance": component_provenance(model),
         "component_graph": build_component_graph(model),
         "state_contract": component_state_contract(model, state_dict, scope=scope),
@@ -526,7 +533,7 @@ def _architecture_payload(
     candidate = getattr(model, "config", None)
     contract = getattr(candidate, "context_contract", None)
     if callable(contract):
-        payload["context_contract"] = _json_normalize(contract())
+        payload["context_contract"] = _normalize_persistent_payload(contract())
     return payload
 
 
@@ -624,6 +631,40 @@ def _json_normalize(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     raise ValueError(f"configuration value is not JSON compatible: {type(value).__name__}")
+
+
+def _normalize_persistent_payload(value: Any) -> Any:
+    """JSON-normalize a payload and resolve declarations before persistence."""
+
+    return _canonicalize_persistent_contract_refs(_json_normalize(value))
+
+
+def _canonicalize_persistent_contract_refs(value: Any) -> Any:
+    """Resolve exact component declarations without rewriting contract semantic keys."""
+
+    if isinstance(value, Mapping):
+        is_component_contract = value.get("kind") == "arti.component-contract"
+        return {
+            key: (
+                item
+                if is_component_contract and key == "semantic_key"
+                else _canonicalize_persistent_contract_refs(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_persistent_contract_refs(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return canonical_contract_reference(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _reject_noncanonical_persistent_contract_refs(value: Any, *, label: str) -> None:
+    if _canonicalize_persistent_contract_refs(value) != value:
+        raise ValueError(f"{label} contains a non-canonical component reference")
 
 
 def _load_safetensors(

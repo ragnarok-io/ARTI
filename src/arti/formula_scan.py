@@ -8,6 +8,7 @@ from typing import ClassVar, Mapping
 
 from torch import nn
 
+from .component_registry import canonical_contract_reference
 from .formula_v2 import (
     DEFAULT_FORMULA_LIMITS, FormulaBindingError, FormulaFabricV2,
     FormulaInstructionV2, FormulaLimits, FormulaProgram, FormulaProgramError,
@@ -90,7 +91,7 @@ class FormulaScan(nn.Module):
         return tuple("carry." + name for name, _ in self.carry_outputs) + tuple("emit." + name for name, _ in self.emissions)
 
     def to_dict(self):
-        return {"schema_ref": self._component_reference, "body": self.body.to_dict(), "axis": self.axis,
+        return {"schema_ref": canonical_contract_reference(self._component_reference), "body": self.body.to_dict(), "axis": self.axis,
                 "sequence_types": {name: t.to_dict() for name, t in self.sequence_types},
                 "carry_outputs": dict(self.carry_outputs), "emissions": dict(self.emissions), "max_length": self.max_length}
 
@@ -98,7 +99,7 @@ class FormulaScan(nn.Module):
     def from_dict(cls, payload):
         if not isinstance(payload, Mapping) or set(payload) != {
             "schema_ref", "body", "axis", "sequence_types", "carry_outputs", "emissions", "max_length",
-        } or payload["schema_ref"] != cls._component_reference:
+        } or payload["schema_ref"] != canonical_contract_reference(cls._component_reference):
             raise FormulaSchemaError("FF2_SCAN_SCHEMA", "invalid Scan@1 payload")
         return cls(FormulaProgram.from_dict(payload["body"]), axis=payload["axis"],
                    sequence_types={n: TensorType.from_dict(t) for n, t in payload["sequence_types"].items()},

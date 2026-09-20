@@ -11,7 +11,7 @@ from typing import ClassVar, Literal, Mapping, Sequence
 import torch
 from torch import Tensor
 
-from .component_registry import ComponentRef
+from .component_registry import ComponentRef, canonical_contract_reference
 
 
 TENSOR_SCHEMA_VERSION = 1
@@ -136,7 +136,7 @@ class TensorSchema:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "dtype": self.dtype,
             "device_class": self.device_class,
             "rank": self.rank,
@@ -165,7 +165,7 @@ class TensorSchema:
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise TensorSchemaError("TensorSchema payload contains missing or unknown fields")
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise TensorSchemaError("TensorSchema reference is invalid")
         dimensions = value["dimensions"]
         axes = value["semantic_axes"]
@@ -273,7 +273,7 @@ class ShapeRelation:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "kind": self.kind,
             "expression": self.expression,
         }
@@ -286,7 +286,7 @@ class ShapeRelation:
         required = {"schema_version", "ref", "kind", "expression", "fingerprint"}
         if not isinstance(value, Mapping) or set(value) != required:
             raise TensorSchemaError("ShapeRelation payload contains missing or unknown fields")
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise TensorSchemaError("ShapeRelation reference is invalid")
         result = cls(value["kind"], value["expression"], value["schema_version"])
         if value["fingerprint"] != result.fingerprint:
@@ -318,7 +318,9 @@ class GradientContract:
             raise TensorSchemaError("unsupported GradientContract version")
         if self.mode not in {"autograd", "custom_vjp", "straight_through", "detached"}:
             raise TensorSchemaError("unsupported gradient contract mode")
-        ComponentRef.parse(self.contract_ref)
+        reference = canonical_contract_reference(self.contract_ref)
+        ComponentRef.parse(reference)
+        object.__setattr__(self, "contract_ref", reference)
 
     @classmethod
     def autograd(cls) -> GradientContract:
@@ -339,7 +341,7 @@ class GradientContract:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "mode": self.mode,
             "contract_ref": self.contract_ref,
         }
@@ -352,7 +354,7 @@ class GradientContract:
         required = {"schema_version", "ref", "mode", "contract_ref", "fingerprint"}
         if not isinstance(value, Mapping) or set(value) != required:
             raise TensorSchemaError("GradientContract payload contains missing or unknown fields")
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise TensorSchemaError("GradientContract reference is invalid")
         result = cls(value["mode"], value["contract_ref"], value["schema_version"])
         if value["fingerprint"] != result.fingerprint:

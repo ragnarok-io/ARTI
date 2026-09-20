@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-RECALL_FORMULA_API_VERSION = 1
+RECALL_FORMULA_API_VERSION = 2
 RECALL_LAYOUT_VERSION = 1
 
 _ORIGINS = frozenset({"builtin", "registered", "custom"})
@@ -106,8 +106,7 @@ class RecallLayoutManifest:
 class RecallFormulaManifest:
     """Portable identity and capability contract for one Recall formula."""
 
-    id: str
-    version: str
+    formula_ref: str | None
     factor_names: tuple[str, ...]
     origin: str
     portable: bool
@@ -122,10 +121,14 @@ class RecallFormulaManifest:
                 f"unsupported Recall formula api_version={self.api_version!r}; "
                 f"expected {RECALL_FORMULA_API_VERSION}"
             )
-        _validate_identifier("id", self.id, _IDENTIFIER)
-        _validate_identifier("version", self.version, _EXACT_VERSION)
-        if any(character in self.version for character in "<>=*^~!, \t\r\n"):
-            raise ValueError("Recall formula version must be one exact version, not a range")
+        if self.formula_ref is not None:
+            from .recall_registry import RecallFormulaId
+
+            identity = RecallFormulaId.parse(self.formula_ref)
+            if not identity.is_canonical:
+                raise ValueError(
+                    "formula_ref must be a full SHA-256 Formula contract reference"
+                )
         _validate_factor_names("factor_names", self.factor_names)
         origin = _require_string("origin", self.origin)
         if origin not in _ORIGINS:
@@ -134,7 +137,7 @@ class RecallFormulaManifest:
             raise TypeError("portable must be a boolean")
         if origin != "builtin" and self.portable:
             raise ValueError(
-                "only builtin Recall formulas can declare portable=true in formula API v1"
+                "only builtin Recall formulas can declare portable=true in formula API v2"
             )
         if not isinstance(self.layout, RecallLayoutManifest):
             raise TypeError("layout must be a RecallLayoutManifest")
@@ -152,7 +155,7 @@ class RecallFormulaManifest:
             identity = description.contract.identity
             if identity is None:
                 continue
-            if identity.base_id == self.id and str(identity.version) == self.version:
+            if identity.reference == self.formula_ref:
                 matches.append(description.contract.factor_names)
         if self.factor_names not in matches:
             raise ValueError(
@@ -177,8 +180,7 @@ class RecallFormulaManifest:
 
         return {
             "api_version": self.api_version,
-            "id": self.id,
-            "version": self.version,
+            "formula_ref": self.formula_ref,
             "factor_names": list(self.factor_names),
             "origin": self.origin,
             "portable": self.portable,
@@ -202,8 +204,7 @@ class RecallFormulaManifest:
             payload,
             required={
                 "api_version",
-                "id",
-                "version",
+                "formula_ref",
                 "factor_names",
                 "origin",
                 "portable",
@@ -223,8 +224,11 @@ class RecallFormulaManifest:
             raise ValueError("layout_fingerprint does not match the embedded layout")
         return cls(
             api_version=_require_plain_int("api_version", payload["api_version"]),
-            id=_require_string("id", payload["id"]),
-            version=_require_string("version", payload["version"]),
+            formula_ref=(
+                None
+                if payload["formula_ref"] is None
+                else _require_string("formula_ref", payload["formula_ref"])
+            ),
             factor_names=_require_string_list("factor_names", payload["factor_names"]),
             origin=_require_string("origin", payload["origin"]),
             portable=_require_bool("portable", payload["portable"]),

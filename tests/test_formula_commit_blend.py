@@ -5,6 +5,7 @@ import torch
 
 import arti
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 
 
 def _program(dim: int = 2) -> mechanisms.FormulaFabricProgram:
@@ -280,7 +281,10 @@ def test_formula_commit_blend_arti_st_round_trip(tmp_path) -> None:
     }
 
     torch.testing.assert_close(actual, expected)
-    assert refs >= {"arti/formula-commit-blend@1", "arti/formula-fabric@1"}
+    assert refs >= {
+        canonical_contract_reference("arti/formula-commit-blend@1"),
+        canonical_contract_reference("arti/formula-fabric@1"),
+    }
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")

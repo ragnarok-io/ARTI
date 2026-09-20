@@ -8,6 +8,7 @@ import torch
 
 import arti
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 
 
 def _schema(width: int) -> mechanisms.TensorSchema:
@@ -329,6 +330,12 @@ def test_k_wide_commits_only_the_winner_predecessor_bank_slot() -> None:
     assert receipt.producer_action_id == "a-producer"
     assert receipt.effect_action_id == "imprint-a"
     assert receipt.bank_slot_ref == left.bank_slot_ref
+    effect_action = next(
+        action for action in runtime.effect_actions if action.action_id == "imprint-a"
+    )
+    assert receipt.effect_atom_ref == canonical_contract_reference(
+        effect_action.action.effect_program.effect_instruction.atom_ref
+    )
     assert receipt.winner_path == trace.winner_paths[0]
     assert json.loads(json.dumps(trace.to_dict())) == trace.to_dict()
 
@@ -451,9 +458,8 @@ def test_effect_without_dynamic_plastic_predecessor_is_ineligible() -> None:
     assert not effect.accepts(value, None)
     assert "self_state" not in dict(effect.action.named_buffers())
     assert "state_revision" not in dict(effect.action.named_buffers())
-    assert (
-        arti.component_ref(effect)
-        == "arti/tensor-view-formula-effect-action@1"
+    assert arti.component_ref(effect) == canonical_contract_reference(
+        "arti/tensor-view-formula-effect-action@1"
     )
 
 

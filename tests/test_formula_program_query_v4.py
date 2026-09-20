@@ -9,9 +9,10 @@ from torch import Tensor
 
 import arti
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 
 
-SOURCE_REF = "arti/test-branch-visible-bank@1"
+SOURCE_REF = "arti/federated-branch-visible-bank@1"
 
 
 def _type() -> mechanisms.TensorType:
@@ -416,28 +417,39 @@ def test_only_stopped_owner_execution_can_install_shared_bank_state() -> None:
 def test_v4_component_contracts_are_new_and_v3_contract_remains_unchanged() -> None:
     query, first, effect, _second = _read_after_write_query()
 
-    assert arti.component_ref(query) == "arti/formula-program-query@4"
-    assert arti.component_ref(first) == "arti/formula-program-tensor-candidate@3"
-    assert arti.component_ref(effect) == "arti/formula-program-effect-candidate@3"
+    assert arti.component_ref(query) == canonical_contract_reference(
+        "arti/formula-program-query@4"
+    )
+    assert arti.component_ref(first) == canonical_contract_reference(
+        "arti/formula-program-tensor-candidate@3"
+    )
+    assert arti.component_ref(effect) == canonical_contract_reference(
+        "arti/formula-program-effect-candidate@3"
+    )
     assert query.contract_config()["pending_visibility"] == "branch-local-proposal-overlay"
     assert first.contract_config()["bank_read"] == "latest-branch-local-proposal-overlay"
-    assert effect.contract_config()["lineage_ref"] == "arti/formula-producer-lineage@2"
+    assert effect.contract_config()["lineage_ref"] == canonical_contract_reference(
+        "arti/formula-producer-lineage@2"
+    )
 
     provenance = arti.component_provenance(query)
     owner_nodes = [
         node
         for node in provenance["components"]
-        if node["ref"] == "arti/formula-program-bank-owner@1"
+        if node["ref"]
+        == canonical_contract_reference("arti/formula-program-bank-owner@1")
     ]
     assert len(owner_nodes) == 1
     producer_nodes = [
         node
         for node in provenance["components"]
-        if node["ref"] == "arti/formula-program-tensor-candidate@3"
+        if node["ref"]
+        == canonical_contract_reference("arti/formula-program-tensor-candidate@3")
     ]
     assert len(producer_nodes) == 2
     assert all(
-        "arti/formula-program-bank-owner@1" in node["dependencies"]
+        canonical_contract_reference("arti/formula-program-bank-owner@1")
+        in node["dependencies"]
         for node in producer_nodes
     )
     assert arti.validate_component_provenance(provenance) == provenance
@@ -454,7 +466,9 @@ def test_v4_component_contracts_are_new_and_v3_contract_remains_unchanged() -> N
         ),
         plastic_bank_slot="weight",
     )
-    assert arti.component_ref(old) == "arti/formula-program-tensor-candidate@2"
+    assert arti.component_ref(old) == canonical_contract_reference(
+        "arti/formula-program-tensor-candidate@2"
+    )
     with pytest.raises(TypeError, match="corrected Formula program candidates"):
         mechanisms.FormulaProgramQueryV3(
             slot_ids=("x", "produced", "effected", "terminal"),
@@ -539,11 +553,15 @@ def test_content_encoder_preserves_dynamic_length_content_for_query_routing() ->
     encoded_one.square().mean().backward()
     assert one.grad is not None
     assert any(parameter.grad is not None for parameter in encoder.parameters())
-    assert arti.component_ref(encoder) == "arti/formula-program-query-tensor-encoder@1"
+    assert arti.component_ref(encoder) == canonical_contract_reference(
+        "arti/formula-program-query-tensor-encoder@1"
+    )
 
     provenance = arti.component_provenance(query)
     root = next(node for node in provenance["components"] if node["path"] == "$")
-    assert "arti/formula-program-query-tensor-encoder@1" in root["dependencies"]
+    assert canonical_contract_reference("arti/formula-program-query-tensor-encoder@1") in root[
+        "dependencies"
+    ]
 
 
 def _floating_contract_query(candidate_class, *, shared_owner: bool, dtype: torch.dtype):

@@ -8,7 +8,8 @@ import torch
 import arti
 from arti import mechanisms
 from arti import formula_fabric as formula_fabric_module
-from arti.vnext_contracts import ContractLimits
+from arti.component_registry import canonical_contract_reference
+from arti.runtime_contracts import ContractLimits
 
 
 def program() -> mechanisms.FormulaFabricProgram:
@@ -339,7 +340,9 @@ def test_valid_non_finite_arena_value_fails_closed() -> None:
 def test_formula_fabric_has_versioned_alpha_identity() -> None:
     fabric = mechanisms.FormulaFabric(program())
 
-    assert arti.component_ref(fabric) == "arti/formula-fabric@1"
+    assert arti.component_ref(fabric) == canonical_contract_reference(
+        "arti/formula-fabric@1"
+    )
     spec = arti.component_spec(fabric)
     assert spec.lifecycle == "stable"
     assert spec.config_schema_version == 2

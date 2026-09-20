@@ -15,7 +15,11 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .component_registry import component_provenance, validate_component_provenance
+from .component_registry import (
+    canonical_contract_reference,
+    component_provenance,
+    validate_component_provenance,
+)
 from .serialization import ARTISaveResult, load, save
 
 
@@ -26,6 +30,22 @@ _OVERFLOW_POLICIES = ("abstain", "shard", "allow")
 _PRIVATE_MODULE_NAME = "_arti_private"
 _PRIVATE_STATE_PREFIX = f"{_PRIVATE_MODULE_NAME}."
 _EXPERT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _canonical_formula_reference(reference: str) -> str:
+    """Resolve a Formula input into the identity stored by Bank provenance."""
+
+    from .recall_formula import resolve_builtin_formula
+    from .recall_registry import RecallFormulaRegistryError, resolve_formula
+
+    builtin = resolve_builtin_formula(reference)
+    if builtin is not None:
+        assert builtin.contract.identity is not None
+        return builtin.contract.identity.reference
+    try:
+        return resolve_formula(reference).reference
+    except RecallFormulaRegistryError:
+        return canonical_contract_reference(reference)
 
 
 @dataclass(frozen=True)
@@ -197,6 +217,11 @@ def _formula_provenance_descriptor(
     else:
         raise TypeError("formula must be a formula reference, module, or None")
 
+    if reference == "custom":
+        reference = None
+    elif reference is not None:
+        reference = _canonical_formula_reference(reference)
+
     if reference is None and manifest is None and formula_module is None:
         return None
     content: dict[str, Any] = {
@@ -258,8 +283,11 @@ def _validate_formula_descriptor(value: Mapping[str, Any]) -> None:
         raise ValueError(
             "Recall Bank formula provenance fingerprint does not match its contents"
         )
-    if value["reference"] is not None and not isinstance(value["reference"], str):
-        raise ValueError("Recall Bank formula provenance reference is invalid")
+    if value["reference"] is not None:
+        if not isinstance(value["reference"], str):
+            raise ValueError("Recall Bank formula provenance reference is invalid")
+        if _canonical_formula_reference(value["reference"]) != value["reference"]:
+            raise ValueError("Recall Bank formula provenance reference is not canonical")
     for name in ("manifest", "lock"):
         if value[name] is not None and not isinstance(value[name], Mapping):
             raise ValueError(f"Recall Bank formula provenance {name} is invalid")

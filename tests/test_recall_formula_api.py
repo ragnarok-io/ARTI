@@ -7,7 +7,6 @@ import torch
 from torch import Tensor, nn
 
 from arti.recall_formula import (
-    BUILTIN_RECALL_FORMULAS,
     FactorSpec,
     MAX_RECALL_FORMULA_FACTORS,
     RecallFormulaContract,
@@ -39,10 +38,15 @@ class TrainableFormula(nn.Module):
     [("arti/delta@1", 1), ("arti/affine@1", 2), ("arti/state@1", 17)],
 )
 def test_builtin_ids_are_canonical(reference: str, factor_count: int) -> None:
-    description = BUILTIN_RECALL_FORMULAS[reference]
+    from arti.recall_formula import resolve_builtin_formula
 
+    description = resolve_builtin_formula(reference)
+
+    assert description is not None
     assert description.contract.identity is not None
-    assert description.contract.identity.reference == reference
+    assert description.contract.identity.reference.startswith(
+        reference.split("@", maxsplit=1)[0] + "@sha256:"
+    )
     assert description.contract.factor_count == factor_count
     assert len(set(description.contract.factor_names)) == factor_count
 

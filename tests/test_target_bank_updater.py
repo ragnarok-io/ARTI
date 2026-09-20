@@ -6,8 +6,8 @@ import pytest
 import torch
 
 import arti
-from arti.mechanisms import TargetBankUpdater, WriteRefinePolicy
-from arti.recall_refine import RefineBudget, RefineStop
+from arti.mechanisms import TargetBankUpdater, WriteIntegrationPolicy
+from arti.execution import ExecutionBudget, ExecutionStop
 
 
 def _inputs(*, requires_grad: bool = False):
@@ -32,7 +32,7 @@ def _updater(
         3,
         workspace_dim=8,
         private_slots=private_slots,
-        policy=WriteRefinePolicy.fixed(steps),
+        policy=WriteIntegrationPolicy.fixed(steps),
         query_seed=41,
         target_coupling=target_coupling,
     )
@@ -46,7 +46,7 @@ def _updater(
 def test_component_is_versioned_and_alpha_only() -> None:
     updater = _updater()
 
-    assert arti.component_ref(updater) == "arti/target-bank-updater@1"
+    assert arti.component_ref(updater).startswith("arti/target-bank-updater@sha256:")
     assert updater.transition_semantics == "target_conditioned_locally_affine"
     assert not hasattr(arti, "TargetBankUpdater")
     assert not hasattr(arti.nn, "TargetBankUpdater")
@@ -58,7 +58,7 @@ def test_required_target_coupling_is_version_two() -> None:
         target_coupling="required_after_bootstrap",
     )
 
-    assert arti.component_ref(updater) == "arti/target-bank-updater@2"
+    assert arti.component_ref(updater).startswith("arti/target-bank-updater@sha256:")
     assert (
         updater.transition_semantics
         == "target_coupled_locally_affine_after_bootstrap"
@@ -70,7 +70,7 @@ def test_required_target_coupling_is_version_two() -> None:
         workspace_dim=8,
         private_slots=0,
     )
-    assert arti.component_ref(resolved) == "arti/target-bank-updater@2"
+    assert arti.component_ref(resolved).startswith("arti/target-bank-updater@sha256:")
 
 
 def test_version_two_requires_target_read_after_bootstrap() -> None:
@@ -85,7 +85,7 @@ def test_version_two_requires_target_read_after_bootstrap() -> None:
         trace,
         bank,
         trace_mask=trace_mask,
-        policy=WriteRefinePolicy.fixed(1),
+        policy=WriteIntegrationPolicy.fixed(1),
         _addressable_target=torch.zeros_like(bank),
     )
     blind = updater(
@@ -119,11 +119,11 @@ def test_version_two_uses_updated_target_during_later_writes() -> None:
 
 
 def test_policy_reuses_budget_and_stop_components() -> None:
-    policy = WriteRefinePolicy.adaptive(max_steps=8, min_steps=2)
+    policy = WriteIntegrationPolicy.adaptive(max_steps=8, min_steps=2)
 
-    assert policy.budget == RefineBudget(max_steps=8, min_steps=2)
-    assert isinstance(policy.stop, RefineStop)
-    assert arti.component_ref(policy) == "arti/write-refine-policy@1"
+    assert policy.budget == ExecutionBudget(max_steps=8, min_steps=2)
+    assert isinstance(policy.stop, ExecutionStop)
+    assert arti.component_ref(policy).startswith("arti/write-integration-policy@sha256:")
 
 
 def test_target_is_an_addressable_partition_not_only_conditioning() -> None:
@@ -408,7 +408,7 @@ def test_state_dict_round_trip_preserves_output() -> None:
 
 
 def test_adaptive_stop_is_bounded() -> None:
-    policy = WriteRefinePolicy.adaptive(
+    policy = WriteIntegrationPolicy.adaptive(
         max_steps=8,
         min_steps=2,
         absolute_tolerance=1e6,
@@ -439,7 +439,7 @@ def test_stopped_sample_reports_no_unapplied_change() -> None:
         bank,
         trace_mask=trace_mask,
         exposure=torch.tensor([0.0, 1.0]),
-        policy=WriteRefinePolicy.fixed(4),
+        policy=WriteIntegrationPolicy.fixed(4),
         return_info=True,
     )
 
@@ -450,4 +450,4 @@ def test_stopped_sample_reports_no_unapplied_change() -> None:
 @pytest.mark.parametrize("steps", [0, -1])
 def test_fixed_policy_rejects_non_positive_steps(steps: int) -> None:
     with pytest.raises(ValueError):
-        WriteRefinePolicy.fixed(steps)
+        WriteIntegrationPolicy.fixed(steps)

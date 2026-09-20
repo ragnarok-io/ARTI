@@ -9,7 +9,7 @@ from torch import Tensor, nn
 
 import arti
 from arti import mechanisms
-from arti.component_registry import component_spec
+from arti.component_registry import canonical_contract_reference, component_spec
 
 
 def digest(name: str) -> str:
@@ -82,7 +82,7 @@ def signature(
         },
         local_normalization_contract={"scope": "bank_local", "kind": "topk"},
         local_formula_ref="arti/formula-fabric@2",
-        local_refine_ref="arti/refine-policy@2",
+        local_iteration_ref="arti/execution-policy@2",
         terminal_adapter_ref="arti/test-terminal-adapter@1",
         terminal_abi_ref="arti/terminal-output-abi@1",
         terminal_abi_fingerprint=abi.fingerprint,
@@ -307,14 +307,16 @@ def test_federal_component_identity_and_runtime_trace_boundary() -> None:
     value = torch.randn(1, 4)
     _result, trace = federal(value, max_k=2, return_trace=True)
 
-    assert arti.component_ref(federal) == "arti/federal-recall@1"
+    assert arti.component_ref(federal) == canonical_contract_reference(
+        "arti/federal-recall@1"
+    )
     assert component_spec(federal).lifecycle == "stable"
     assert component_spec(federal).dependencies == (
-        "arti/bank-execution-signature@1",
-        "arti/terminal-output-abi@1",
+        canonical_contract_reference("arti/bank-execution-signature@1"),
+        canonical_contract_reference("arti/terminal-output-abi@1"),
     )
     assert not any("path" in key for key in federal.state_dict())
-    assert trace.to_dict()["ref"] == "arti/federal-trace@2"
+    assert trace.to_dict()["ref"] == canonical_contract_reference("arti/federal-trace@2")
 
 
 def test_bank_ids_do_not_inherit_moduledict_dot_restriction() -> None:

@@ -15,7 +15,7 @@ from .component_registry import ComponentRef, component_ref, component_spec
 from .formula_attention import ActiveWorkspace, FormulaAttention, SelectiveCompute
 from .observation import AdaptiveObservation
 from .reversible_topology import FoldRecord, TopologyFold, TopologyUnFold
-from .vnext_contracts import (
+from .runtime_contracts import (
     EnvelopeRef,
     OffSemantics,
     OperandContract,

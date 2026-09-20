@@ -12,7 +12,6 @@ from typing import Any, Iterable, Mapping
 import torch
 import torch.nn as nn
 
-from .adaptive_pulse import AdaptivePulse
 from .arti_layer import ARTILayer
 from .attachment_config import (
     ARTIAttachConfig,
@@ -33,6 +32,7 @@ from .attachment_layer import (
     runtime_path_dims,
 )
 from .fit.insertion import get_parent_module, set_child_module
+from .component_registry import canonical_contract_reference
 from .serialization import ARTILoadResult, ARTISaveResult, load as load_arti, save as save_arti
 
 
@@ -138,7 +138,7 @@ class ARTIAttachment:
         self.set_enabled(False, paths=paths)
 
     def set_capture(self, enabled: bool = True) -> None:
-        """Enable or disable typed Pulse diagnostics at every attached layer."""
+        """Enable or disable typed Federal runtime diagnostics at every attached layer."""
 
         self._require_attached()
         for wrapper in self._layers.wrappers.values():
@@ -195,18 +195,20 @@ class ARTIAttachment:
             raise ValueError("attachment metadata cannot override unified_attachment")
         artifact_metadata = {
             "unified_attachment": {
-                "version": 2,
+                "version": 3,
                 "config": _config_payload(self.config),
                 "declaration": None
                 if self.declaration is None
                 else self.declaration.to_dict(include_source=True),
                 "host_structure": _host_structure_fingerprint(self._model),
                 "execution_surface": {
-                    "kind": "adaptive-pulse-attachment",
+                    "kind": "federal-bank-attachment",
                     "layers": {
                         path: layer.runtime_provenance() for path, layer in self.layers.items()
                     },
-                    "federal_compiler_ref": "arti/federal-static-compiler@1",
+                    "federal_compiler_ref": canonical_contract_reference(
+                        "arti/federal-static-compiler@1"
+                    ),
                     "compiled_artifact_is_separate": True,
                 },
             },
@@ -335,7 +337,7 @@ class ARTIAttachment:
 
 
 class ARTI:
-    """Attach AdaptivePulse-backed ARTILayer instances to an existing model."""
+    """Attach federated-program-backed ARTILayer instances to an existing model."""
 
     @staticmethod
     def discover(
@@ -347,7 +349,7 @@ class ARTI:
     @staticmethod
     def preview(
         model: nn.Module,
-        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+        layer: ARTILayer | LayerFactory | None = None,
         *,
         layers: str | Iterable[str] | None = None,
         freeze_backbone: bool = True,
@@ -364,14 +366,14 @@ class ARTI:
     @staticmethod
     def attach(
         model: nn.Module,
-        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+        layer: ARTILayer | LayerFactory | None = None,
         *,
         layers: str | Iterable[str] | None = None,
         freeze_backbone: bool = True,
         config: str | Path | ARTIAttachConfig | None = None,
         sample_batch: Any | None = None,
     ) -> nn.Module:
-        """Attach ARTILayer@2 in place and return the original model object."""
+        """Attach ARTILayer@3 in place and return the original model object."""
 
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
@@ -425,7 +427,7 @@ class ARTI:
         model: nn.Module,
         path: str | Path,
         *,
-        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+        layer: ARTILayer | LayerFactory | None = None,
         sample_batch: Any | None = None,
         map_location: str | torch.device | None = None,
     ) -> nn.Module:
@@ -456,7 +458,7 @@ class ARTI:
         directory: str | Path,
         *,
         model: nn.Module | None = None,
-        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+        layer: ARTILayer | LayerFactory | None = None,
         map_location: str | torch.device | None = None,
         model_kwargs: Mapping[str, Any] | None = None,
     ) -> nn.Module:
@@ -559,7 +561,7 @@ def _summary(
     model: nn.Module,
     config: AttachedARTILayerConfig,
     *,
-    layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+    layer: ARTILayer | LayerFactory | None = None,
 ) -> ARTIAttachmentSummary:
     wrappers = {
         path: module
@@ -615,8 +617,8 @@ def _config_from_payload(payload: Mapping[str, Any]) -> AttachedARTILayerConfig:
 
 def _attachment_metadata(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     metadata = manifest.get("architecture", {}).get("config", {}).get("unified_attachment")
-    if not isinstance(metadata, Mapping) or metadata.get("version") != 2:
-        raise ValueError("artifact is not an ARTILayer@2 attachment")
+    if not isinstance(metadata, Mapping) or metadata.get("version") != 3:
+        raise ValueError("artifact is not an ARTILayer@3 attachment")
     return metadata
 
 

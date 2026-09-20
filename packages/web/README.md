@@ -113,7 +113,7 @@ with the current Python package.
 ## Module Worker
 
 A minimal native module Worker example starts at
-[`examples/worker/main.ts`](https://github.com/ragnarok-io/ARTI/tree/main/packages/web/examples/worker). The main thread sends named float32
+[`examples/worker/main.ts`](./examples/worker/main.ts). The main thread sends named float32
 inputs as `{data: ArrayBuffer, dims}` and includes each buffer in the
 `postMessage` transfer list. The Worker constructs `Tensor` values, loads an
 artifact with `loadArti`, calls `run`, downloads every result to CPU, and

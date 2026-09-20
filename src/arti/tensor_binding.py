@@ -25,7 +25,6 @@ from .tensor_transaction import (
 
 
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-_COMPONENT_REF = re.compile(r"^arti/[a-z0-9][a-z0-9-]*@[1-9][0-9]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -50,9 +49,22 @@ def _require_identifier(value: str, name: str) -> str:
 
 
 def _require_component_ref(value: str, name: str) -> str:
-    if not isinstance(value, str) or _COMPONENT_REF.fullmatch(value) is None:
-        raise TensorTransactionContractError(f"{name} must be a canonical component reference")
-    return value
+    """Accept an input declaration, but retain only a full component address."""
+
+    try:
+        from .component_registry import ComponentRef, canonical_contract_reference
+
+        return ComponentRef.parse(canonical_contract_reference(value)).reference
+    except (TypeError, ValueError) as error:
+        raise TensorTransactionContractError(
+            f"{name} must resolve to a full component contract address"
+        ) from error
+
+
+def _require_state_schema_ref(value: str, name: str) -> str:
+    """Normalize a state schema to its immutable contract address."""
+
+    return _require_component_ref(value, name)
 
 
 def _require_sha256(value: str, name: str) -> str:
@@ -142,8 +154,14 @@ class ExternalTensorBinding:
             (self.provenance_fingerprint, "provenance_fingerprint"),
         ):
             _require_sha256(value, name)
-        _require_component_ref(self.component_ref, "component_ref")
-        _require_component_ref(self.state_schema_ref, "state_schema_ref")
+        object.__setattr__(
+            self, "component_ref", _require_component_ref(self.component_ref, "component_ref")
+        )
+        object.__setattr__(
+            self,
+            "state_schema_ref",
+            _require_state_schema_ref(self.state_schema_ref, "state_schema_ref"),
+        )
         if isinstance(self.root_epoch, bool) or not isinstance(self.root_epoch, int) or self.root_epoch < 0:
             raise TensorTransactionContractError("root_epoch must be a non-negative integer")
         if not isinstance(self.tensor_ref, TensorRef):
@@ -153,7 +171,7 @@ class ExternalTensorBinding:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._runtime_contract_ref,
+            "ref": _require_component_ref(self._runtime_contract_ref, "binding_ref"),
             "store_instance_id": self.store_instance_id,
             "world_id": self.world_id,
             "abi_fingerprint": self.abi_fingerprint,
@@ -221,7 +239,7 @@ class ExternalTensorProposal:
         object.__setattr__(self, "_sealed", False)
         if not isinstance(binding, ExternalTensorBinding):
             raise TensorTransactionContractError("binding must be ExternalTensorBinding")
-        _require_component_ref(producer_ref, "producer_ref")
+        producer_ref = _require_component_ref(producer_ref, "producer_ref")
         _require_sha256(producer_config_fingerprint, "producer_config_fingerprint")
         _require_sha256(producer_state_fingerprint, "producer_state_fingerprint")
         if producer_ref != binding.component_ref:
@@ -248,7 +266,7 @@ class ExternalTensorProposal:
         self.candidate_fingerprint = _tensor_fingerprint(owned)
         self.provenance_fingerprint = _fingerprint(
             {
-                "ref": self._runtime_contract_ref,
+                "ref": _require_component_ref(self._runtime_contract_ref, "proposal_ref"),
                 "binding_fingerprint": binding.fingerprint,
                 "producer_ref": producer_ref,
                 "producer_config_fingerprint": producer_config_fingerprint,
@@ -312,10 +330,20 @@ class FoldAddressBinding:
                 "write_logical_ids require a read_write source binding"
             )
         _require_sha256(self.fold_record_fingerprint, "fold_record_fingerprint")
-        _require_component_ref(self.fold_record_ref, "fold_record_ref")
-        _require_component_ref(self.producer_ref, "producer_ref")
-        _require_component_ref(self.inverse_ref, "inverse_ref")
-        _require_component_ref(self.topology_ref, "topology_ref")
+        object.__setattr__(
+            self,
+            "fold_record_ref",
+            _require_component_ref(self.fold_record_ref, "fold_record_ref"),
+        )
+        object.__setattr__(
+            self, "producer_ref", _require_component_ref(self.producer_ref, "producer_ref")
+        )
+        object.__setattr__(
+            self, "inverse_ref", _require_component_ref(self.inverse_ref, "inverse_ref")
+        )
+        object.__setattr__(
+            self, "topology_ref", _require_component_ref(self.topology_ref, "topology_ref")
+        )
         _require_sha256(self.topology_config_fingerprint, "topology_config_fingerprint")
 
     @classmethod
@@ -366,7 +394,7 @@ class FoldAddressBinding:
     def fingerprint(self) -> str:
         return _fingerprint(
             {
-                "ref": self._runtime_contract_ref,
+                "ref": _require_component_ref(self._runtime_contract_ref, "fold_address_ref"),
                 "source_binding_fingerprint": self.source.fingerprint,
                 "logical_ids": list(self.logical_ids),
                 "transported_logical_ids": [list(row) for row in self.transported_logical_ids],

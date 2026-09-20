@@ -174,7 +174,7 @@ def test_width_and_work_budgets_and_same_snapshot_readiness():
 
 def test_versioned_save_reload(tmp_path):
     model = graph()
-    assert arti.component_ref(model) == "arti/formula-program-query@7"
+    assert arti.component_ref(model).startswith("arti/formula-program-query@sha256:")
     assert arti.alpha.FormulaProgramQueryV7 is m.FormulaProgramQueryV7
     saved = arti.save(model, tmp_path / "cooperative.arti.st")
     restored = graph()

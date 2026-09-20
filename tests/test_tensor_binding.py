@@ -149,7 +149,7 @@ def test_target_bank_updater_returns_candidate_and_host_alone_commits() -> None:
         hidden_dim=2,
         slots=3,
         target_coupling="required_after_bootstrap",
-        policy=mechanisms.WriteRefinePolicy.fixed(3),
+        policy=mechanisms.WriteIntegrationPolicy.fixed(3),
     )
     candidate = updater(torch.ones(2, 2), bound.read.value)
     assert store.snapshot().epoch == snapshot.epoch

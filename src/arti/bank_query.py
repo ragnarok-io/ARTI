@@ -15,7 +15,11 @@ from typing import ClassVar, Mapping
 import torch
 from torch import Tensor, nn
 
-from .component_registry import ComponentRef, component_ref
+from .component_registry import (
+    ComponentRef,
+    canonical_contract_reference,
+    component_ref,
+)
 from .recall_experts import canonical_tensor_state_sha256
 from .serialization import ARTISaveResult, load, save
 from .tensor_schema import GradientContract, TensorSchema
@@ -285,7 +289,12 @@ class QueryExecutionSignature:
             or self.schema_version != QUERY_EXECUTION_SIGNATURE_VERSION
         ):
             raise BankQueryError("unsupported QueryExecutionSignature version")
-        ComponentRef.parse(self.query_ref)
+        try:
+            reference = canonical_contract_reference(self.query_ref)
+            ComponentRef.parse(reference)
+        except (TypeError, ValueError) as error:
+            raise BankQueryError("query_ref must be a contract reference") from error
+        object.__setattr__(self, "query_ref", reference)
         if not isinstance(self.api_identity, str) or not self.api_identity:
             raise BankQueryError("api_identity must be a non-empty qualified name")
         _require_sha256(self.config_fingerprint, field="config_fingerprint")
@@ -327,7 +336,7 @@ class QueryExecutionSignature:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "query_ref": self.query_ref,
             "api_identity": self.api_identity,
             "config_fingerprint": self.config_fingerprint,
@@ -370,7 +379,7 @@ class QueryExecutionSignature:
             raise BankQueryError(
                 "QueryExecutionSignature payload contains missing or unknown fields"
             )
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise BankQueryError("QueryExecutionSignature reference is invalid")
         capabilities = value["capabilities"]
         if not isinstance(capabilities, (list, tuple)):
@@ -617,7 +626,8 @@ def inspect_bank_query(path: str | Path) -> BankQueryAsset:
     expected_root_config = {"signature": signature.to_dict()}
     if (
         len(roots) != 1
-        or roots[0].get("ref") != SealedBankQuery._component_reference
+        or roots[0].get("ref")
+        != canonical_contract_reference(SealedBankQuery._component_reference)
         or roots[0].get("config") != expected_root_config
         or len(children) != 1
         or children[0].get("ref") != signature.query_ref

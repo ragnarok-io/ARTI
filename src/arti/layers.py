@@ -40,15 +40,15 @@ if TYPE_CHECKING:
     from .recall_policy import RecallParameterTag
 from .outputs import ARTIOutput
 from .recall_formula import RecallFormulaContract, validate_formula
-from .recall_refine import (
-    AdaptiveRefinePolicy,
-    AdaptiveRefineSchedule,
-    RecallRoutePlan,
-    RecallStopReason,
-    RecallTrace,
-    RecallTraceV2,
-    RecallTraceV3,
-    RefinePolicy,
+from .execution import (
+    AdaptiveExecutionPolicy,
+    AdaptiveExecutionSchedule,
+    RetrievalRoutePlan,
+    ExecutionStopReason,
+    ExecutionTrace,
+    ExecutionTraceV2,
+    ExecutionTraceV3,
+    ExecutionPolicy,
 )
 from .refine_exit import RefineExitControl, RefineExitRequest
 from .utils import assert_floating_tensor, detach_diagnostics
@@ -989,7 +989,7 @@ class ARTILatentRecallField(nn.Module):
         read: _ARTIRecallRead,
         *,
         detach: bool = True,
-    ) -> RecallRoutePlan:
+    ) -> RetrievalRoutePlan:
         """Capture a routing decision without caching recalled values."""
 
         if not isinstance(read, _ARTIRecallRead):
@@ -1008,7 +1008,7 @@ class ARTILatentRecallField(nn.Module):
         route: Tensor,
         *,
         detach: bool = True,
-    ) -> RecallRoutePlan:
+    ) -> RetrievalRoutePlan:
         """Normalize backend read tensors into one public route-plan schema."""
 
         if self.training and self._training_group_partitions is not None:
@@ -1036,7 +1036,7 @@ class ARTILatentRecallField(nn.Module):
             weights = weights.reshape(*weights.shape[:2], self.composition_factor, -1)
             indices = indices.reshape_as(weights)
         route = route.reshape(*route.shape[:2], self.composition_factor, -1)
-        plan = RecallRoutePlan(
+        plan = RetrievalRoutePlan(
             schema_version=1,
             routing=self.routing,
             value_composition=self.value_composition,
@@ -1053,15 +1053,15 @@ class ARTILatentRecallField(nn.Module):
     def _read_route_plan(
         self,
         z: Tensor,
-        plan: RecallRoutePlan,
+        plan: RetrievalRoutePlan,
         *,
         route_assignment: Tensor | None,
         memory: Tensor | None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Gather current Bank values through a previously captured route."""
 
-        if not isinstance(plan, RecallRoutePlan):
-            raise TypeError("route_plan must be a RecallRoutePlan")
+        if not isinstance(plan, RetrievalRoutePlan):
+            raise TypeError("route_plan must be a RetrievalRoutePlan")
         expected = (
             self.routing,
             self.value_composition,
@@ -1208,10 +1208,10 @@ class ARTILatentRecallField(nn.Module):
         selected_groups: Tensor | None = None,
         route_assignment: Tensor | None = None,
         memory: Tensor | None = None,
-        route_plan: RecallRoutePlan | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
         _selected_groups_normalized: bool = False,
         _random_source: object | None = None,
-        _random_phase: str = "refine-route",
+        _random_phase: str = "iteration-route",
         _random_step: int = 0,
     ) -> _ARTIRecallRead:
         if recall is not None and (
@@ -1311,7 +1311,7 @@ class ARTILatentRecallField(nn.Module):
             selected_groups_normalized=_selected_groups_normalized,
             return_route=self._route_influence.numel() > 0,
             random_source=None,
-            random_phase="refine-route",
+            random_phase="iteration-route",
             random_step=0,
         )
 
@@ -1640,7 +1640,7 @@ class ARTILatentRecallField(nn.Module):
         selected_groups: Tensor | None = None,
         selected_groups_normalized: bool = False,
         random_source: object | None = None,
-        random_phase: str = "refine-route",
+        random_phase: str = "iteration-route",
         random_step: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Read independently routed factors, optionally composing state online."""
@@ -1953,7 +1953,7 @@ class ARTILatentRecallField(nn.Module):
         group_offset: int = 0,
         group_count: int | None = None,
         random_source: object | None = None,
-        random_phase: str = "refine-route",
+        random_phase: str = "iteration-route",
         random_step: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         assert self.key_bank is not None
@@ -2361,8 +2361,8 @@ class ARTIDynamicStateLayer(nn.Module):
         visibility: Tensor | None = None,
         recall: Tensor | None = None,
         recall_steps: int | None = None,
-        refine_policy: RefinePolicy | AdaptiveRefinePolicy | None = None,
-        route_plan: RecallRoutePlan | None = None,
+        execution_policy: ExecutionPolicy | AdaptiveExecutionPolicy | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
         _selected_recall_groups: Tensor | None = None,
         _selected_groups_normalized: bool = False,
     ) -> tuple[Tensor, dict[str, Tensor], Tensor, Tensor]:
@@ -2408,18 +2408,18 @@ class ARTIDynamicStateLayer(nn.Module):
                 raise TypeError("recall_steps must be an integer or None")
             if recall_steps < 0:
                 raise ValueError("recall_steps must be non-negative")
-        if refine_policy is not None and recall_steps is not None:
-            raise ValueError("pass either refine_policy or recall_steps, not both")
-        if refine_policy is None:
+        if execution_policy is not None and recall_steps is not None:
+            raise ValueError("pass either execution_policy or recall_steps, not both")
+        if execution_policy is None:
             steps = configured_recall_steps if recall_steps is None else recall_steps
-            refine_policy = RefinePolicy(
+            execution_policy = ExecutionPolicy(
                 max_steps=steps,
                 min_steps=min(self.config.recall_min_steps, steps),
                 tolerance=self.config.recall_tolerance,
                 trace_level="summary",
             )
         if self.recall_state is None:
-            if refine_policy.max_steps > 0:
+            if execution_policy.max_steps > 0:
                 raise ValueError("Recall is disabled for this ARTILayer")
             recall_diagnostics: dict[str, Tensor] = {}
         else:
@@ -2427,7 +2427,7 @@ class ARTIDynamicStateLayer(nn.Module):
                 z,
                 mask,
                 recall,
-                refine_policy=refine_policy,
+                execution_policy=execution_policy,
                 route_plan=route_plan,
                 selected_groups=_selected_recall_groups,
                 selected_groups_normalized=_selected_groups_normalized,
@@ -2486,7 +2486,7 @@ class ARTIDynamicStateLayer(nn.Module):
             "recall_activation_half": torch.full(
                 (z.shape[0],),
                 1.0
-                if self.config.recall_activation == "half" and refine_policy.max_steps > 0
+                if self.config.recall_activation == "half" and execution_policy.max_steps > 0
                 else 0.0,
                 device=z.device,
                 dtype=z.dtype,
@@ -2694,12 +2694,12 @@ class ARTIRecallWriteState(nn.Module):
         return previous + write if self._formula_replaces_state else write
 
     @staticmethod
-    def _apply_refine_state_operation(
+    def _apply_iteration_state_operation(
         candidate: Tensor,
         mask: Tensor,
         operation: nn.Module | None,
     ) -> Tensor:
-        """Apply an optional existing tensor operation inside the refine loop."""
+        """Apply an optional existing tensor operation inside the execution loop."""
 
         if operation is None:
             return candidate
@@ -2722,13 +2722,13 @@ class ARTIRecallWriteState(nn.Module):
         raw_write: Tensor,
         *,
         random_source: object | None,
-        refine_step: int,
+        iteration_index: int,
     ) -> Tensor:
         activation = self.recall_activation
         if isinstance(activation, Half) and activation.stochastic and random_source is not None:
             uniform = random_source.uniform(
                 "half-survival",
-                refine_step,
+                iteration_index,
                 raw_write,
             )
             write = activation(raw_write, uniform=uniform)
@@ -2742,7 +2742,7 @@ class ARTIRecallWriteState(nn.Module):
             return torch.zeros_like(write)
         uniform = random_source.uniform(
             "recall-dropout",
-            refine_step,
+            iteration_index,
             write,
         )
         keep = (uniform >= self.dropout.p).to(dtype=write.dtype)
@@ -2846,49 +2846,49 @@ class ARTIRecallWriteState(nn.Module):
         recall: Tensor | None,
         route_assignment: Tensor | None,
         memory: Tensor | None,
-        policy: AdaptiveRefinePolicy,
-        route_plan: RecallRoutePlan | None,
+        policy: AdaptiveExecutionPolicy,
+        route_plan: RetrievalRoutePlan | None,
         selected_groups: Tensor | None,
         selected_groups_normalized: bool,
         selected_groups_first_step_only: bool,
         preserved_input: Tensor,
         state_operation: nn.Module | None,
-        refine_schedule: AdaptiveRefineSchedule | None,
+        execution_schedule: AdaptiveExecutionSchedule | None,
         random_source: object | None,
         refine_exit: nn.Module | None,
         model_exit: bool,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
-        """Execute the version-2 token-resolved adaptive refine contract."""
+        """Execute the version-2 token-resolved adaptive iteration contract."""
 
         initial = z
         record_routes = policy.trace_level in {"routes", "full"}
         record_full = policy.trace_level == "full"
-        if refine_schedule is not None:
-            if not isinstance(refine_schedule, AdaptiveRefineSchedule):
-                raise TypeError("refine_schedule must be AdaptiveRefineSchedule or None")
+        if execution_schedule is not None:
+            if not isinstance(execution_schedule, AdaptiveExecutionSchedule):
+                raise TypeError("execution_schedule must be AdaptiveExecutionSchedule or None")
             if (
-                refine_schedule.min_steps.shape != (z.shape[0],)
-                or refine_schedule.min_steps.device != z.device
+                execution_schedule.min_steps.shape != (z.shape[0],)
+                or execution_schedule.min_steps.device != z.device
             ):
-                raise ValueError("refine_schedule must match the flattened sample batch")
+                raise ValueError("execution_schedule must match the flattened sample batch")
             torch._assert_async(
-                torch.all(refine_schedule.max_steps <= policy.max_steps),
-                "refine schedule exceeds the base policy maximum",
+                torch.all(execution_schedule.max_steps <= policy.max_steps),
+                "iteration schedule exceeds the base policy maximum",
             )
-            min_steps = refine_schedule.min_steps.unsqueeze(-1)
-            max_steps = refine_schedule.max_steps.unsqueeze(-1)
-            absolute_tolerance = refine_schedule.absolute_tolerance.unsqueeze(-1)
-            relative_tolerance = refine_schedule.relative_tolerance.unsqueeze(-1)
-            required_patience = refine_schedule.patience.unsqueeze(-1)
+            min_steps = execution_schedule.min_steps.unsqueeze(-1)
+            max_steps = execution_schedule.max_steps.unsqueeze(-1)
+            absolute_tolerance = execution_schedule.absolute_tolerance.unsqueeze(-1)
+            relative_tolerance = execution_schedule.relative_tolerance.unsqueeze(-1)
+            required_patience = execution_schedule.patience.unsqueeze(-1)
             route_tolerance = (
                 None
-                if refine_schedule.route_tolerance is None
-                else refine_schedule.route_tolerance.unsqueeze(-1)
+                if execution_schedule.route_tolerance is None
+                else execution_schedule.route_tolerance.unsqueeze(-1)
             )
             cycle_tolerance = (
                 None
-                if refine_schedule.cycle_tolerance is None
-                else refine_schedule.cycle_tolerance.unsqueeze(-1)
+                if execution_schedule.cycle_tolerance is None
+                else execution_schedule.cycle_tolerance.unsqueeze(-1)
             )
         else:
             min_steps = torch.full(
@@ -2930,13 +2930,13 @@ class ARTIRecallWriteState(nn.Module):
         token_steps_committed = torch.zeros_like(mask, dtype=torch.int64)
         token_stop_reason = torch.full_like(
             mask,
-            int(RecallStopReason.MAX_STEPS),
+            int(ExecutionStopReason.MAX_STEPS),
             dtype=torch.int64,
         )
         token_stop_reason = torch.where(
             mask,
             token_stop_reason,
-            torch.full_like(token_stop_reason, int(RecallStopReason.MASKED)),
+            torch.full_like(token_stop_reason, int(ExecutionStopReason.MASKED)),
         )
         token_attempt_history: list[Tensor] = []
         token_commit_history: list[Tensor] = []
@@ -3015,14 +3015,14 @@ class ARTIRecallWriteState(nn.Module):
                     and (step == 0 or not selected_groups_first_step_only)
                 ),
                 _random_source=random_source,
-                _random_phase="refine-route",
+                _random_phase="iteration-route",
                 _random_step=step,
             )
             raw_write = read.context
             write = self._apply_recall_write_randomness(
                 raw_write,
                 random_source=random_source,
-                refine_step=step,
+                iteration_index=step,
             )
             previous = z
             step_write = torch.where(attempted.unsqueeze(-1), write, torch.zeros_like(write))
@@ -3033,7 +3033,7 @@ class ARTIRecallWriteState(nn.Module):
                 )
             else:
                 candidate = previous + step_write
-            candidate = self._apply_refine_state_operation(
+            candidate = self._apply_iteration_state_operation(
                 candidate,
                 attempted,
                 state_operation,
@@ -3233,22 +3233,22 @@ class ARTIRecallWriteState(nn.Module):
             exit_score_history.append(exit_score)
             token_stop_reason = torch.where(
                 model_exit_stop,
-                torch.full_like(token_stop_reason, int(RecallStopReason.MODEL_EXIT)),
+                torch.full_like(token_stop_reason, int(ExecutionStopReason.MODEL_EXIT)),
                 token_stop_reason,
             )
             token_stop_reason = torch.where(
                 nonfinite,
-                torch.full_like(token_stop_reason, int(RecallStopReason.NONFINITE)),
+                torch.full_like(token_stop_reason, int(ExecutionStopReason.NONFINITE)),
                 token_stop_reason,
             )
             token_stop_reason = torch.where(
                 newly_cycle,
-                torch.full_like(token_stop_reason, int(RecallStopReason.CYCLE)),
+                torch.full_like(token_stop_reason, int(ExecutionStopReason.CYCLE)),
                 token_stop_reason,
             )
             token_stop_reason = torch.where(
                 newly_converged,
-                torch.full_like(token_stop_reason, int(RecallStopReason.CONVERGED)),
+                torch.full_like(token_stop_reason, int(ExecutionStopReason.CONVERGED)),
                 token_stop_reason,
             )
             active = active & ~nonfinite & ~newly_cycle & ~newly_converged & ~model_exit_stop
@@ -3293,11 +3293,11 @@ class ARTIRecallWriteState(nn.Module):
         active_fraction = token_step_attempted.to(z.dtype).mean(dim=(0, 2))
         logical_token_steps = token_steps_committed.sum(dtype=torch.int64)
         legacy_stop_reason = torch.where(
-            token_stop_reason == int(RecallStopReason.MODEL_EXIT),
-            torch.full_like(token_stop_reason, int(RecallStopReason.MAX_STEPS)),
+            token_stop_reason == int(ExecutionStopReason.MODEL_EXIT),
+            torch.full_like(token_stop_reason, int(ExecutionStopReason.MAX_STEPS)),
             token_stop_reason,
         )
-        base_trace = RecallTraceV2(
+        base_trace = ExecutionTraceV2(
             token_steps_attempted=token_steps_attempted,
             token_steps_committed=token_steps_committed,
             token_stop_reason=legacy_stop_reason,
@@ -3314,7 +3314,7 @@ class ARTIRecallWriteState(nn.Module):
             checkpoints=checkpoints,
         )
         trace = (
-            RecallTraceV3(
+            ExecutionTraceV3(
                 base=base_trace,
                 token_stop_reason=token_stop_reason,
                 exit_requested=exit_requested_tensor,
@@ -3382,13 +3382,13 @@ class ARTIRecallWriteState(nn.Module):
         recall: Tensor | None = None,
         route_assignment: Tensor | None = None,
         memory: Tensor | None = None,
-        refine_policy: RefinePolicy | None = None,
-        route_plan: RecallRoutePlan | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
         selected_groups: Tensor | None = None,
         selected_groups_normalized: bool = False,
         selected_groups_first_step_only: bool = True,
         state_operation: nn.Module | None = None,
-        refine_schedule: AdaptiveRefineSchedule | None = None,
+        execution_schedule: AdaptiveExecutionSchedule | None = None,
         refine_exit: nn.Module | None = None,
         model_exit: bool = False,
         _random_source: object | None = None,
@@ -3398,19 +3398,19 @@ class ARTIRecallWriteState(nn.Module):
             mask = torch.ones(z.shape[:2], device=z.device, dtype=torch.bool)
         preserved_input = z
         z = torch.where(mask.unsqueeze(-1), z, torch.zeros_like(z))
-        policy = refine_policy or RefinePolicy(
+        policy = execution_policy or ExecutionPolicy(
             max_steps=self.config.recall_steps,
             min_steps=self.config.recall_min_steps,
             tolerance=self.config.recall_tolerance,
         )
-        if not isinstance(policy, (RefinePolicy, AdaptiveRefinePolicy)):
-            raise TypeError("refine_policy must be a RefinePolicy or AdaptiveRefinePolicy")
+        if not isinstance(policy, (ExecutionPolicy, AdaptiveExecutionPolicy)):
+            raise TypeError("execution_policy must be a ExecutionPolicy or AdaptiveExecutionPolicy")
         if not isinstance(model_exit, bool):
             raise TypeError("model_exit must be a bool")
         if refine_exit is not None and not isinstance(refine_exit, RefineExitControl):
             raise TypeError("refine_exit must be RefineExitControl or None")
-        if refine_exit is not None and model_exit and not isinstance(policy, AdaptiveRefinePolicy):
-            raise ValueError("refine_exit requires AdaptiveRefinePolicy@2")
+        if refine_exit is not None and model_exit and not isinstance(policy, AdaptiveExecutionPolicy):
+            raise ValueError("refine_exit requires AdaptiveExecutionPolicy@2")
         if refine_exit is not None and model_exit and policy.executor != "static_masked":
             raise ValueError("refine_exit requires static_masked execution")
         if refine_exit is not None and model_exit and not policy.check_finite:
@@ -3419,9 +3419,9 @@ class ARTIRecallWriteState(nn.Module):
             raise ValueError("route_plan does not support external recall tensors")
         if route_plan is not None and selected_groups is not None:
             raise ValueError("route_plan and selected_groups are mutually exclusive")
-        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
-            raise TypeError("route_plan must be a RecallRoutePlan or None")
-        if isinstance(policy, AdaptiveRefinePolicy):
+        if route_plan is not None and not isinstance(route_plan, RetrievalRoutePlan):
+            raise TypeError("route_plan must be a RetrievalRoutePlan or None")
+        if isinstance(policy, AdaptiveExecutionPolicy):
             return self._forward_adaptive(
                 z,
                 mask,
@@ -3435,14 +3435,14 @@ class ARTIRecallWriteState(nn.Module):
                 selected_groups_first_step_only=selected_groups_first_step_only,
                 preserved_input=preserved_input,
                 state_operation=state_operation,
-                refine_schedule=refine_schedule,
+                execution_schedule=execution_schedule,
                 random_source=_random_source,
                 refine_exit=refine_exit,
                 model_exit=model_exit,
             )
-        if refine_schedule is not None:
+        if execution_schedule is not None:
             raise ValueError(
-                "refine_schedule requires an AdaptiveRefinePolicy base"
+                "execution_schedule requires an AdaptiveExecutionPolicy base"
             )
         initial = z
         record_routes = policy.trace_level in {"routes", "full"}
@@ -3472,14 +3472,14 @@ class ARTIRecallWriteState(nn.Module):
         previous_read: Tensor | None = None
         stop_reason = torch.full(
             (z.shape[0],),
-            int(RecallStopReason.MAX_STEPS),
+            int(ExecutionStopReason.MAX_STEPS),
             device=z.device,
             dtype=torch.int64,
         )
         stop_reason = torch.where(
             active,
             stop_reason,
-            torch.full_like(stop_reason, int(RecallStopReason.MASKED)),
+            torch.full_like(stop_reason, int(ExecutionStopReason.MASKED)),
         )
         last_committed_read: _ARTIRecallRead | None = None
 
@@ -3532,14 +3532,14 @@ class ARTIRecallWriteState(nn.Module):
                     and (step == 0 or not selected_groups_first_step_only)
                 ),
                 _random_source=_random_source,
-                _random_phase="refine-route",
+                _random_phase="iteration-route",
                 _random_step=step,
             )
             raw_write = read.context
             write = self._apply_recall_write_randomness(
                 raw_write,
                 random_source=_random_source,
-                refine_step=step,
+                iteration_index=step,
             )
             previous = z
             active_tokens = (active.unsqueeze(-1) & mask).unsqueeze(-1)
@@ -3551,7 +3551,7 @@ class ARTIRecallWriteState(nn.Module):
                 )
             else:
                 candidate = previous + step_write
-            candidate = self._apply_refine_state_operation(
+            candidate = self._apply_iteration_state_operation(
                 candidate,
                 mask,
                 state_operation,
@@ -3690,17 +3690,17 @@ class ARTIRecallWriteState(nn.Module):
             newly_cycle = active & ~nonfinite & ~newly_converged & cyclic
             stop_reason = torch.where(
                 nonfinite,
-                torch.full_like(stop_reason, int(RecallStopReason.NONFINITE)),
+                torch.full_like(stop_reason, int(ExecutionStopReason.NONFINITE)),
                 stop_reason,
             )
             stop_reason = torch.where(
                 newly_cycle,
-                torch.full_like(stop_reason, int(RecallStopReason.CYCLE)),
+                torch.full_like(stop_reason, int(ExecutionStopReason.CYCLE)),
                 stop_reason,
             )
             stop_reason = torch.where(
                 newly_converged,
-                torch.full_like(stop_reason, int(RecallStopReason.CONVERGED)),
+                torch.full_like(stop_reason, int(ExecutionStopReason.CONVERGED)),
                 stop_reason,
             )
             active = active & ~nonfinite & ~newly_cycle & ~newly_converged
@@ -3727,7 +3727,7 @@ class ARTIRecallWriteState(nn.Module):
                 "recall_stop_reason": stop_reason,
             }
             if record_routes:
-                trace = RecallTrace(
+                trace = ExecutionTrace(
                     steps_attempted=steps_attempted,
                     steps_committed=steps_committed,
                     step_attempted=empty_active,
@@ -3799,7 +3799,7 @@ class ARTIRecallWriteState(nn.Module):
         for checkpoint_step, checkpoint in checkpoints.items():
             diagnostics[f"recall_checkpoint_{checkpoint_step}"] = checkpoint
         if record_routes:
-            trace = RecallTrace(
+            trace = ExecutionTrace(
                 steps_attempted=steps_attempted,
                 steps_committed=steps_committed,
                 step_attempted=torch.stack(step_attempted, dim=1),
@@ -3834,8 +3834,8 @@ class ARTIRecallWriteState(nn.Module):
         memory: Tensor | None = None,
         *,
         static_steps: bool = False,
-        refine_policy: RefinePolicy | None = None,
-        route_plan: RecallRoutePlan | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
     ) -> Tensor:
         """Return the Recall-written host tensor through the canonical engine."""
 
@@ -3846,7 +3846,7 @@ class ARTIRecallWriteState(nn.Module):
             recall,
             route_assignment,
             memory,
-            refine_policy=refine_policy,
+            execution_policy=execution_policy,
             route_plan=route_plan,
         )
         return result
@@ -4157,8 +4157,8 @@ class ARTILatentTensorLayer(nn.Module):
         frame_operators: Tensor | None = None,
         observer_coord: Tensor | None = None,
         recall_steps: int | None = None,
-        refine_policy: RefinePolicy | None = None,
-        route_plan: RecallRoutePlan | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
         _selected_recall_groups: Tensor | None = None,
         _selected_groups_normalized: bool = False,
         context: TensorContext | None = None,
@@ -4244,7 +4244,7 @@ class ARTILatentTensorLayer(nn.Module):
             visibility=visibility,
             recall=private_recall,
             recall_steps=recall_steps,
-            refine_policy=refine_policy,
+            execution_policy=execution_policy,
             route_plan=route_plan,
             _selected_recall_groups=_selected_recall_groups,
             _selected_groups_normalized=_selected_groups_normalized,

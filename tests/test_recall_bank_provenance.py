@@ -7,6 +7,8 @@ import torch
 from torch import Tensor, nn
 
 import arti
+from arti.component_registry import canonical_contract_reference
+from arti.recall_formula import builtin_formula_reference
 
 
 class TinyBank(nn.Module):
@@ -74,9 +76,9 @@ def test_provenance_records_reader_formula_updater_and_layout() -> None:
     updater_refs = {
         item["ref"] for item in provenance.updater["component_provenance"]["components"]
     }
-    assert "arti/recall@4" in reader_refs
-    assert provenance.formula["reference"] == "arti/delta@1"
-    assert "arti/updater@1" in updater_refs
+    assert canonical_contract_reference("arti/recall@4") in reader_refs
+    assert provenance.formula["reference"] == builtin_formula_reference("single")
+    assert canonical_contract_reference("arti/updater@1") in updater_refs
     assert provenance.bank_layout["dimensions"]["slots"] == 3
     assert provenance.bank_layout["dimensions"]["hidden_dim"] == 4
     assert provenance.schema_fingerprint

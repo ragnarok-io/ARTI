@@ -18,6 +18,7 @@ from torch import nn
 from .component_registry import (
     ComponentCompatibilityError,
     ComponentRef,
+    InvalidComponentRefError,
     component_spec,
     get_component_registry,
     state_dict_schema,
@@ -25,7 +26,7 @@ from .component_registry import (
 
 
 COMPONENT_GRAPH_FORMAT = "arti.component.graph"
-COMPONENT_GRAPH_VERSION = 1
+COMPONENT_GRAPH_VERSION = 2
 
 
 class ComponentGraphError(ComponentCompatibilityError):
@@ -210,6 +211,9 @@ def component_graph(model: nn.Module, *, bindings: Sequence[Any] | None = None) 
                 "id": node_id,
                 "kind": "component",
                 "ref": spec["ref"],
+                "mechanism_id": spec["mechanism_id"],
+                "contract_sha256": spec["contract_sha256"],
+                "contract": spec["contract"],
                 "api": spec["api"],
                 "variant": spec["variant"],
                 "lifecycle": spec["lifecycle"],
@@ -217,6 +221,8 @@ def component_graph(model: nn.Module, *, bindings: Sequence[Any] | None = None) 
                 "state_schema_version": spec["state_schema_version"],
                 "config": spec["config"],
                 "config_fingerprint": spec["config_fingerprint"],
+                "parameter_schema_fingerprint": spec["parameter_schema_fingerprint"],
+                "instance_sha256": spec["instance_sha256"],
                 "dependencies": spec["dependencies"],
             }
         else:
@@ -225,6 +231,9 @@ def component_graph(model: nn.Module, *, bindings: Sequence[Any] | None = None) 
                 "id": node_id,
                 "kind": "module",
                 "ref": None,
+                "mechanism_id": None,
+                "contract_sha256": None,
+                "contract": None,
                 "api": _api_name(module),
                 "variant": "opaque",
                 "lifecycle": "opaque",
@@ -232,6 +241,8 @@ def component_graph(model: nn.Module, *, bindings: Sequence[Any] | None = None) 
                 "state_schema_version": 1,
                 "config": config,
                 "config_fingerprint": _sha256_json(config),
+                "parameter_schema_fingerprint": None,
+                "instance_sha256": None,
                 "dependencies": [],
             }
         node["mounts"] = sorted(group["paths"])
@@ -348,6 +359,9 @@ def validate_component_graph(
             "id",
             "kind",
             "ref",
+            "mechanism_id",
+            "contract_sha256",
+            "contract",
             "api",
             "variant",
             "lifecycle",
@@ -355,6 +369,8 @@ def validate_component_graph(
             "state_schema_version",
             "config",
             "config_fingerprint",
+            "parameter_schema_fingerprint",
+            "instance_sha256",
             "dependencies",
             "mounts",
         }
@@ -366,7 +382,20 @@ def validate_component_graph(
         if not isinstance(node["mounts"], list) or node["mounts"] != expected_mounts:
             raise ComponentGraphError(f"component graph mounts disagree at {node['id']!r}")
         if node["ref"] is None:
-            if node["kind"] != "module" or node["lifecycle"] != "opaque":
+            if (
+                node["kind"] != "module"
+                or node["lifecycle"] != "opaque"
+                or any(
+                    node[field] is not None
+                    for field in (
+                        "mechanism_id",
+                        "contract_sha256",
+                        "contract",
+                        "parameter_schema_fingerprint",
+                        "instance_sha256",
+                    )
+                )
+            ):
                 raise ComponentGraphError("unregistered component nodes must be opaque modules")
         else:
             if node["kind"] != "component":
@@ -380,8 +409,28 @@ def validate_component_graph(
                 raise ComponentGraphError(f"component registration drift at {node['id']!r}")
             if node["config_schema_version"] != registration.config_schema_version or node["state_schema_version"] != registration.state_schema_version:
                 raise ComponentGraphError(f"component schema drift at {node['id']!r}")
-        if not isinstance(node["dependencies"], list) or any(not isinstance(dep, str) for dep in node["dependencies"]):
+            if (
+                node["mechanism_id"] != identity.mechanism_id
+                or node["contract_sha256"] != identity.address
+                or node["contract"] != registration.contract.payload()
+            ):
+                raise ComponentGraphError(f"component contract drift at {node['id']!r}")
+            if not isinstance(node["parameter_schema_fingerprint"], str) or len(node["parameter_schema_fingerprint"]) != 64:
+                raise ComponentGraphError(f"component parameter schema is invalid at {node['id']!r}")
+            if not isinstance(node["instance_sha256"], str) or not node["instance_sha256"].startswith("sha256:") or len(node["instance_sha256"]) != 71:
+                raise ComponentGraphError(f"component instance identity is invalid at {node['id']!r}")
+        if not isinstance(node["dependencies"], list):
             raise ComponentGraphError(f"component dependencies are invalid at {node['id']!r}")
+        try:
+            dependencies = [ComponentRef.parse(dependency).reference for dependency in node["dependencies"]]
+        except (InvalidComponentRefError, TypeError) as error:
+            raise ComponentGraphError(
+                f"component dependencies must be canonical contract references at {node['id']!r}"
+            ) from error
+        if dependencies != sorted(set(dependencies)):
+            raise ComponentGraphError(
+                f"component dependencies must be sorted and unique at {node['id']!r}"
+            )
 
     for edge in edges:
         kind = edge.get("kind")
@@ -398,7 +447,6 @@ def validate_component_graph(
         elif kind == "requires":
             if set(edge) != {"kind", "from", "to_ref"} or edge["from"] not in node_ids:
                 raise ComponentGraphError("requires edge is invalid")
-            ComponentRef.parse(edge["to_ref"])
             if not _known_reference(edge["to_ref"]):
                 raise ComponentGraphError(f"requires edge references an unknown component: {edge['to_ref']!r}")
         elif kind == "data":
@@ -406,6 +454,16 @@ def validate_component_graph(
                 raise ComponentGraphError("data edge is invalid")
         else:
             raise ComponentGraphError(f"unsupported component graph edge kind: {kind!r}")
+    for node in nodes:
+        required = sorted(
+            edge["to_ref"]
+            for edge in edges
+            if edge["kind"] == "requires" and edge["from"] == node["id"]
+        )
+        if node["dependencies"] != required:
+            raise ComponentGraphError(
+                f"component dependencies disagree with requires edges at {node['id']!r}"
+            )
     _validate_no_contains_cycle(value)
 
     bindings = value["bindings"]

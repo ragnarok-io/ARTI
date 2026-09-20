@@ -14,44 +14,32 @@ def test_component_catalog_is_canonical_and_explicit_about_deprecation() -> None
     refs = [item["ref"] for item in catalog]
     assert refs == sorted(refs)
     assert len(refs) == len(set(refs))
-    pulse = next(item for item in catalog if item["ref"] == "arti/pulse@1")
+    by_key = {
+        item["contract"]["semantic_key"]: item
+        for item in catalog
+        if isinstance(item.get("contract"), dict)
+    }
+    pulse = by_key["arti/pulse@1"]
     assert "Pulse" in pulse["aliases"]
     assert "arti/learned-pulse@1" in pulse["deprecated_aliases"]
-    assert arti.component_ref(arti.resolve_component("arti/learned-pulse@1", k=2, dim=4)) == "arti/pulse@1"
-    assert next(item for item in catalog if item["ref"] == "arti/recall-state@1")["variant"] == "values-only"
-    assert next(item for item in catalog if item["ref"] == "arti/survival@1")["kind"] == "survival"
-    assert next(
-        item for item in catalog if item["ref"] == "arti/recall-branch-batch@3"
-    )["constructible"] is False
+    assert arti.component_ref(arti.resolve_component("arti/learned-pulse@1", k=2, dim=4)) == pulse["ref"]
+    assert by_key["arti/recall-state@1"]["variant"] == "values-only"
+    survival_ref = arti.describe_survival("arti/survival@1").reference
+    assert next(item for item in catalog if item["ref"] == survival_ref)["kind"] == "survival"
+    assert by_key["arti/recall-branch-batch@3"]["constructible"] is False
     assert all("constructible" in item for item in catalog)
     assert all("artifact_policy" in item for item in catalog)
-    assert next(
-        item for item in catalog if item["ref"] == "arti/recall-branch-batch@3"
-    )["artifact_policy"] == "runtime_only"
-    assert next(
-        item for item in catalog if item["ref"] == "arti/recall@2"
-    )["config_schema_version"] == 2
-    assert next(
-        item for item in catalog if item["ref"] == "arti/recall@3"
-    )["config_schema_version"] == 4
-    assert next(
-        item for item in catalog if item["ref"] == "arti/batched-refine-result@1"
-    )["config_schema_version"] == 4
-    executor = next(
-        item for item in catalog if item["ref"] == "arti/batched-refine@1"
-    )
-    assert executor["constructible"] is False
-    assert executor["artifact_policy"] == "runtime_only"
-    assert executor["config_schema_version"] == 2
-    assert next(item for item in catalog if item["ref"] == "arti/layer@2")[
-        "lifecycle"
-    ] == "stable"
-    assert next(item for item in catalog if item["ref"] == "arti/pulse@2")[
-        "lifecycle"
-    ] == "stable"
-    assert next(item for item in catalog if item["ref"] == "arti/layer@1")[
-        "lifecycle"
-    ] == "legacy"
+    assert by_key["arti/recall-branch-batch@3"]["artifact_policy"] == "runtime_only"
+    assert by_key["arti/recall@2"]["config_schema_version"] == 2
+    assert by_key["arti/recall@3"]["config_schema_version"] == 4
+    executor = by_key["arti/retrieve-executor@1"]
+    assert executor["constructible"] is True
+    assert executor["artifact_policy"] == "portable"
+    layer = by_key["arti/layer@3"]
+    assert layer["lifecycle"] == "alpha"
+    assert layer["variant"] == "federal-bank-host"
+    assert by_key["arti/pulse@2"]["lifecycle"] == "stable"
+    assert by_key["arti/layer@1"]["lifecycle"] == "legacy"
 
 
 def test_component_schema_does_not_change_when_trainability_changes() -> None:
@@ -63,7 +51,13 @@ def test_component_schema_does_not_change_when_trainability_changes() -> None:
 
 def test_recall_state_has_a_canonical_component_identity() -> None:
     state = arti.mechanisms.RecallState.zeros(1, 3, 4, dtype=torch.float32)
-    assert arti.component_ref(state) == "arti/recall-state@1"
+    expected = next(
+        item["ref"]
+        for item in arti.component_catalog()
+        if isinstance(item.get("contract"), dict)
+        and item["contract"]["semantic_key"] == "arti/recall-state@1"
+    )
+    assert arti.component_ref(state) == expected
     provenance = arti.component_spec(state).to_dict()
     assert provenance["variant"] == "values-only"
     assert provenance["state_schema_version"] == arti.mechanisms.RECALL_STATE_SCHEMA_VERSION

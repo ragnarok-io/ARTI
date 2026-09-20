@@ -1,6 +1,6 @@
 [project]
 name = "arti-fit"
-version = "3.0.13a5"
+version = "3.1.0a1"
 description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Thiocy" }]
 keywords = ["pytorch", "neural-networks", "latent-tensor", "representation-learning"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -42,12 +42,15 @@ web = [
 dev = [
     "build>=1.2",
     "hatchling>=1.25",
+    "jsonschema>=4.23,<5",
     "numpy>=2.0",
     "onnx>=1.16",
-    "onnxscript>=0.3",
     "onnxruntime>=1.22,<1.24; python_version < '3.11'",
     "onnxruntime>=1.22; python_version >= '3.11'",
+    "onnxscript>=0.3",
     "pytest>=8.0",
+    "ruff>=0.15.21",
+    "tensorboard>=2.18",
     "torch>=2.2",
 ]
 docs = [
@@ -57,6 +60,14 @@ docs = [
 ]
 font = [
     "pillow>=10.0",
+]
+bench = [
+    "numpy>=2.0",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+    "torch>=2.2",
+    "tensorboard>=2.18",
 ]
 qwen = [
     "accelerate>=0.33",
@@ -71,19 +82,24 @@ peft = [
 sd = [
     "accelerate>=0.33",
     "diffusers>=0.30",
+    "numpy>=2.0",
     "peft>=0.12",
     "pillow>=10.0",
     "safetensors>=0.4",
+    "torchvision>=0.26",
     "transformers>=4.51",
 ]
 all = [
     "torch>=2.2",
+    "torchvision>=0.26",
     "jax>=0.4.30",
     "numpy>=2.0",
     "onnx>=1.16",
-    "onnxscript>=0.3",
     "onnxruntime>=1.22,<1.24; python_version < '3.11'",
     "onnxruntime>=1.22; python_version >= '3.11'",
+    "onnxscript>=0.3",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
     "pillow>=10.0",
     "accelerate>=0.33",
     "diffusers>=0.30",
@@ -96,6 +112,7 @@ all = [
     "pytest>=8.0",
     "build>=1.2",
     "hatchling>=1.25",
+    "ruff>=0.15.21",
 ]
 
 [build-system]
@@ -105,45 +122,89 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/arti"]
 
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src/arti",
-    "/tests",
-    "/docs/reference/*.schema.json",
-    "/docs/custom-recall-formulas.md",
-    "/docs/recall-artifacts.md",
-    "/docs/reversible-topology.md",
-    "/docs/adaptive-observation.md",
-    "/docs/component-provenance.md",
-    "/docs/formula-fabric.md",
-    "/docs/flattened-refine-training.md",
-    "/docs/refine-exit.md",
-    "/docs/operable-tensor-port.md",
-    "/docs/batched-refine.md",
-    "/docs/webgpu-alpha.md",
-    "/examples",
-    "/README.md",
-    "/CONTRIBUTING.md",
-    "/STABILITY.md",
-    "/SECURITY.md",
-    "/AUTHORS.md",
-    "/AI_ASSISTANCE.md",
-    "/CITATION.cff",
-    "/LICENSE",
-    "/pyproject.toml",
-    "/uv.lock",
-]
-exclude = ["/.tmp*", "/.venv", "/dist", "/build", "/benchmarks"]
-
 [tool.hatch.build.targets.wheel.force-include]
 "src/arti/py.typed" = "arti/py.typed"
 "docs/reference/fit-config.schema.json" = "arti/schemas/fit-config.schema.json"
 "docs/reference/task-graph.schema.json" = "arti/schemas/task-graph.schema.json"
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/arti",
+    "/tests",
+    "/docs",
+    "/examples",
+    "/scripts",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/AUTHORS.md",
+    "/AI_ASSISTANCE.md",
+    "/SECURITY.md",
+    "/STABILITY.md",
+    "/CITATION.cff",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+exclude = [
+    "/.tmp*",
+    "/.venv",
+    "/dist",
+    "/build",
+    "/site",
+    "/benchmarks",
+    "/data",
+    "/artifacts",
+    "/.artifacts",
+    "/packages/*/node_modules",
+    "/docs/reference/volatile-runtime-s0-baseline.json",
+    "/scripts/build_volatile_runtime_s0_baseline.py",
+    "/tests/test_volatile_runtime_s0_baseline.py",
+]
+
 [tool.uv]
 package = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    ".agents",
+    ".arti-trainer",
+    ".tmp*",
+    "dist",
+    "site",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/*.py" = ["E402", "E731"]
+"src/arti/nn.py" = ["E402"]
+
+[tool.ruff.format]
+line-ending = "auto"
+
+[dependency-groups]
+dev = [
+    "triton-windows>=3.7.1.post27 ; sys_platform == 'win32'",
+]

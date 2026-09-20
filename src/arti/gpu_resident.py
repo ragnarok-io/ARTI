@@ -38,7 +38,7 @@ class FixedResidentBucket:
     feature_dim: int
     dtype: torch.dtype
     device: torch.device
-    refine_steps: int = 1
+    iteration_steps: int = 1
     _component_reference: ClassVar[str] = "arti/fixed-resident-bucket@1"
 
     def __post_init__(self) -> None:
@@ -46,7 +46,7 @@ class FixedResidentBucket:
             (self.batch_size, "batch_size"),
             (self.workset_slots, "workset_slots"),
             (self.feature_dim, "feature_dim"),
-            (self.refine_steps, "refine_steps"),
+            (self.iteration_steps, "iteration_steps"),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise GPUResidentContractError(f"{name} must be a positive integer")
@@ -596,10 +596,10 @@ class BoundHotPagePool:
         self.assert_open()
         if not isinstance(operation, nn.Module):
             raise GPUResidentContractError("resident operation must be an nn.Module")
-        refine_steps = getattr(operation, "resident_refine_steps", None)
-        if refine_steps is not None and refine_steps != self.bucket.refine_steps:
+        iteration_steps = getattr(operation, "resident_iteration_steps", None)
+        if iteration_steps is not None and iteration_steps != self.bucket.iteration_steps:
             raise GPUResidentContractError(
-                "resident operation refine_steps differ from the fixed bucket"
+                "resident operation iteration_steps differ from the fixed bucket"
             )
 
     def eager_step(
@@ -855,16 +855,16 @@ class FormulaResidentOperation(nn.Module):
         compute: FormulaFabricCompute,
         route: FormulaRoutePlan,
         *,
-        refine_steps: int = 1,
+        iteration_steps: int = 1,
         factors: Tensor | None = None,
     ) -> None:
         super().__init__()
         if route.estimator != "hard":
             raise GPUResidentContractError("resident Formula route must be hard")
-        if isinstance(refine_steps, bool) or not isinstance(refine_steps, int) or refine_steps <= 0:
-            raise GPUResidentContractError("refine_steps must be positive")
+        if isinstance(iteration_steps, bool) or not isinstance(iteration_steps, int) or iteration_steps <= 0:
+            raise GPUResidentContractError("iteration_steps must be positive")
         self.compute = compute
-        self.refine_steps = refine_steps
+        self.iteration_steps = iteration_steps
         self._route_estimator = route.estimator
         self.register_buffer("_route_weights", route.weights)
         self.register_buffer("_route_valid_mask", route.valid_mask)
@@ -910,8 +910,8 @@ class FormulaResidentOperation(nn.Module):
         return result
 
     @property
-    def resident_refine_steps(self) -> int:
-        return self.refine_steps
+    def resident_iteration_steps(self) -> int:
+        return self.iteration_steps
 
     def indexed_inputs(
         self, batch_index: Tensor
@@ -973,7 +973,7 @@ class FormulaResidentOperation(nn.Module):
     ) -> Tensor:
         workspace = ActiveWorkspace(value, validity, exposed, intervened)
         traces: list[object] = []
-        for _step in range(self.refine_steps):
+        for _step in range(self.iteration_steps):
             computed = self.compute(
                 workspace,
                 factors,
@@ -1002,14 +1002,14 @@ class TopologyFormulaResidentOperation(nn.Module):
         compute: FormulaFabricCompute,
         route: FormulaRoutePlan,
         *,
-        refine_steps: int = 1,
+        iteration_steps: int = 1,
         factors: Tensor | None = None,
     ) -> None:
         super().__init__()
         if route.estimator != "hard":
             raise GPUResidentContractError("resident Formula route must be hard")
-        if isinstance(refine_steps, bool) or not isinstance(refine_steps, int) or refine_steps <= 0:
-            raise GPUResidentContractError("refine_steps must be positive")
+        if isinstance(iteration_steps, bool) or not isinstance(iteration_steps, int) or iteration_steps <= 0:
+            raise GPUResidentContractError("iteration_steps must be positive")
         if fold.topology.active_count != unfold.inverse_contract.active_count:
             raise GPUResidentContractError("Fold@2 and UnFold@2 active_count differ")
         if fold.topology.axis != unfold.inverse_contract.axis:
@@ -1017,7 +1017,7 @@ class TopologyFormulaResidentOperation(nn.Module):
         self.fold = fold
         self.unfold = unfold
         self.compute = compute
-        self.refine_steps = refine_steps
+        self.iteration_steps = iteration_steps
         self._route_estimator = route.estimator
         self.register_buffer("_route_weights", route.weights)
         self.register_buffer("_route_valid_mask", route.valid_mask)
@@ -1067,8 +1067,8 @@ class TopologyFormulaResidentOperation(nn.Module):
         return result
 
     @property
-    def resident_refine_steps(self) -> int:
-        return self.refine_steps
+    def resident_iteration_steps(self) -> int:
+        return self.iteration_steps
 
     def indexed_inputs(
         self, batch_index: Tensor
@@ -1142,7 +1142,7 @@ class TopologyFormulaResidentOperation(nn.Module):
             active_intervened,
         )
         traces: list[object] = []
-        for _step in range(self.refine_steps):
+        for _step in range(self.iteration_steps):
             computed = self.compute(
                 workspace,
                 factors,

@@ -1,12 +1,35 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 
 import pytest
 import torch
 
 import arti
 from arti._recall_state import RECALL_STATE_SCHEMA_VERSION
+from arti.component_registry import canonical_contract_reference
+from arti.recall_formula import builtin_formula_reference
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _refresh_contract_fingerprints(payload: dict[str, object]) -> None:
+    formula = payload["formula"]
+    assert isinstance(formula, dict)
+    formula["fingerprint"] = _sha256_json(
+        {key: value for key, value in formula.items() if key != "fingerprint"}
+    )
+    payload["fingerprint"] = _sha256_json(
+        {key: value for key, value in payload.items() if key != "fingerprint"}
+    )
 
 
 def _runtime(*, updater_factors: int = 2) -> arti.mechanisms.RecallRuntime:
@@ -27,12 +50,14 @@ def test_runtime_contract_binds_reader_updater_and_state_schema() -> None:
 
     assert restored == contract
     assert len(contract.fingerprint) == 64
-    assert contract.reader["ref"] == "arti/recall@4"
-    assert contract.updater["ref"] == "arti/normalized-updater@1"
-    assert contract.formula["reference"] == "arti/delta@1"
+    assert contract.reader["ref"] == canonical_contract_reference("arti/recall@4")
+    assert contract.updater["ref"] == canonical_contract_reference(
+        "arti/normalized-updater@1"
+    )
+    assert contract.formula["reference"] == builtin_formula_reference("single")
     assert contract.bank_layout["kind"] == "values-only"
     assert contract.bank_layout["shape"] == ["B", 3, 4]
-    assert contract.state["ref"] == "arti/recall-state@1"
+    assert contract.state["ref"] == canonical_contract_reference("arti/recall-state@1")
     assert contract.state_schema_version == RECALL_STATE_SCHEMA_VERSION
 
 
@@ -90,9 +115,20 @@ def test_runtime_contract_rejects_formula_layout_or_state_drift() -> None:
         elif field == "bank_layout":
             payload[field]["slots"] = 99
         else:
-            payload[field]["ref"] = "arti/recall-state@2"
-        with pytest.raises(ValueError, match="fingerprint"):
+            payload[field]["ref"] = "arti/recall-state@sha256:" + "0" * 64
+        with pytest.raises(ValueError, match="Formula reference|fingerprint"):
             arti.mechanisms.RecallRuntimeContract.from_dict(payload)
+
+
+def test_runtime_contract_rejects_formula_reference_inconsistent_with_lock() -> None:
+    payload = copy.deepcopy(_runtime().contract.to_dict())
+    formula = payload["formula"]
+    assert isinstance(formula, dict)
+    formula["reference"] = builtin_formula_reference("state")
+    _refresh_contract_fingerprints(payload)
+
+    with pytest.raises(ValueError, match="Formula reference disagrees"):
+        arti.mechanisms.RecallRuntimeContract.from_dict(payload)
 
 
 def test_runtime_contract_rejects_tampered_fingerprint() -> None:

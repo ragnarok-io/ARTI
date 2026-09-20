@@ -1,0 +1,123 @@
+site_name: ARTI
+site_description: Dynamic latent tensor representation layers for PyTorch-first neural systems.
+repo_name: ARTI
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: black
+      accent: indigo
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_symbol_type_heading: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Concepts:
+      - Overview: concepts/index.md
+      - Coordinates And Phase: concepts/coordinates.md
+      - Virtual Interface: concepts/virtual-interface.md
+      - Virtual Recall: concepts/virtual-recall.md
+      - Mask And Visibility: concepts/mask-visibility.md
+  - Guides:
+      - Stable Release Surface: guides/stable-release-surface.md
+      - New Developer Guide: guides/new-developer.md
+      - Component Provenance: guides/component-provenance.md
+      - PyTorch Quickstart: guides/torch-quickstart.md
+      - Progressive API: guides/progressive-api.md
+      - Participant Context API: guides/participant-context.md
+      - Runtime Vocab Binding: guides/runtime-vocab-binding.md
+      - arti.st Weight Protocol: guides/arti-st.md
+      - Activation And Workspace APIs: guides/activation-workspace.md
+      - Reversible Topology: guides/reversible-topology.md
+      - Formula Fabric: guides/formula-fabric.md
+      - Federal Bank Contracts: guides/federal-contracts.md
+      - Federal Path Compilation: guides/federal-compilation.md
+      - Adaptive Observation: guides/adaptive-observation.md
+      - UnFold Value-Preserving Layouts: guides/unfold.md
+      - Qwen Glyph Runtime Adapter: guides/qwen-glyph-runtime-adapter.md
+      - Text Tensor: guides/text-tensor.md
+      - Membrane Visibility Routing: guides/membrane-visibility-routing.md
+      - Fit Adaptation: guides/fit-adaptation.md
+      - Pretrained Workflows: guides/pretrained-workflows.md
+      - Fit Config Template: guides/fit-config-template.md
+      - Virtual Recall Training: guides/virtual-recall-training.md
+      - Custom Recall Formulas: guides/custom-recall-formulas.md
+      - Recall Artifacts: guides/recall-artifacts.md
+      - Recall Runtime: guides/recall-runtime.md
+      - Flattened Refine Training: guides/flattened-refine-training.md
+      - Formula-Controlled Refine Exit: guides/refine-exit.md
+      - Operable Tensor Port: guides/operable-tensor-port.md
+      - Layered Recall: guides/layered-recall.md
+      - Tensor Context And Emission: guides/tensor-context-and-emission.md
+      - Unified Model Attachment: guides/unified-attachment.md
+      - Recall Topology Screening: guides/recall-topology-screening.md
+      - GPU Validation: guides/gpu-validation.md
+      - JAX Backend Roadmap: guides/jax-backend.md
+      - WebGPU Alpha: guides/webgpu-alpha.md
+      - Development Workflow: guides/development.md
+      - Release Checklist: guides/release.md
+  - API:
+      - Quick Reference: api/quick-reference.md
+      - Public API: api/public.md
+      - Activation And Workspace: api/nn.md
+      - PyTorch Backend: api/torch.md
+      - PyTorch Layers: api/torch-layers.md
+      - PyTorch Functional: api/torch-functional.md
+      - PyTorch Training: api/torch-training.md
+      - Fit API: api/fit.md
+      - Pretrained API: api/pretrained.md
+      - Backend Helpers: api/backend.md
+      - Layers: api/layers.md
+      - Functional: api/functional.md
+      - Training: api/training.md
+  - Reference:
+      - Capabilities: reference/capabilities.md
+      - Program Roles: reference/program-roles.md
+      - Validation Matrix: reference/validation-matrix.md
+      - Evidence Schema: reference/evidence-schema.md
+      - K-wide Branch Search: reference/branch-search.md
+      - External Tensor Binding: reference/external-tensor-binding.md
+      - GPU Resident Hot-Only Runtime: reference/gpu-resident-hot-only.md
+      - K2 Branch Harness: reference/k2-branch-harness.md
+      - Runtime Checkpoint: reference/runtime-checkpoint.md
+      - Volatile Tensor Runtime: reference/volatile-tensor-runtime.md
+  - Validation:
+      - Mechanism Evidence: validation/mechanism-evidence.md
+      - Qwen Recall + Half Efficiency: validation/qwen-recall-half-efficiency.md
+      - Recall Capacity Scaling: validation/recall-scaling-law.md
+      - Recall Recognition Modes: validation/recall-recognition-modes.md
+      - Layered Recall Trajectory: validation/layered-recall-trajectory.md
+      - Qwen Layered Recall: validation/qwen-layered-recall.md
+      - Qwen Recall Open Topology: validation/qwen-recall-open-topology.md
+      - Recall Scaling And Line Capacity: validation/recall-scaling-evidence.md
+      - Pulse Visual Field Concat: validation/visual-field-concat.md
+      - VisualScan Pixel-Shift Super-Resolution: validation/visual-scan-superresolution.md
+      - Qwen Dynamic Vocab Goal: validation/qwen-dynamic-vocab-goal.md

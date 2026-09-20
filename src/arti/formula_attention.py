@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from .reversible_topology import FoldedTensor
-from .vnext_contracts import ContractLimits, DEFAULT_CONTRACT_LIMITS, FoldedPulseSupports
+from .runtime_contracts import ContractLimits, DEFAULT_CONTRACT_LIMITS, FoldedPulseSupports
 
 
 @dataclass(frozen=True)

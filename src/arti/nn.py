@@ -89,7 +89,7 @@ class _LazySameDimProjection(nn.Module):
         return self.proj(x)
 
 
-class _GatedRefineDelta(nn.Module):
+class _GatedCorrectionDelta(nn.Module):
     def __init__(self, dim: int, hidden_dim: int | None = None) -> None:
         super().__init__()
         mid = dim if hidden_dim is None else min(dim, hidden_dim)
@@ -194,7 +194,7 @@ class Half(nn.Module):
                 reference = getattr(survival, "reference", None)
                 if isinstance(reference, str) and survival_is_registered(reference):
                     description = describe_survival(reference)
-                    self._survival_ref = reference
+                    self._survival_ref = description.reference
                     self._survival_portable = description.portable
                     self._survival_runtime_only = not description.portable
                     if survival_config is None:
@@ -240,17 +240,14 @@ class Half(nn.Module):
 
     @property
     def survival_reference(self) -> str | None:
-        """Return the versioned identity of the configured survival rule."""
+        """Return the resolved immutable contract identity of the survival rule."""
 
         if self._survival_ref is not None:
             return self._survival_ref
         if self._survival_runtime_only:
             return None
-        return (
-            "arti/survival@2"
-            if self.context_mode == "contextual"
-            else "arti/survival@1"
-        )
+        declaration = "arti/survival@2" if self.context_mode == "contextual" else "arti/survival@1"
+        return resolve_survival(declaration).reference
 
     @property
     def survival_operator(self) -> nn.Module | None:
@@ -1417,8 +1414,8 @@ class LearnedPulse(nn.Module):
         *,
         dim: int | None = None,
         hidden_dim: int | None = None,
-        refine: bool = False,
-        refine_mode: str = "mlp",
+        correction: bool = False,
+        correction_mode: str = "mlp",
         dropout: float = 0.0,
         fold_mode: str = "soft",
         fold_topk: int | None = None,
@@ -1432,10 +1429,10 @@ class LearnedPulse(nn.Module):
             raise ValueError("dim must be positive")
         if hidden_dim is not None and hidden_dim <= 0:
             raise ValueError("hidden_dim must be positive")
-        if refine and dim is None:
-            raise ValueError("dim must be provided when refine=True")
-        if refine_mode not in {"mlp", "gated"}:
-            raise ValueError("refine_mode must be 'mlp' or 'gated'")
+        if correction and dim is None:
+            raise ValueError("dim must be provided when correction=True")
+        if correction_mode not in {"mlp", "gated"}:
+            raise ValueError("correction_mode must be 'mlp' or 'gated'")
         if fold_mode not in {"soft", "attention"}:
             raise ValueError("fold_mode must be 'soft' or 'attention'")
         if fold_mode == "attention" and dim is None:
@@ -1445,8 +1442,8 @@ class LearnedPulse(nn.Module):
         self.k = int(k)
         self.dim = None if dim is None else int(dim)
         self.hidden_dim = None if hidden_dim is None else int(hidden_dim)
-        self.refine_enabled = bool(refine)
-        self.refine_mode = refine_mode
+        self.correction_enabled = bool(correction)
+        self.correction_mode = correction_mode
         self.fold_mode = fold_mode
         self.fold_topk = None if fold_topk is None else int(fold_topk)
         self.q_topk = None if q_topk is None else int(q_topk)
@@ -1484,12 +1481,12 @@ class LearnedPulse(nn.Module):
             self.fold = Fold(k=k, dim=dim, hidden_dim=hidden_dim, dropout=dropout, mode=fold_mode, topk=fold_topk, heads=fold_heads)
 
         self.half_act = Half(stochastic=self.half_stochastic) if self.use_half else nn.Identity()
-        if refine and dim is not None and refine_mode == "mlp":
-            self.refine = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
-        elif refine and dim is not None:
-            self.refine = _GatedRefineDelta(dim, hidden_dim)
+        if correction and dim is not None and correction_mode == "mlp":
+            self.correction = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
+        elif correction and dim is not None:
+            self.correction = _GatedCorrectionDelta(dim, hidden_dim)
         else:
-            self.refine = None
+            self.correction = None
 
     def forward(
         self,
@@ -1534,8 +1531,8 @@ class LearnedPulse(nn.Module):
             pulses = self.fold(survived, q=guide)
         else:
             pulses = self._fold_with_logits(survived, guide, assignment_logits)
-        if self.refine is not None:
-            pulses = pulses + self.refine(pulses)
+        if self.correction is not None:
+            pulses = pulses + self.correction(pulses)
         if not return_info:
             return pulses
         info = {
@@ -1583,10 +1580,10 @@ class LearnedPulse(nn.Module):
             args.append(f"dim={self.dim}")
         if self.hidden_dim is not None:
             args.append(f"hidden_dim={self.hidden_dim}")
-        if self.refine_enabled:
-            args.append("refine=True")
-        if self.refine_enabled and self.refine_mode != "mlp":
-            args.append(f"refine_mode={self.refine_mode!r}")
+        if self.correction_enabled:
+            args.append("correction=True")
+        if self.correction_enabled and self.correction_mode != "mlp":
+            args.append(f"correction_mode={self.correction_mode!r}")
         if self.fold_mode != "soft":
             args.append(f"fold_mode={self.fold_mode!r}")
         if self.fold_topk is not None:
@@ -2115,14 +2112,14 @@ class Recall(nn.Module):
         super().__init__()
         from .config import ARTIConfig
         from .layers import ARTIRecallWriteState
-        from .recall_formula import BUILTIN_RECALL_FORMULAS
+        from .recall_formula import resolve_builtin_formula
         from .recall_formula import FactorSpec, RecallFormulaContract, RecallFormulaLock
 
         formula_module: nn.Module | None
         declared_contract: RecallFormulaContract | None = None
         if isinstance(formula, str):
             formula_id = formula
-            builtin = BUILTIN_RECALL_FORMULAS.get(formula_id)
+            builtin = resolve_builtin_formula(formula_id)
             if builtin is None:
                 from .recall_registry import resolve_formula
 
@@ -2132,8 +2129,6 @@ class Recall(nn.Module):
                 formula_id = registration.reference
                 formula_origin = registration.origin
                 formula_portable = registration.portable
-                manifest_id = registration.identity.base_id
-                manifest_version = str(registration.identity.version)
                 declared_contract = getattr(formula_module, "recall_formula_contract", None)
             else:
                 formula_module = None
@@ -2141,8 +2136,7 @@ class Recall(nn.Module):
                 formula_origin = "builtin"
                 formula_portable = True
                 assert builtin.contract.identity is not None
-                manifest_id = builtin.contract.identity.base_id
-                manifest_version = str(builtin.contract.identity.version)
+                formula_id = builtin.contract.identity.reference
                 declared_contract = builtin.contract
         elif isinstance(formula, nn.Module):
             formula_module = formula
@@ -2150,8 +2144,6 @@ class Recall(nn.Module):
             value_composition = "single"
             formula_origin = "custom"
             formula_portable = False
-            manifest_id = "custom"
-            manifest_version = "1"
             declared_contract = getattr(formula_module, "recall_formula_contract", None)
         else:
             raise TypeError("formula must be a versioned formula ID or torch.nn.Module")
@@ -2241,8 +2233,6 @@ class Recall(nn.Module):
         self.breadth = resolved_breadth
         self.breadth_mode = resolved_breadth_mode
         self.breadth_aggregation = breadth_aggregation
-        self._manifest_id = manifest_id
-        self._manifest_version = manifest_version
         self.state = ARTIRecallWriteState(
             config,
             identity_init_bank=identity_init,
@@ -2263,6 +2253,12 @@ class Recall(nn.Module):
             hidden_dim=self.dim,
             slots=self.slots,
         )
+        contract_identity = self._formula_contract.identity
+        self._formula_ref = (
+            contract_identity.reference
+            if contract_identity is not None and contract_identity.is_canonical
+            else None
+        )
 
     @property
     def routing_normalizer(self) -> str:
@@ -2275,7 +2271,7 @@ class Recall(nn.Module):
         return "arti/recall@3" if self.routing_normalizer == "per_bank" else "arti/recall@2"
 
     def _automatic_rng_plan(self, value: Tensor):
-        from .batched_refine import ExecutionRNGPlan
+        from .branch_search import ExecutionRNGPlan
 
         seed = int(torch.randint(0, 2**63 - 1, (), device="cpu").item())
         return ExecutionRNGPlan(
@@ -2369,8 +2365,7 @@ class Recall(nn.Module):
 
         layout = RecallLayoutManifest(factor_order=self.factor_names)
         return RecallFormulaManifest(
-            id=self._manifest_id,
-            version=self._manifest_version,
+            formula_ref=self._formula_ref,
             factor_names=self.factor_names,
             origin=self.formula_origin,
             portable=self.formula_portable,
@@ -2447,7 +2442,7 @@ class Recall(nn.Module):
         recall: Tensor | None = None,
         memory: Tensor | None = None,
         route_assignment: Tensor | None = None,
-        refine_policy=None,
+        execution_policy=None,
         route_plan=None,
         active_k: int | Tensor | None = None,
         rng_plan=None,
@@ -2457,23 +2452,23 @@ class Recall(nn.Module):
         return_trace: bool = False,
         return_branches: bool = False,
     ):
-        from .recall_refine import (
-            AdaptiveRefinePolicy,
-            RecallRoutePlan,
-            RecallTrace,
-            RecallTraceV2,
-            RecallTraceV3,
-            RefinePolicy,
+        from .execution import (
+            AdaptiveExecutionPolicy,
+            RetrievalRoutePlan,
+            ExecutionTrace,
+            ExecutionTraceV2,
+            ExecutionTraceV3,
+            ExecutionPolicy,
         )
 
-        if refine_policy is not None and not isinstance(
-            refine_policy, (RefinePolicy, AdaptiveRefinePolicy)
+        if execution_policy is not None and not isinstance(
+            execution_policy, (ExecutionPolicy, AdaptiveExecutionPolicy)
         ):
             raise TypeError(
-                "refine_policy must be a RefinePolicy or AdaptiveRefinePolicy"
+                "execution_policy must be a ExecutionPolicy or AdaptiveExecutionPolicy"
             )
-        if route_plan is not None and not isinstance(route_plan, RecallRoutePlan):
-            raise TypeError("route_plan must be a RecallRoutePlan or None")
+        if route_plan is not None and not isinstance(route_plan, RetrievalRoutePlan):
+            raise TypeError("route_plan must be a RetrievalRoutePlan or None")
         if not isinstance(model_exit, bool):
             raise TypeError("model_exit must be a bool")
         if refine_exit is not None:
@@ -2485,13 +2480,13 @@ class Recall(nn.Module):
             raise ValueError(
                 "return_info, return_trace, and return_branches are mutually exclusive"
             )
-        if refine_policy is None:
+        if execution_policy is None:
             trace_level = "routes" if return_trace else ("summary" if return_info else "none")
-            refine_policy = RefinePolicy(trace_level=trace_level)
-        elif return_trace and refine_policy.trace_level not in {"routes", "full"}:
-            refine_policy = refine_policy.replace(trace_level="routes")
-        elif return_info and refine_policy.trace_level == "none":
-            refine_policy = refine_policy.replace(trace_level="summary")
+            execution_policy = ExecutionPolicy(trace_level=trace_level)
+        elif return_trace and execution_policy.trace_level not in {"routes", "full"}:
+            execution_policy = execution_policy.replace(trace_level="routes")
+        elif return_info and execution_policy.trace_level == "none":
+            execution_policy = execution_policy.replace(trace_level="summary")
         if not isinstance(x, Tensor) or not x.is_floating_point():
             raise TypeError("x must be a floating-point Tensor")
         if x.ndim not in {2, 3}:
@@ -2519,8 +2514,8 @@ class Recall(nn.Module):
             and route_assignment is None
             and route_plan is None
             and not (
-                isinstance(refine_policy, AdaptiveRefinePolicy)
-                and refine_policy.executor != "static_masked"
+                isinstance(execution_policy, AdaptiveExecutionPolicy)
+                and execution_policy.executor != "static_masked"
             )
             and not (
                 hasattr(torch, "compiler")
@@ -2528,7 +2523,7 @@ class Recall(nn.Module):
             )
         )
         if use_breadth:
-            from .batched_refine import ExecutionRNGPlan, run_batched_refine
+            from .branch_search import ExecutionRNGPlan, run_branch_search
 
             if rng_plan is not None and not isinstance(rng_plan, ExecutionRNGPlan):
                 raise TypeError("rng_plan must be an ExecutionRNGPlan or None")
@@ -2542,13 +2537,13 @@ class Recall(nn.Module):
             )
             if rng_plan is None and needs_rng:
                 rng_plan = self._automatic_rng_plan(sequence)
-            result = run_batched_refine(
+            result = run_branch_search(
                 self,
                 sequence,
                 mask=token_mask,
                 max_k=self.breadth,
                 active_k=active_k,
-                refine_policy=refine_policy,
+                execution_policy=execution_policy,
                 rng_plan=rng_plan,
                 refine_exit=refine_exit,
                 model_exit=model_exit,
@@ -2588,13 +2583,13 @@ class Recall(nn.Module):
                 ).mean(dim=(0, 2))
             if return_trace:
                 trace_type = (
-                    RecallTraceV3
-                    if isinstance(refine_policy, AdaptiveRefinePolicy)
+                    ExecutionTraceV3
+                    if isinstance(execution_policy, AdaptiveExecutionPolicy)
                     and refine_exit is not None
                     and model_exit
-                    else RecallTraceV2
-                    if isinstance(refine_policy, AdaptiveRefinePolicy)
-                    else RecallTrace
+                    else ExecutionTraceV2
+                    if isinstance(execution_policy, AdaptiveExecutionPolicy)
+                    else ExecutionTrace
                 )
                 return output, trace_type.from_diagnostics(
                     diagnostics,
@@ -2614,7 +2609,7 @@ class Recall(nn.Module):
             recall,
             route_assignment,
             memory=memory,
-            refine_policy=refine_policy,
+            execution_policy=execution_policy,
             route_plan=route_plan,
             refine_exit=refine_exit,
             model_exit=model_exit,
@@ -2623,13 +2618,13 @@ class Recall(nn.Module):
         if not return_info and not return_trace:
             return output
         trace_type = (
-            RecallTraceV3
-            if isinstance(refine_policy, AdaptiveRefinePolicy)
+            ExecutionTraceV3
+            if isinstance(execution_policy, AdaptiveExecutionPolicy)
             and refine_exit is not None
             and model_exit
-            else RecallTraceV2
-            if isinstance(refine_policy, AdaptiveRefinePolicy)
-            else RecallTrace
+            else ExecutionTraceV2
+            if isinstance(execution_policy, AdaptiveExecutionPolicy)
+            else ExecutionTrace
         )
         trace = (
             trace_type.from_diagnostics(
@@ -2652,20 +2647,31 @@ class Recall(nn.Module):
         )
 
 
-class RecallRefiner(nn.Module):
-    """Runtime-policy adapter for the canonical Recall refine engine.
+class Retrieve(Recall):
+    """Canonical operation that retrieves operands and advances a tensor state.
 
-    This module owns no refinement loop and no trainable state. It exists for
-    composition APIs that prefer a named refiner component while ensuring the
+    ``Recall`` is retained as the historical implementation class for artifact
+    inspection.  ``Retrieve`` deliberately owns the same numerical engine: it
+    changes the public role name without creating a second execution path.
+    """
+
+    _component_reference = "arti/retrieve@1"
+
+
+class RecallExecutor(nn.Module):
+    """Runtime-policy adapter for the canonical iterative Recall engine.
+
+    This module owns no execution loop and no trainable state. It exists for
+    composition APIs that prefer a named executor component while ensuring the
     wrapped :class:`Recall` remains the single execution owner.
     """
 
-    _component_reference = "arti/recall-refiner@2"
+    _component_reference = "arti/recall-executor@2"
 
     def __init__(self, recall_layer: Recall) -> None:
         super().__init__()
         if not isinstance(recall_layer, Recall):
-            raise TypeError("RecallRefiner requires an arti.nn.Recall instance")
+            raise TypeError("RecallExecutor requires an arti.nn.Recall instance")
         self.recall_layer = recall_layer
 
     def forward(
@@ -2675,16 +2681,27 @@ class RecallRefiner(nn.Module):
         policy=None,
         **kwargs,
     ):
-        from .recall_refine import AdaptiveRefinePolicy, RefinePolicy
+        from .execution import AdaptiveExecutionPolicy, ExecutionPolicy
 
-        if not isinstance(policy, (RefinePolicy, AdaptiveRefinePolicy)):
-            raise TypeError("policy must be an explicit RefinePolicy or AdaptiveRefinePolicy")
-        if "refine_policy" in kwargs:
-            raise ValueError("pass policy= once; refine_policy is owned by RecallRefiner")
-        return self.recall_layer(h, refine_policy=policy, **kwargs)
+        if not isinstance(policy, (ExecutionPolicy, AdaptiveExecutionPolicy)):
+            raise TypeError("policy must be an explicit ExecutionPolicy or AdaptiveExecutionPolicy")
+        if "execution_policy" in kwargs:
+            raise ValueError("pass policy= once; execution_policy is owned by RecallExecutor")
+        return self.recall_layer(h, execution_policy=policy, **kwargs)
 
     def extra_repr(self) -> str:
         return f"recall={self.recall_layer._component_reference}"
+
+
+class RetrieveExecutor(RecallExecutor):
+    """Canonical policy adapter for :class:`Retrieve`."""
+
+    _component_reference = "arti/retrieve-executor@1"
+
+    def __init__(self, retrieve: Retrieve) -> None:
+        if not isinstance(retrieve, Retrieve):
+            raise TypeError("RetrieveExecutor requires an arti.nn.Retrieve instance")
+        super().__init__(retrieve)
 
 
 Pulse = LearnedPulse
@@ -2698,8 +2715,9 @@ __all__ = [
     "Pulse",
     "LearnedPulse",
     "FusionPulse",
-    "Recall",
-    "RecallRefiner",
+    "Retrieve",
+    "RecallExecutor",
+    "RetrieveExecutor",
     "EmissionRouter",
     "EmissionRouterConfig",
     "EmissionRouterOutput",

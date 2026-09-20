@@ -15,7 +15,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from .component_registry import component_ref
+from .component_registry import ComponentRef, canonical_contract_reference, component_ref
 from .recall_experts import canonical_tensor_state_sha256
 from .tensor_view import TensorView, TensorViewPattern
 
@@ -457,6 +457,13 @@ class TensorViewQueryExecutionSignature:
         ):
             if not isinstance(value, str) or not value:
                 raise ShapeQueryError(f"{name} must be non-empty")
+        try:
+            for field in ("query_ref", "observer_ref", "matcher_ref"):
+                reference = canonical_contract_reference(getattr(self, field))
+                ComponentRef.parse(reference)
+                object.__setattr__(self, field, reference)
+        except (TypeError, ValueError) as error:
+            raise ShapeQueryError("TensorView Query references must be content-addressed") from error
         for value in (
             self.config_fingerprint,
             self.state_schema_fingerprint,
@@ -480,7 +487,7 @@ class TensorViewQueryExecutionSignature:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "query_ref": self.query_ref,
             "api_identity": self.api_identity,
             "config_fingerprint": self.config_fingerprint,
@@ -495,6 +502,13 @@ class TensorViewQueryExecutionSignature:
 
     def to_dict(self) -> dict[str, object]:
         return {**self._payload(), "fingerprint": self.fingerprint}
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "TensorViewQueryExecutionSignature":
+        """Clone immutable signature data for independent attached Federal graphs."""
+
+        result = type(self).from_dict(self.to_dict())
+        memo[id(self)] = result
+        return result
 
     @classmethod
     def from_dict(
@@ -520,7 +534,7 @@ class TensorViewQueryExecutionSignature:
             raise ShapeQueryError(
                 "TensorView Query signature contains missing or unknown fields"
             )
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise ShapeQueryError("TensorView Query signature reference is invalid")
         member_ids = value["member_ids"]
         if not isinstance(member_ids, (list, tuple)):

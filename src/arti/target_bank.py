@@ -10,36 +10,36 @@ from torch import Tensor, nn
 
 from .functional import masked_mean, masked_softmax
 from .recall_formula import RecallFormulaContract, validate_formula
-from .recall_refine import RefineBudget, RefineStop
+from .execution import ExecutionBudget, ExecutionStop
 
 
 @dataclass(frozen=True)
-class WriteRefinePolicy:
+class WriteIntegrationPolicy:
     """Bounded integration policy for one target-Bank write exposure."""
 
-    _component_reference: ClassVar[str] = "arti/write-refine-policy@1"
+    _component_reference: ClassVar[str] = "arti/write-integration-policy@1"
 
-    budget: RefineBudget = field(
-        default_factory=lambda: RefineBudget(max_steps=1, min_steps=1)
+    budget: ExecutionBudget = field(
+        default_factory=lambda: ExecutionBudget(max_steps=1, min_steps=1)
     )
-    stop: RefineStop | None = None
+    stop: ExecutionStop | None = None
     exposure_schedule: str = "normalized"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.budget, RefineBudget):
-            raise TypeError("budget must be a RefineBudget")
+        if not isinstance(self.budget, ExecutionBudget):
+            raise TypeError("budget must be an ExecutionBudget")
         if self.budget.max_steps <= 0 or self.budget.min_steps <= 0:
-            raise ValueError("write-refine budgets must contain at least one step")
-        if self.stop is not None and not isinstance(self.stop, RefineStop):
-            raise TypeError("stop must be a RefineStop or None")
+            raise ValueError("write integration budgets must contain at least one step")
+        if self.stop is not None and not isinstance(self.stop, ExecutionStop):
+            raise TypeError("stop must be an ExecutionStop or None")
         if self.stop is not None and self.stop.scope != "sample":
-            raise ValueError("write refinement currently supports sample-scoped stopping")
+            raise ValueError("write integration currently supports sample-scoped stopping")
         if self.exposure_schedule != "normalized":
             raise ValueError("exposure_schedule must be 'normalized'")
 
     @classmethod
-    def fixed(cls, steps: int) -> "WriteRefinePolicy":
-        return cls(budget=RefineBudget(max_steps=steps, min_steps=steps))
+    def fixed(cls, steps: int) -> "WriteIntegrationPolicy":
+        return cls(budget=ExecutionBudget(max_steps=steps, min_steps=steps))
 
     @classmethod
     def adaptive(
@@ -50,10 +50,10 @@ class WriteRefinePolicy:
         absolute_tolerance: float = 0.0,
         relative_tolerance: float = 1e-4,
         patience: int = 1,
-    ) -> "WriteRefinePolicy":
+    ) -> "WriteIntegrationPolicy":
         return cls(
-            budget=RefineBudget(max_steps=max_steps, min_steps=min_steps),
-            stop=RefineStop(
+            budget=ExecutionBudget(max_steps=max_steps, min_steps=min_steps),
+            stop=ExecutionStop(
                 scope="sample",
                 absolute_tolerance=absolute_tolerance,
                 relative_tolerance=relative_tolerance,
@@ -61,7 +61,7 @@ class WriteRefinePolicy:
             ),
         )
 
-    def replace(self, **changes: Any) -> "WriteRefinePolicy":
+    def replace(self, **changes: Any) -> "WriteIntegrationPolicy":
         return replace(self, **changes)
 
 
@@ -75,7 +75,7 @@ def _fixed_query_weight(dim: int, seed: int) -> Tensor:
 
 
 class TargetBankUpdater(nn.Module):
-    """Refine and update a Bank that is itself addressable Recall memory.
+    """Integrate an event into a Bank that is itself addressable memory.
 
     Every step independently reads a private memory partition, when configured,
     and the current target Bank. The partitions normalize internally and are
@@ -91,7 +91,7 @@ class TargetBankUpdater(nn.Module):
         workspace_dim: int | None = None,
         private_slots: int = 0,
         formula: nn.Module | None = None,
-        policy: WriteRefinePolicy | None = None,
+        policy: WriteIntegrationPolicy | None = None,
         query_seed: int = 0,
         target_coupling: Literal["optional", "required_after_bootstrap"] = "optional",
         epsilon: float = 1e-8,
@@ -114,8 +114,8 @@ class TargetBankUpdater(nn.Module):
             )
         if epsilon <= 0:
             raise ValueError("epsilon must be positive")
-        if policy is not None and not isinstance(policy, WriteRefinePolicy):
-            raise TypeError("policy must be a WriteRefinePolicy or None")
+        if policy is not None and not isinstance(policy, WriteIntegrationPolicy):
+            raise TypeError("policy must be a WriteIntegrationPolicy or None")
 
         self.hidden_dim = int(hidden_dim)
         self.slots = int(slots)
@@ -123,7 +123,7 @@ class TargetBankUpdater(nn.Module):
         self.private_slots = int(private_slots)
         self.query_seed = int(query_seed)
         self.target_coupling = target_coupling
-        self.policy = policy or WriteRefinePolicy()
+        self.policy = policy or WriteIntegrationPolicy()
         self.epsilon = float(epsilon)
 
         self.trace_projection = nn.Linear(hidden_dim, self.workspace_dim)
@@ -210,7 +210,7 @@ class TargetBankUpdater(nn.Module):
         target_mask: Tensor | None = None,
         write_mask: Tensor | None = None,
         exposure: float | Tensor = 1.0,
-        policy: WriteRefinePolicy | None = None,
+        policy: WriteIntegrationPolicy | None = None,
         return_info: Literal[False] = False,
     ) -> Tensor: ...
 
@@ -224,7 +224,7 @@ class TargetBankUpdater(nn.Module):
         target_mask: Tensor | None = None,
         write_mask: Tensor | None = None,
         exposure: float | Tensor = 1.0,
-        policy: WriteRefinePolicy | None = None,
+        policy: WriteIntegrationPolicy | None = None,
         return_info: Literal[True],
     ) -> tuple[Tensor, dict[str, Tensor]]: ...
 
@@ -237,14 +237,14 @@ class TargetBankUpdater(nn.Module):
         target_mask: Tensor | None = None,
         write_mask: Tensor | None = None,
         exposure: float | Tensor = 1.0,
-        policy: WriteRefinePolicy | None = None,
+        policy: WriteIntegrationPolicy | None = None,
         return_info: bool = False,
         _addressable_target: Tensor | None = None,
         _reuse_first_target_route: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         selected = self.policy if policy is None else policy
-        if not isinstance(selected, WriteRefinePolicy):
-            raise TypeError("policy must be a WriteRefinePolicy")
+        if not isinstance(selected, WriteIntegrationPolicy):
+            raise TypeError("policy must be a WriteIntegrationPolicy")
         trace_b, target_b, trace_mask_b, target_mask_b, squeeze = self._normalize_inputs(
             trace,
             target_bank,
@@ -594,4 +594,4 @@ class TargetBankUpdater(nn.Module):
         )
 
 
-__all__ = ["TargetBankUpdater", "WriteRefinePolicy"]
+__all__ = ["TargetBankUpdater", "WriteIntegrationPolicy"]

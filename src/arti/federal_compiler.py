@@ -17,6 +17,8 @@ from typing import ClassVar, Literal, Mapping, Sequence
 import torch
 from torch import Tensor, nn
 
+from .component_registry import canonical_contract_reference
+
 from .formula_fabric import FormulaArenaState, FormulaFabric, FormulaRoutePlan
 from .reversible_topology import FixedTopologyPolicy, TopologyFold, TopologyUnFold
 
@@ -30,11 +32,48 @@ def _json_fingerprint(value: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _domain_address(domain: str, value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    prefix = f"ARTI\0{domain}\0v1\0".encode("ascii")
+    return "sha256:" + hashlib.sha256(prefix + payload.encode("utf-8")).hexdigest()
+
+
+def _compile_action_address(manifest: Mapping[str, object]) -> str:
+    """Address one compiler action, distinct from source and artifact hashes."""
+
+    return _domain_address("federal-compile-action", dict(manifest))
+
+
+def _contract_ref(reference: str, *, field: str) -> str:
+    try:
+        return canonical_contract_reference(reference)
+    except (TypeError, ValueError) as error:
+        raise FederalCompileError(f"{field} must be a content-addressed contract ref") from error
+
+
 def _module_ref(module: nn.Module) -> str:
+    try:
+        from .component_registry import component_ref
+
+        return component_ref(module)
+    except Exception:
+        pass
     reference = getattr(module, "_component_reference", None)
-    if isinstance(reference, str) and reference:
-        return reference
-    return f"torch/{module.__class__.__module__}.{module.__class__.__qualname__}@1"
+    api = f"{module.__class__.__module__}.{module.__class__.__qualname__}"
+    schema = {
+        "api": api,
+        "declared_ref": reference if isinstance(reference, str) else None,
+        "parameters": [
+            {"name": name, "shape": list(value.shape), "dtype": str(value.dtype)}
+            for name, value in module.named_parameters()
+        ],
+        "buffers": [
+            {"name": name, "shape": list(value.shape), "dtype": str(value.dtype)}
+            for name, value in module.named_buffers()
+        ],
+    }
+    module_name = f"module-{hashlib.sha256(api.encode('utf-8')).hexdigest()[:16]}"
+    return f"torch/{module_name}@{_domain_address('torch-module-contract', schema)}"
 
 
 def _shape_matches(actual: Sequence[int], expected: Sequence[int | None]) -> bool:
@@ -92,14 +131,26 @@ class FederalCompileManifest:
     operation_refs: tuple[str, ...]
     dependency_refs: tuple[str, ...]
     terminal_abi_ref: str
-    refine_steps: int
+    iteration_steps: int
     input_shape: tuple[int | None, ...] | None = None
     output_shape: tuple[int | None, ...] | None = None
 
     _component_reference: ClassVar[str] = "arti/federal-compile-manifest@1"
 
     def __post_init__(self) -> None:
-        if self.schema != self._component_reference:
+        object.__setattr__(self, "schema", _contract_ref(self.schema, field="schema"))
+        object.__setattr__(self, "compiler_ref", _contract_ref(self.compiler_ref, field="compiler_ref"))
+        object.__setattr__(self, "source_ref", _contract_ref(self.source_ref, field="source_ref"))
+        object.__setattr__(self, "operation_refs", tuple(
+            _contract_ref(reference, field="operation_refs") for reference in self.operation_refs
+        ))
+        object.__setattr__(self, "dependency_refs", tuple(
+            _contract_ref(reference, field="dependency_refs") for reference in self.dependency_refs
+        ))
+        object.__setattr__(self, "terminal_abi_ref", _contract_ref(
+            self.terminal_abi_ref, field="terminal_abi_ref"
+        ))
+        if self.schema != _contract_ref(self._component_reference, field="schema"):
             raise FederalCompileError("unsupported Federal compile manifest schema")
         if self.mode != "exact-static":
             raise FederalCompileError("compiled manifest must use exact-static mode")
@@ -113,8 +164,8 @@ class FederalCompileManifest:
             raise FederalCompileError("compiled manifest dependencies must be named refs")
         if not self.terminal_abi_ref:
             raise FederalCompileError("compiled manifest requires terminal ABI provenance")
-        if isinstance(self.refine_steps, bool) or self.refine_steps <= 0:
-            raise FederalCompileError("refine_steps must be positive")
+        if isinstance(self.iteration_steps, bool) or self.iteration_steps <= 0:
+            raise FederalCompileError("iteration_steps must be positive")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -127,7 +178,7 @@ class FederalCompileManifest:
             "operation_refs": list(self.operation_refs),
             "dependency_refs": list(self.dependency_refs),
             "terminal_abi_ref": self.terminal_abi_ref,
-            "refine_steps": self.refine_steps,
+            "iteration_steps": self.iteration_steps,
             "input_shape": None if self.input_shape is None else list(self.input_shape),
             "output_shape": None if self.output_shape is None else list(self.output_shape),
         }
@@ -135,6 +186,10 @@ class FederalCompileManifest:
     @property
     def fingerprint(self) -> str:
         return _json_fingerprint(self.to_dict())
+
+    @property
+    def action_sha256(self) -> str:
+        return _compile_action_address(self.to_dict())
 
 
 class FederalParallel(nn.Module):
@@ -196,10 +251,10 @@ class FederalResidual(nn.Module):
         return value + branch_value
 
 
-class FederalRefine(nn.Module):
-    """A finite, statically expandable Refine sequence."""
+class FederalIteration(nn.Module):
+    """A finite, statically expandable iteration sequence."""
 
-    _component_reference = "arti/federal-refine@1"
+    _component_reference = "arti/federal-iteration@1"
 
     def __init__(self, operation: nn.Module, *, steps: int) -> None:
         super().__init__()
@@ -218,7 +273,7 @@ class FederalRefine(nn.Module):
         for _ in range(self.steps):
             value = self.operation(value)
             if not isinstance(value, Tensor):
-                raise TypeError("Refine operation must return a Tensor")
+                raise TypeError("iteration operation must return a Tensor")
         return value
 
 
@@ -532,12 +587,12 @@ class FederalPath(nn.Module):
         source_snapshot_fingerprint: str,
         path_ids: Sequence[str],
         terminal_abi_ref: str,
-        refine_steps: int = 1,
+        iteration_steps: int = 1,
         route_mode: Literal["frozen", "gated", "dynamic"] = "frozen",
         data_dependent_shape: bool = False,
         mutable_state: bool = False,
         runtime_callback: bool = False,
-        unbounded_refine: bool = False,
+        unbounded_iteration: bool = False,
         operation_refs: Sequence[str] | None = None,
         dependency_refs: Sequence[str] | None = None,
         input_shape: Sequence[int | None] | None = None,
@@ -547,11 +602,14 @@ class FederalPath(nn.Module):
         normalized = tuple(operations)
         if not normalized or any(not isinstance(operation, nn.Module) for operation in normalized):
             raise TypeError("operations must contain at least one nn.Module")
-        if isinstance(refine_steps, bool) or not isinstance(refine_steps, int) or refine_steps <= 0:
-            raise ValueError("refine_steps must be a positive integer")
+        if isinstance(iteration_steps, bool) or not isinstance(iteration_steps, int) or iteration_steps <= 0:
+            raise ValueError("iteration_steps must be a positive integer")
         if route_mode not in {"frozen", "gated", "dynamic"}:
             raise ValueError("route_mode must be frozen, gated, or dynamic")
-        refs = tuple(operation_refs or (_module_ref(operation) for operation in normalized))
+        refs = tuple(
+            _contract_ref(reference, field="operation_refs")
+            for reference in (operation_refs or (_module_ref(operation) for operation in normalized))
+        )
         if len(refs) != len(normalized) or any(not isinstance(ref, str) or not ref for ref in refs):
             raise ValueError("operation_refs must match operations and be non-empty")
         if not source_ref or not source_snapshot_fingerprint or not terminal_abi_ref:
@@ -568,8 +626,15 @@ class FederalPath(nn.Module):
                 for dependency in getattr(operation, "_component_dependencies", ())
             )
         )
-        if any(not isinstance(ref, str) or not ref for ref in dependencies):
-            raise ValueError("dependency_refs must contain non-empty strings")
+        try:
+            source_ref = _contract_ref(source_ref, field="source_ref")
+            terminal_abi_ref = _contract_ref(terminal_abi_ref, field="terminal_abi_ref")
+            dependencies = tuple(
+                _contract_ref(reference, field="dependency_refs")
+                for reference in dependencies
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("Federal path provenance must use contract references") from error
 
         def normalize_shape(
             shape: Sequence[int | None] | None, *, field: str
@@ -592,12 +657,12 @@ class FederalPath(nn.Module):
         self.source_snapshot_fingerprint = source_snapshot_fingerprint
         self.path_ids = normalized_paths
         self.terminal_abi_ref = terminal_abi_ref
-        self.refine_steps = refine_steps
+        self.iteration_steps = iteration_steps
         self.route_mode = route_mode
         self.data_dependent_shape = bool(data_dependent_shape)
         self.mutable_state = bool(mutable_state)
         self.runtime_callback = bool(runtime_callback)
-        self.unbounded_refine = bool(unbounded_refine)
+        self.unbounded_iteration = bool(unbounded_iteration)
         self.operation_refs = refs
         self.dependency_refs = dependencies
         self.input_shape = normalize_shape(input_shape, field="input_shape")
@@ -634,8 +699,8 @@ class FederalPath(nn.Module):
             reasons.append("mutable path state is not snapshot-frozen")
         if self.runtime_callback:
             reasons.append("runtime callback is not part of the compiled graph")
-        if self.unbounded_refine:
-            reasons.append("unbounded Refine cannot be expanded")
+        if self.unbounded_iteration:
+            reasons.append("unbounded execution cannot be expanded")
         for operation in self.operations:
             reasons.extend(_static_operation_reasons(operation))
         if self.route_mode == "gated" and not reasons[1:]:
@@ -729,6 +794,13 @@ class FederalTensorQueryManifest:
 
     _component_reference: ClassVar[str] = "arti/federal-tensor-query-manifest@1"
 
+    def __post_init__(self) -> None:
+        for field in ("schema", "compiler_ref", "source_ref", "query_ref"):
+            object.__setattr__(self, field, _contract_ref(getattr(self, field), field=field))
+        object.__setattr__(self, "operation_refs", tuple(
+            _contract_ref(reference, field="operation_refs") for reference in self.operation_refs
+        ))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": self.schema,
@@ -743,6 +815,10 @@ class FederalTensorQueryManifest:
             "output_shape": None if self.output_shape is None else list(self.output_shape),
             "early_stop_semantics": self.early_stop_semantics,
         }
+
+    @property
+    def action_sha256(self) -> str:
+        return _compile_action_address(self.to_dict())
 
 
 class FederalTensorQueryAdapter(nn.Module):
@@ -769,7 +845,7 @@ class FederalTensorQueryAdapter(nn.Module):
 
 
 class FederalTensorQueryBlock(nn.Module):
-    """A dynamic Query and finite Refine loop expressed only as Tensor ops.
+    """A dynamic Query and finite iteration loop expressed only as Tensor ops.
 
     The Query is evaluated again after every selected operation.  Candidate
     operations must share one Tensor ABI within this block; heterogeneous
@@ -1017,6 +1093,10 @@ class FederalTensorFederationManifest:
 
     _component_reference: ClassVar[str] = "arti/federal-tensor-federation-manifest@1"
 
+    def __post_init__(self) -> None:
+        for field in ("schema", "compiler_ref", "source_ref"):
+            object.__setattr__(self, field, _contract_ref(getattr(self, field), field=field))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": self.schema,
@@ -1032,6 +1112,10 @@ class FederalTensorFederationManifest:
             "output_shape": None if self.output_shape is None else list(self.output_shape),
             "early_stop_semantics": self.early_stop_semantics,
         }
+
+    @property
+    def action_sha256(self) -> str:
+        return _compile_action_address(self.to_dict())
 
 
 class FederalTensorFederation(nn.Module):
@@ -1350,9 +1434,13 @@ class FederalStatefulGraphManifest:
     bank_state_shape: tuple[int | None, ...]
     effect_state_shape: tuple[int | None, ...]
     state_semantics: str = "explicit-bank-effect-input-output"
-    refine_semantics: str = "while-loop-stop-or-host-bound"
+    iteration_semantics: str = "while-loop-stop-or-host-bound"
 
     _component_reference: ClassVar[str] = "arti/federal-stateful-graph-manifest@1"
+
+    def __post_init__(self) -> None:
+        for field in ("schema", "compiler_ref", "source_ref", "transition_ref"):
+            object.__setattr__(self, field, _contract_ref(getattr(self, field), field=field))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1366,12 +1454,16 @@ class FederalStatefulGraphManifest:
             "bank_state_shape": list(self.bank_state_shape),
             "effect_state_shape": list(self.effect_state_shape),
             "state_semantics": self.state_semantics,
-            "refine_semantics": self.refine_semantics,
+            "iteration_semantics": self.iteration_semantics,
         }
 
+    @property
+    def action_sha256(self) -> str:
+        return _compile_action_address(self.to_dict())
 
-class FederalStatefulRefineGraph(nn.Module):
-    """Compile a stateful Refine recurrence into a tensor while-loop.
+
+class FederalStatefulExecutionGraph(nn.Module):
+    """Compile a stateful execution recurrence into a tensor while-loop.
 
     ``transition`` receives ``(value, bank_state, effect_state)`` and returns
     ``(next_value, next_bank_state, next_effect_state, stop)``.  The caller's
@@ -1381,11 +1473,11 @@ class FederalStatefulRefineGraph(nn.Module):
 
     The loop is open-ended with respect to the learned stop predicate, but a
     finite host budget is always present as a termination guard.  This is the
-    exportable meaning of unbounded Refine: no static unrolling, no Python
+    exportable meaning of unbounded execution: no static unrolling, no Python
     ``break``, and no claim of literally infinite physical execution.
     """
 
-    _component_reference = "arti/federal-stateful-refine-graph@1"
+    _component_reference = "arti/federal-stateful-execution-graph@1"
 
     def __init__(
         self,
@@ -1475,7 +1567,7 @@ class FederalStatefulRefineGraph(nn.Module):
 
 
 class FederalStatefulGraphCompiler:
-    """Lower explicit Bank/effect state and open-ended Refine to a graph."""
+    """Lower explicit Bank/effect state and open-ended iteration to a graph."""
 
     _component_reference = "arti/federal-stateful-graph-compiler@1"
 
@@ -1490,7 +1582,7 @@ class FederalStatefulGraphCompiler:
         source_ref: str,
         source_snapshot_fingerprint: str,
         max_steps: int,
-    ) -> FederalStatefulRefineGraph:
+    ) -> FederalStatefulExecutionGraph:
         examples = (example_value, example_bank_state, example_effect_state)
         if any(not isinstance(item, Tensor) for item in examples):
             raise TypeError("stateful graph examples must be Tensors")
@@ -1542,7 +1634,7 @@ class FederalStatefulGraphCompiler:
             bank_state_shape=shape_abi(example_bank_state),
             effect_state_shape=shape_abi(example_effect_state),
         )
-        return FederalStatefulRefineGraph(
+        return FederalStatefulExecutionGraph(
             deepcopy(transition),
             max_steps=max_steps,
             manifest=manifest,
@@ -1550,7 +1642,7 @@ class FederalStatefulGraphCompiler:
 
     @staticmethod
     def export(
-        graph: FederalStatefulRefineGraph,
+        graph: FederalStatefulExecutionGraph,
         example_value: Tensor,
         example_bank_state: Tensor,
         example_effect_state: Tensor,
@@ -1558,8 +1650,8 @@ class FederalStatefulGraphCompiler:
         *,
         dynamic_shapes: object | None = None,
     ) -> object:
-        if not isinstance(graph, FederalStatefulRefineGraph):
-            raise TypeError("graph must be a FederalStatefulRefineGraph")
+        if not isinstance(graph, FederalStatefulExecutionGraph):
+            raise TypeError("graph must be a FederalStatefulExecutionGraph")
         if isinstance(max_steps, int):
             max_steps = torch.tensor(max_steps, dtype=torch.int64, device=example_value.device)
         export = getattr(torch, "export", None)
@@ -1587,6 +1679,10 @@ class FederalRaggedShapeManifest:
 
     _component_reference: ClassVar[str] = "arti/federal-ragged-shape-manifest@1"
 
+    def __post_init__(self) -> None:
+        for field in ("schema", "compiler_ref", "source_ref", "transform_ref"):
+            object.__setattr__(self, field, _contract_ref(getattr(self, field), field=field))
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": self.schema,
@@ -1598,6 +1694,10 @@ class FederalRaggedShapeManifest:
             "value_rank": self.value_rank,
             "shape_semantics": self.shape_semantics,
         }
+
+    @property
+    def action_sha256(self) -> str:
+        return _compile_action_address(self.to_dict())
 
 
 class FederalRaggedShapeGraph(nn.Module):
@@ -1739,7 +1839,7 @@ class FederalPathCompiler:
             operation_refs=path.operation_refs,
             dependency_refs=path.dependency_refs,
             terminal_abi_ref=path.terminal_abi_ref,
-            refine_steps=path.refine_steps,
+            iteration_steps=path.iteration_steps,
             input_shape=path.input_shape,
             output_shape=path.output_shape,
         )
@@ -1771,7 +1871,7 @@ __all__ = [
     "FederalParallel",
     "FederalPath",
     "FederalPathCompiler",
-    "FederalRefine",
+    "FederalIteration",
     "FederalResidual",
     "FederalStaticFold",
     "FederalStaticUnFold",

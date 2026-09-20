@@ -6,9 +6,10 @@ activation/workspace modules, runtime vocabulary helpers, glyph/text tensor
 renderers, participant context builders, membrane routing helpers, source
 integrity utilities, fit/adaptation helpers, and backend diagnostics.
 
-For new code, start with ``ARTILayer``. It is the stable host for the
-composable ``AdaptivePulse`` execution graph. Standalone, versioned mechanisms
-live under ``arti.mechanisms``; retired APIs live under ``arti.legacy``.
+For new code, start with ``ARTILayer``. It is the federated-program host
+boundary for configured query, local iteration, Formula Fabric, and traversal.
+Standalone, versioned mechanisms live under ``arti.mechanisms``; retired APIs
+live under ``arti.legacy``.
 """
 
 from ._version import __version__
@@ -24,8 +25,10 @@ from .config import ARTIConfig
 from .component_registry import (
     COMPONENT_PROVENANCE_VERSION,
     COMPONENT_STATE_CONTRACT_VERSION,
+    ComponentContract,
     ComponentCompatibilityError,
     ComponentRef,
+    ComponentResolutionReceipt,
     ComponentRegistration,
     ComponentRegistry,
     ComponentRegistryError,
@@ -33,6 +36,7 @@ from .component_registry import (
     DuplicateComponentError,
     InvalidComponentRefError,
     UnknownComponentError,
+    canonical_contract_reference,
     component_graph_fingerprint,
     component_catalog,
     component_manifest,
@@ -43,6 +47,7 @@ from .component_registry import (
     get_component_registry,
     register_component,
     resolve_component,
+    resolve_component_with_receipt,
     validate_component_provenance,
     validate_component_state_contract,
     verify_component_provenance,
@@ -61,9 +66,9 @@ from .context import FrameContext, FrameMode, TensorContext, validate_valid_mask
 from .conversation import ParticipantContextTensors, build_participant_context, last_non_assistant_participant
 from .distinctness import LatentDistinctnessReport, assert_latent_distinct, latent_distinctness_report
 from .emission import EmissionRouter, EmissionRouterConfig, EmissionRouterOutput, build_stream_visibility, stream_emit_mask
-from .fit import ADAPTER_STACK_FORMAT, ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_adapter_stack, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, compile_adapter_hotpaths, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, reset_recall_queries, resolve_fit_config_mechanism, resolve_objectives, set_adapter_scale, set_recall_refine_schedule, set_recall_refine_steps, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
+from .fit import ADAPTER_STACK_FORMAT, ARTIFitResult, ARTIProject, AdapterArtifactManifest, AdapterInsertionPlan, BackendCapabilities, BatchSchema, BuildTaskSpec, FitPlugin, FitProjectConfig, FitReportSummary, FitTaskRecord, ForwardProfile, MechanismOverrides, MechanismSummary, ParameterSummary, RuntimeFieldConfig, TensorField, apply_adapter, apply_adapter_stack, apply_mechanism_overrides, attention_mask_to_visibility, backend_capabilities, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, compile_adapter_hotpaths, create_build_lock, create_deployment_manifest, create_task_graph_payload, doctor_report, doctor_report_markdown, fit, generate_capabilities_markdown, generate_fit_config_schema, generate_fit_config_schema_json, generate_task_graph_schema, generate_task_graph_schema_json, get_plugin, infer_batch_schema, infer_objectives, list_plugins, list_profiles, list_scales, load_fit_config, packaged_fit_config_schema_json, packaged_task_graph_schema_json, plan_provenance_fingerprint, project, reset_recall_queries, resolve_fit_config_mechanism, resolve_objectives, set_adapter_scale, set_retrieval_iteration_schedule, set_retrieval_iteration_steps, template_fit_config, validate_artifact, validate_artifact_payload, validate_backend_capabilities, validate_build_lock, validate_deployment_manifest, validate_fit_config, validate_plan, validate_plan_payload, validate_task_graph, validate_task_graph_payload, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from .fit import concatenate_adapter_banks, set_adapter_bank_influences, set_adapter_bank_weights
-from .arti_layer import ARTILayer
+from .arti_layer import ARTILayer, ProgramLayerResult
 from .layers import (
     ARTIDynamicStateLayer,
     ARTILatentRecallField,
@@ -78,7 +83,7 @@ from .recall_topology import (
     LayeredRecallCandidate,
     LayeredRecallCost,
     LayeredRecallScore,
-    LayeredRecallTraceCache,
+    LayeredExecutionTraceCache,
     candidates_within_budget,
     estimate_layered_recall_cost,
     pareto_layered_recall,
@@ -99,7 +104,7 @@ from .membrane import (
     membrane_public_emit_mask,
 )
 from .models import ARTIClassifier
-from .nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, Recall, RecallRefiner, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from .nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallExecutor, Retrieve, RetrieveExecutor, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
 from .recall_formula import (
     FactorSpec,
     RecallFormulaContract,
@@ -108,21 +113,21 @@ from .recall_formula import (
     validate_formula,
 )
 from .recall_registry import RecallFormulaId, describe_formula, list_formulas, register_formula
-from .recall_refine import (
-    RECALL_TRACE_SCHEMA_VERSION,
-    RECALL_TRACE_V2_SCHEMA_VERSION,
-    RECALL_TRACE_V3_SCHEMA_REF,
-    RECALL_TRACE_V3_SCHEMA_VERSION,
-    AdaptiveRefinePolicy,
-    RecallTraceV2,
-    RecallTraceV3,
-    RefineBudget,
-    RefineStop,
-    RecallRoutePlan,
-    RecallRouteStack,
-    RecallStopReason,
-    RecallTrace,
-    RefinePolicy,
+from .execution import (
+    EXECUTION_TRACE_SCHEMA_VERSION,
+    EXECUTION_TRACE_V2_SCHEMA_VERSION,
+    EXECUTION_TRACE_V3_SCHEMA_REF,
+    EXECUTION_TRACE_V3_SCHEMA_VERSION,
+    AdaptiveExecutionPolicy,
+    ExecutionBudget,
+    ExecutionPolicy,
+    ExecutionStop,
+    ExecutionStopReason,
+    ExecutionTrace,
+    ExecutionTraceV2,
+    ExecutionTraceV3,
+    RetrievalRoutePlan,
+    RetrievalRouteStack,
 )
 from .visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
 from .outputs import ARTIOutput
@@ -138,6 +143,7 @@ from .survival import (
     DuplicateSurvivalError,
     ExponentialSurvival,
     InvalidSurvivalRefError,
+    SurvivalContract,
     SurvivalDescription,
     SurvivalOperator,
     SurvivalRef,
@@ -155,6 +161,43 @@ from .survival import (
 from .text_bitmap import BitmapTextConfig, BitmapTextRenderer, BitmapVocabReport, assert_bitmap_vocab_distinct, bitmap_vocab_report, render_text_bitmap, render_text_vocab
 from .text_tensor import TEXT_CONTROL_CHANNELS, TEXT_IDENTITY_MODES, TextControlKind, TextTensorConfig, TextTensorLayout, TextTensorRenderer, render_text_layout, render_text_tensor
 from .tensor_boundary import TensorLayout
+from .resource_graph import (
+    PROGRAM_GRAPH_ARTIFACT_FORMAT,
+    PROGRAM_GRAPH_ARTIFACT_VERSION,
+    AxisRange,
+    Connection,
+    ConnectionExecution,
+    FormulaTensorViewTransfer,
+    LearnableAffineTransfer,
+    StaticFormulaTensorViewTransfer,
+    ProgramGraph,
+    ProgramGraphExecution,
+    ProgramGraphInvocation,
+    ProgramGraphSaveResult,
+    ProgramGraphState,
+    ProgramNode,
+    ProgramNodeExecution,
+    ProgramNodeInvocation,
+    ResourceBinding,
+    ResourceGraphError,
+    ResourceGraphCompileError,
+    ResourceGraphCompiler,
+    ResourceGraphExecutionPlan,
+    ResourceLifetime,
+    ResourcePort,
+    ResourceSnapshot,
+    ResourceView,
+    TensorResource,
+    TensorResourceSpec,
+    TensorResourceState,
+    load_program_graph,
+    save_program_graph,
+)
+from .terminal_abi import (
+    ProgramExecutionSignature,
+    ProgramExecutionSignatureV2,
+    ProgramExecutionSignatureV3,
+)
 from .torch.cuda import cuda_device_report, cuda_runtime_available, cuda_smoke_report, require_cuda
 from .training import experiential_recall_alignment_loss, experiential_recall_selectivity_loss, recall_route_exterior_penalty, virtual_recall_alignment_loss
 from .usage import FeatureConfig, features, layer_profiles, profile
@@ -195,8 +238,10 @@ __all__ = [
     "ARTIConfig",
     "COMPONENT_PROVENANCE_VERSION",
     "COMPONENT_STATE_CONTRACT_VERSION",
+    "ComponentContract",
     "ComponentCompatibilityError",
     "ComponentRef",
+    "ComponentResolutionReceipt",
     "ComponentRegistration",
     "ComponentRegistry",
     "ComponentRegistryError",
@@ -204,6 +249,7 @@ __all__ = [
     "DuplicateComponentError",
     "InvalidComponentRefError",
     "UnknownComponentError",
+    "canonical_contract_reference",
     "component_graph_fingerprint",
     "component_catalog",
     "component_manifest",
@@ -213,21 +259,22 @@ __all__ = [
     "component_state_contract",
     "get_component_registry",
     "register_component",
-    "RECALL_TRACE_SCHEMA_VERSION",
-    "RecallRoutePlan",
-    "RecallRouteStack",
-    "RecallStopReason",
-    "RecallTrace",
-    "RecallTraceV2",
-    "RecallTraceV3",
-    "RefinePolicy",
-    "AdaptiveRefinePolicy",
-    "RefineBudget",
-    "RefineStop",
-    "RECALL_TRACE_V2_SCHEMA_VERSION",
-    "RECALL_TRACE_V3_SCHEMA_REF",
-    "RECALL_TRACE_V3_SCHEMA_VERSION",
+    "EXECUTION_TRACE_SCHEMA_VERSION",
+    "RetrievalRoutePlan",
+    "RetrievalRouteStack",
+    "ExecutionStopReason",
+    "ExecutionTrace",
+    "ExecutionTraceV2",
+    "ExecutionTraceV3",
+    "ExecutionPolicy",
+    "AdaptiveExecutionPolicy",
+    "ExecutionBudget",
+    "ExecutionStop",
+    "EXECUTION_TRACE_V2_SCHEMA_VERSION",
+    "EXECUTION_TRACE_V3_SCHEMA_REF",
+    "EXECUTION_TRACE_V3_SCHEMA_VERSION",
     "resolve_component",
+    "resolve_component_with_receipt",
     "validate_component_provenance",
     "validate_component_state_contract",
     "verify_component_provenance",
@@ -242,6 +289,7 @@ __all__ = [
     "DuplicateSurvivalError",
     "ExponentialSurvival",
     "InvalidSurvivalRefError",
+    "SurvivalContract",
     "SurvivalDescription",
     "SurvivalOperator",
     "SurvivalRef",
@@ -261,6 +309,39 @@ __all__ = [
     "validate_valid_mask",
     "validate_visibility",
     "TensorLayout",
+    "Connection",
+    "ConnectionExecution",
+    "FormulaTensorViewTransfer",
+    "LearnableAffineTransfer",
+    "StaticFormulaTensorViewTransfer",
+    "AxisRange",
+    "ProgramGraph",
+    "ProgramGraphExecution",
+    "ProgramGraphInvocation",
+    "ProgramGraphSaveResult",
+    "PROGRAM_GRAPH_ARTIFACT_FORMAT",
+    "PROGRAM_GRAPH_ARTIFACT_VERSION",
+    "ProgramGraphState",
+    "ProgramNode",
+    "ProgramNodeExecution",
+    "ProgramNodeInvocation",
+    "ResourceBinding",
+    "ResourceGraphError",
+    "ResourceGraphCompileError",
+    "ResourceGraphCompiler",
+    "ResourceGraphExecutionPlan",
+    "ResourceLifetime",
+    "ResourcePort",
+    "ResourceSnapshot",
+    "ResourceView",
+    "TensorResource",
+    "TensorResourceSpec",
+    "TensorResourceState",
+    "load_program_graph",
+    "save_program_graph",
+    "ProgramExecutionSignature",
+    "ProgramExecutionSignatureV2",
+    "ProgramExecutionSignatureV3",
     "EmissionRouter",
     "EmissionRouterConfig",
     "EmissionRouterOutput",
@@ -268,11 +349,12 @@ __all__ = [
     "stream_emit_mask",
     "ARTIOutput",
     "ARTILayer",
+    "ProgramLayerResult",
     "ARTILatentTensorLayer",
     "ARTIDynamicStateLayer",
     "ARTIVirtualInterfaceMixer",
     "ARTILatentRecallField",
-    "Recall",
+    "Retrieve",
     "FactorSpec",
     "RecallFormulaId",
     "RecallFormulaContract",
@@ -294,7 +376,7 @@ __all__ = [
     "LayeredRecallCandidate",
     "LayeredRecallCost",
     "LayeredRecallScore",
-    "LayeredRecallTraceCache",
+    "LayeredExecutionTraceCache",
     "candidates_within_budget",
     "estimate_layered_recall_cost",
     "pareto_layered_recall",
@@ -310,7 +392,8 @@ __all__ = [
     "Pulse",
     "LearnedPulse",
     "FusionPulse",
-    "RecallRefiner",
+    "RecallExecutor",
+    "RetrieveExecutor",
     "VisualField",
     "VisualFieldOutput",
     "concat_visual_fields",
@@ -471,8 +554,8 @@ __all__ = [
     "set_adapter_bank_weights",
     "compile_adapter_hotpaths",
     "set_adapter_scale",
-    "set_recall_refine_schedule",
-    "set_recall_refine_steps",
+    "set_retrieval_iteration_schedule",
+    "set_retrieval_iteration_steps",
     "get_plugin",
     "load_fit_config",
     "template_fit_config",

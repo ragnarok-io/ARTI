@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from arti import Recall, RefinePolicy, alpha, get_component_registry
+from arti.component_registry import canonical_contract_reference
 
 
 def _program() -> alpha.FormulaFabricProgram:
@@ -193,7 +194,7 @@ def test_resident_branch_contracts_are_runtime_only_and_versioned() -> None:
     }
     for reference, policy in references.items():
         registration = registry.resolve_registration(reference)
-        assert registration.reference == reference
+        assert registration.reference == canonical_contract_reference(reference)
         assert not registration.constructible
         assert registration.artifact_policy == policy
     assert alpha.ResidentBranchRun._runtime_contract_ref in references

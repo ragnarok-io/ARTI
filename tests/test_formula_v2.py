@@ -11,6 +11,7 @@ import torch
 import arti
 import arti.formula_v2 as formula_v2
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 
 
 def test_formula_tensor_type_uses_the_shared_symbolic_dimension_contract() -> None:
@@ -200,8 +201,8 @@ def test_formula_v2_explicit_k_bank_reduce_matches_reference() -> None:
     torch.testing.assert_close(result.values[0], expected, rtol=1e-12, atol=1e-12)
     assert result.trace is not None
     assert result.trace.atom_refs[-2:] == (
-        "arti/formula-atom-reduce@1",
-        "arti/formula-atom-add@1",
+        canonical_contract_reference("arti/formula-atom-reduce@1"),
+        canonical_contract_reference("arti/formula-atom-add@1"),
     )
 
 
@@ -311,9 +312,13 @@ def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
         dtype="float32",
     )
     payload = json.loads(json.dumps(program.to_dict()))
-    assert payload["schema_ref"] == "arti/formula-program@2"
-    assert payload["limits"]["schema_ref"] == "arti/formula-limits@1"
-    assert payload["slots"][0]["value_type"]["schema_ref"] == "arti/formula-tensor-type@1"
+    assert payload["schema_ref"] == canonical_contract_reference("arti/formula-program@2")
+    assert payload["limits"]["schema_ref"] == canonical_contract_reference(
+        "arti/formula-limits@1"
+    )
+    assert payload["slots"][0]["value_type"]["schema_ref"] == canonical_contract_reference(
+        "arti/formula-tensor-type@1"
+    )
     assert payload["instructions"][0]["attributes"]["reduce_axes"] == [["Din", "Din"]]
     restored_program = mechanisms.FormulaProgram.from_dict(payload)
     assert restored_program.fingerprint == program.fingerprint
@@ -341,11 +346,13 @@ def test_formula_v2_program_json_and_state_reload_are_exact() -> None:
     )
     assert mechanisms.FORMULA_TRACE_V1_SCHEMA_VERSION == 1
     assert restored_trace == traced
-    assert restored_trace.to_dict()["schema_ref"] == "arti/formula-trace@1"
+    assert restored_trace.to_dict()["schema_ref"] == canonical_contract_reference(
+        "arti/formula-trace@1"
+    )
     assert restored_trace.fingerprint == traced.fingerprint
     restored_trace.verify(restored_program)
     forged_trace = restored_trace.to_dict()
-    forged_trace["atom_refs"][0] = "arti/formula-atom-add@1"
+    forged_trace["atom_refs"][0] = canonical_contract_reference("arti/formula-atom-add@1")
     with pytest.raises(mechanisms.FormulaSchemaError, match="does not match"):
         mechanisms.FormulaTraceV2.from_dict(forged_trace).verify(restored_program)
 
@@ -359,10 +366,18 @@ def test_formula_v2_components_have_canonical_references_and_dependencies() -> N
     scale_atom = mechanisms.ScaleAtom(vector, mechanisms.TensorType.scalar())
     add_atom = mechanisms.AddAtom(vector)
     reduce_atom = mechanisms.ReduceAtom(vector, axis="D")
-    assert arti.component_ref(contract_atom) == "arti/formula-atom-contract@1"
-    assert arti.component_ref(scale_atom) == "arti/formula-atom-scale@1"
-    assert arti.component_ref(add_atom) == "arti/formula-atom-add@1"
-    assert arti.component_ref(reduce_atom) == "arti/formula-atom-reduce@1"
+    assert arti.component_ref(contract_atom) == canonical_contract_reference(
+        "arti/formula-atom-contract@1"
+    )
+    assert arti.component_ref(scale_atom) == canonical_contract_reference(
+        "arti/formula-atom-scale@1"
+    )
+    assert arti.component_ref(add_atom) == canonical_contract_reference(
+        "arti/formula-atom-add@1"
+    )
+    assert arti.component_ref(reduce_atom) == canonical_contract_reference(
+        "arti/formula-atom-reduce@1"
+    )
 
     fabric = mechanisms.FormulaFabricV2(
         mechanisms.build_lora_program(
@@ -374,12 +389,15 @@ def test_formula_v2_components_have_canonical_references_and_dependencies() -> N
         )
     )
     spec = arti.component_spec(fabric)
-    assert arti.component_ref(fabric) == "arti/formula-fabric@2"
+    assert arti.component_ref(fabric) == canonical_contract_reference("arti/formula-fabric@2")
     assert set(spec.dependencies) == {
-        "arti/formula-atom-contract@1",
-        "arti/formula-atom-scale@1",
-        "arti/formula-atom-add@1",
-        "arti/formula-atom-reduce@1",
+        canonical_contract_reference(reference)
+        for reference in {
+            "arti/formula-atom-contract@1",
+            "arti/formula-atom-scale@1",
+            "arti/formula-atom-add@1",
+            "arti/formula-atom-reduce@1",
+        }
     }
 
     provenance = arti.component_provenance(fabric)
@@ -453,11 +471,11 @@ def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
     torch.testing.assert_close(result.output(program.outputs[1]), expected_restored)
     assert result.trace is not None
     assert set(result.trace.atom_refs) == {
-        "arti/formula-atom-gather@1",
-        "arti/formula-atom-reshape@1",
-        "arti/formula-atom-permute@1",
-        "arti/formula-atom-add@1",
-        "arti/formula-atom-scatter@1",
+        canonical_contract_reference("arti/formula-atom-gather@1"),
+        canonical_contract_reference("arti/formula-atom-reshape@1"),
+        canonical_contract_reference("arti/formula-atom-permute@1"),
+        canonical_contract_reference("arti/formula-atom-add@1"),
+        canonical_contract_reference("arti/formula-atom-scatter@1"),
     }
     result.output(program.outputs[1]).sum().backward()
     assert source.grad is not None and torch.isfinite(source.grad).all()
@@ -465,10 +483,13 @@ def test_formula_v2_shape_and_topology_atoms_form_one_typed_program() -> None:
 
     spec = arti.component_spec(fabric)
     assert {
-        "arti/formula-atom-gather@1",
-        "arti/formula-atom-reshape@1",
-        "arti/formula-atom-permute@1",
-        "arti/formula-atom-scatter@1",
+        canonical_contract_reference(reference)
+        for reference in {
+            "arti/formula-atom-gather@1",
+            "arti/formula-atom-reshape@1",
+            "arti/formula-atom-permute@1",
+            "arti/formula-atom-scatter@1",
+        }
     }.issubset(spec.dependencies)
     assert arti.validate_component_provenance(
         arti.component_provenance(fabric)
@@ -525,9 +546,9 @@ def test_formula_v2_index_fold_unfold_changes_the_active_compute_surface() -> No
     torch.testing.assert_close(result.output(program.outputs[1]), expected)
     assert result.trace is not None
     assert result.trace.atom_refs == (
-        "arti/formula-atom-gather@1",
-        "arti/formula-atom-add@1",
-        "arti/formula-atom-scatter@1",
+        canonical_contract_reference("arti/formula-atom-gather@1"),
+        canonical_contract_reference("arti/formula-atom-add@1"),
+        canonical_contract_reference("arti/formula-atom-scatter@1"),
     )
     result.output(program.outputs[1]).square().mean().backward()
     assert source.grad is not None and torch.isfinite(source.grad).all()
@@ -535,8 +556,11 @@ def test_formula_v2_index_fold_unfold_changes_the_active_compute_surface() -> No
 
     spec = arti.component_spec(fabric)
     assert {
-        "arti/formula-atom-gather@1",
-        "arti/formula-atom-scatter@1",
+        canonical_contract_reference(reference)
+        for reference in {
+            "arti/formula-atom-gather@1",
+            "arti/formula-atom-scatter@1",
+        }
     }.issubset(spec.dependencies)
     assert arti.validate_component_provenance(
         arti.component_provenance(fabric)
@@ -586,17 +610,19 @@ def test_formula_v2_legacy_index_payload_reports_executed_dependencies() -> None
     )
     payload = modern.to_dict()
     for instruction in payload["instructions"]:
-        if instruction["atom_ref"] == "arti/formula-atom-gather@1":
-            instruction["atom_ref"] = "arti/fold@2"
+        if instruction["atom_ref"] == canonical_contract_reference("arti/formula-atom-gather@1"):
+            instruction["atom_ref"] = canonical_contract_reference("arti/fold@2")
             instruction["attributes"].update(
                 {
-                    "record_schema_ref": "arti/fold-record@1",
-                    "state_schema_ref": "arti/fold-state@1",
+                    "record_schema_ref": canonical_contract_reference("arti/fold-record@1"),
+                    "state_schema_ref": canonical_contract_reference("arti/fold-state@1"),
                 }
             )
-        elif instruction["atom_ref"] == "arti/formula-atom-scatter@1":
-            instruction["atom_ref"] = "arti/unfold@2"
-            instruction["attributes"]["record_schema_ref"] = "arti/fold-record@1"
+        elif instruction["atom_ref"] == canonical_contract_reference("arti/formula-atom-scatter@1"):
+            instruction["atom_ref"] = canonical_contract_reference("arti/unfold@2")
+            instruction["attributes"]["record_schema_ref"] = canonical_contract_reference(
+                "arti/fold-record@1"
+            )
 
     legacy = mechanisms.FormulaProgram.from_dict(payload)
     fabric = mechanisms.FormulaFabricV2(legacy)
@@ -607,8 +633,11 @@ def test_formula_v2_legacy_index_payload_reports_executed_dependencies() -> None
 
     torch.testing.assert_close(result.values[0], source)
     assert set(arti.component_spec(fabric).dependencies) == {
-        "arti/formula-atom-gather@1",
-        "arti/formula-atom-scatter@1",
+        canonical_contract_reference(reference)
+        for reference in {
+            "arti/formula-atom-gather@1",
+            "arti/formula-atom-scatter@1",
+        }
     }
 
 
@@ -652,7 +681,7 @@ def test_formula_fabric_v1_identity_remains_frozen() -> None:
     assert legacy_program.fingerprint == (
         "ae99758c53615b27095201ed0c4fece21df276d79e14c6fc9ac5f5cea1770d71"
     )
-    assert arti.component_ref(legacy) == "arti/formula-fabric@1"
+    assert arti.component_ref(legacy) == canonical_contract_reference("arti/formula-fabric@1")
     spec = arti.component_spec(legacy)
     assert spec.config_schema_version == 2
     assert spec.config_fingerprint == (
@@ -753,7 +782,7 @@ def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
     reduce_instruction = next(
         item
         for item in payload["instructions"]
-        if item["atom_ref"] == "arti/formula-atom-reduce@1"
+            if item["atom_ref"] == canonical_contract_reference("arti/formula-atom-reduce@1")
     )
     reduce_instruction["attributes"]["mode"] = "max"
     with pytest.raises(mechanisms.FormulaProgramError, match="only supports mode='sum'"):
@@ -765,7 +794,7 @@ def test_formula_v2_rejects_hidden_or_ill_typed_program_data() -> None:
     scale_instruction = next(
         item
         for item in payload["instructions"]
-        if item["atom_ref"] == "arti/formula-atom-scale@1"
+            if item["atom_ref"] == canonical_contract_reference("arti/formula-atom-scale@1")
     )
     scale_instruction["attributes"]["factor_axes"] = ["B"]
     with pytest.raises(mechanisms.FormulaProgramError, match="factor_axes must exactly match"):
@@ -1174,7 +1203,9 @@ def test_formula_execution_plan_is_positional_compilable_and_versioned() -> None
     compiled = torch.compile(plan, backend="eager", fullgraph=True)
     compiled_actual = compiled(prepared)
 
-    assert arti.component_ref(plan) == "arti/formula-execution-plan@1"
+    assert arti.component_ref(plan) == canonical_contract_reference(
+        "arti/formula-execution-plan@1"
+    )
     assert arti.validate_component_provenance(arti.component_provenance(plan))
     assert plan.binding_names == tuple(binding.name for binding in program.bindings)
     assert prepared.binding_names == plan.binding_names

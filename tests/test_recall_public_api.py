@@ -9,6 +9,10 @@ import arti.nn as arti_nn
 
 
 class AdditiveFormula(nn.Module):
+    recall_formula_contract = arti.RecallFormulaContract(
+        identity=arti.RecallFormulaId.parse("tests/additive@1"),
+        factors=(arti.FactorSpec("content"),),
+    )
     factor_names = ("content",)
 
     def forward(self, state: Tensor, factors: Tensor) -> Tensor:
@@ -24,7 +28,7 @@ def test_recall_builtin_formulas_preserve_shape(formula: str, slots: int) -> Non
 
     assert y.shape == x.shape
     assert y.dtype == x.dtype
-    assert layer.formula_id == formula
+    assert layer.formula_id.startswith(formula.split("@", maxsplit=1)[0] + "@sha256:")
 
 
 def test_recall_rejects_legacy_formula_aliases() -> None:
@@ -150,8 +154,7 @@ def test_recall_exposes_passive_formula_manifest() -> None:
 
     manifest = layer.formula_manifest()
 
-    assert manifest.id == "arti/delta"
-    assert manifest.version == "1"
+    assert manifest.formula_ref == layer.formula_id
     assert manifest.factor_names == ("content",)
     assert manifest.origin == "builtin"
     assert manifest.portable
@@ -164,7 +167,7 @@ def test_explicit_registered_formula_can_be_resolved_without_discovery() -> None
     layer = arti_nn.Recall(4, 4, formula=reference)
 
     assert isinstance(layer.formula, AdditiveFormula)
-    assert layer.formula_id == reference
+    assert layer.formula_id.startswith("tests/additive@sha256:")
 
 
 def test_recall_is_exported_from_root_and_nn() -> None:

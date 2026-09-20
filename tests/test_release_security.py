@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -75,3 +77,17 @@ def test_cli_rejects_tensor_dimension_bombs_before_allocation() -> None:
         parse_sample_shape("1,1073741824,1073741824")
     with pytest.raises(ValueError, match="cannot exceed"):
         sample_tensor_from_spec({"shape": [1, 1073741824, 1073741824], "kind": "zeros"})
+
+
+def test_trained_asset_benchmark_does_not_embed_private_local_paths() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "benchmark_batched_refine_trained_asset.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+
+    assert "c:\\users\\" not in lowered
+    assert "documents\\arti-scripts" not in lowered
+    assert ".artifacts" not in lowered
+    assert 'required=true' in lowered

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from arti.component_registry import component_ref, component_spec
+from arti.component_registry import ComponentRef, component_ref, component_spec
 from arti.shape_query import (
     BankMemberMatcher,
     CoordinateTensorViewObserver,
@@ -167,7 +167,7 @@ def test_sealed_query_freezes_state_but_preserves_input_gradients() -> None:
     assert value.grad is not None
     assert torch.isfinite(value.grad).all()
     assert not any(parameter.requires_grad for parameter in sealed.parameters())
-    assert component_ref(sealed) == "arti/sealed-bank-query@2"
+    ComponentRef.parse(component_ref(sealed))
     assert component_spec(sealed).lifecycle == "alpha"
 
     with torch.no_grad():

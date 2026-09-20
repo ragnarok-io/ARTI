@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from ..._version import __version__
-from ..._stateful_recall import StatefulRecall
+from ...legacy.stateful_recall_impl import StatefulRecall
 from .contract import ARTI_WEB_FORMAT, ARTI_WEB_LOCK, ARTI_WEB_MANIFEST
 
 STATEFUL_FORMAT_VERSION = 3

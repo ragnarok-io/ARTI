@@ -7,6 +7,7 @@ import torch
 
 import arti
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 
 
 class _DynamicFoldSource(torch.nn.Module):
@@ -184,11 +185,17 @@ def test_bank_formula_route_matches_explicit_plan() -> None:
     torch.testing.assert_close(automatic.value, explicit.value)
     assert info.route_origin == "bank-formula"
     assert info.route is not None
-    assert info.route.route_source_ref == "arti/bank-formula-route-source@1"
+    assert info.route.route_source_ref == canonical_contract_reference(
+        "arti/bank-formula-route-source@1"
+    )
     assert torch.equal(info.route.selected_input_slots, route_info.selected_input_slots)
     assert torch.equal(plan.weights.sum(dim=-1), torch.ones_like(plan.weights[..., 0]))
-    assert info.executor_ref == "arti/formula-fabric-compute@1"
-    assert info.adapter_ref == "arti/routed-formula-fabric-compute@1"
+    assert info.executor_ref == canonical_contract_reference(
+        "arti/formula-fabric-compute@1"
+    )
+    assert info.adapter_ref == canonical_contract_reference(
+        "arti/routed-formula-fabric-compute@1"
+    )
     assert info.commit_mode == "hard"
     assert info.factor_contract == "forbidden"
     assert info.route_contract == "bound-source-or-explicit-override"
@@ -524,14 +531,17 @@ def test_dynamic_fold_routed_formula_pulse_component_graph_and_round_trip(
         expected_info.trace.formula.program_fingerprint
     )
     assert refs >= {
-        "arti/pulse@2",
-        "arti/fold@2",
-        "arti/unfold@2",
-        "arti/routed-formula-fabric-compute@1",
-        "arti/bank-formula-route-source@1",
-        "arti/formula-fabric-compute@1",
-        "arti/formula-commit-blend@1",
-        "arti/formula-fabric@1",
+        canonical_contract_reference(reference)
+        for reference in (
+            "arti/pulse@2",
+            "arti/fold@2",
+            "arti/unfold@2",
+            "arti/routed-formula-fabric-compute@1",
+            "arti/bank-formula-route-source@1",
+            "arti/formula-fabric-compute@1",
+            "arti/formula-commit-blend@1",
+            "arti/formula-fabric@1",
+        )
     }
 
 
@@ -540,7 +550,7 @@ def test_fold_source_contract_binding_is_manifest_owned_and_fail_closed() -> Non
     fold = mechanisms.Fold(active_count=2).bind_source_contract(source)
     binding = arti.component_spec(fold).config["source_contract_binding"]
 
-    assert binding["source_ref"] == source._component_reference
+    assert binding["source_ref"] == canonical_contract_reference(source._component_reference)
     assert len(binding["source_contract_fingerprint"]) == 64
     assert binding["source_input_count"] == 2
     assert binding["source_instance_axes"] == [1, None]
@@ -657,10 +667,13 @@ def test_iterative_routed_formula_component_round_trip(tmp_path) -> None:
 
     torch.testing.assert_close(actual, expected)
     assert refs >= {
-        "arti/iterative-routed-formula-fabric-compute@1",
-        "arti/routed-formula-fabric-compute@1",
-        "arti/formula-fabric-compute@1",
-        "arti/formula-fabric@1",
+        canonical_contract_reference(reference)
+        for reference in (
+            "arti/iterative-routed-formula-fabric-compute@1",
+            "arti/routed-formula-fabric-compute@1",
+            "arti/formula-fabric-compute@1",
+            "arti/formula-fabric@1",
+        )
     }
 
 
@@ -705,11 +718,14 @@ def test_routed_compute_component_graph_and_round_trip(tmp_path) -> None:
         node["ref"] for node in arti.component_provenance(routed)["components"]
     }
     assert refs >= {
-        "arti/routed-formula-fabric-compute@1",
-        "arti/bank-formula-route-source@1",
-        "arti/formula-fabric-compute@1",
-        "arti/formula-fabric@1",
-        "arti/bank-formula-topology-policy@2",
+        canonical_contract_reference(reference)
+        for reference in (
+            "arti/routed-formula-fabric-compute@1",
+            "arti/bank-formula-route-source@1",
+            "arti/formula-fabric-compute@1",
+            "arti/formula-fabric@1",
+            "arti/bank-formula-topology-policy@2",
+        )
     }
 
     workspace = _workspace()

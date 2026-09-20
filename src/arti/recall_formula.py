@@ -63,6 +63,11 @@ def _validate_component(value: str, *, field: str) -> str:
     return value
 
 
+def _semantic_contract_digest(payload: Mapping[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(b"ARTI\0recall-formula-contract\0v1\0" + encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class RecallFormulaExecutionSpec:
     """Static execution and compiler capabilities of a Formula.
@@ -302,6 +307,19 @@ class RecallFormulaContract:
             raise TypeError(
                 "RecallFormulaContract.execution must be RecallFormulaExecutionSpec"
             )
+        if self.identity is not None:
+            digest = _semantic_contract_digest(self.semantic_payload())
+            if self.identity.is_canonical and self.identity.contract_sha256 != digest:
+                raise ValueError("Recall Formula identity does not match its semantic contract")
+            object.__setattr__(
+                self,
+                "identity",
+                RecallFormulaId(
+                    namespace=self.identity.namespace,
+                    name=self.identity.name,
+                    contract_sha256=digest,
+                ),
+            )
 
     @property
     def factor_names(self) -> tuple[str, ...]:
@@ -326,6 +344,29 @@ class RecallFormulaContract:
             "capabilities": list(self.capabilities),
             "execution": self.execution.to_dict(),
         }
+
+    def semantic_payload(self) -> dict[str, object]:
+        """Return the identity-free mathematical contract for content addressing.
+
+        A Formula's public name is an input/registry concern.  Its semantic
+        address must instead be determined by factor layout, output rule, and
+        execution guarantees, otherwise an integer declaration can leak back
+        into a supposedly immutable artifact identity.
+        """
+
+        return {
+            "factors": [factor.to_dict() for factor in self.factors],
+            "output_semantics": self.output_semantics,
+            "identity_preserving": self.identity_preserving,
+            "api_version": self.api_version,
+            "composition": self.composition,
+            "capabilities": list(self.capabilities),
+            "execution": self.execution.to_dict(),
+        }
+
+    @property
+    def semantic_sha256(self) -> str:
+        return _semantic_contract_digest(self.semantic_payload())
 
     @property
     def fingerprint(self) -> str:
@@ -589,25 +630,53 @@ _STATE_CONTRACT = RecallFormulaContract(
     composition="state",
 )
 
-BUILTIN_RECALL_FORMULAS: Final[Mapping[str, _BuiltinFormulaDefinition]] = MappingProxyType(
-    {
-        "arti/delta@1": _BuiltinFormulaDefinition(
+_BUILTIN_FORMULA_DEFINITIONS: Final[tuple[_BuiltinFormulaDefinition, ...]] = (
+    _BuiltinFormulaDefinition(
             contract=_DELTA_CONTRACT,
             summary="One-factor next-state Recall Formula.",
             composition="single",
-        ),
-        "arti/affine@1": _BuiltinFormulaDefinition(
+    ),
+    _BuiltinFormulaDefinition(
             contract=_AFFINE_CONTRACT,
             summary="Two-factor affine next-state Recall Formula.",
             composition="product",
-        ),
-        "arti/state@1": _BuiltinFormulaDefinition(
+    ),
+    _BuiltinFormulaDefinition(
             contract=_STATE_CONTRACT,
             summary="Seventeen-factor structured next-state Recall Formula.",
             composition="state",
-        ),
+    ),
+)
+
+BUILTIN_RECALL_FORMULAS: Final[Mapping[str, _BuiltinFormulaDefinition]] = MappingProxyType(
+    {
+        definition.contract.identity.reference: definition
+        for definition in _BUILTIN_FORMULA_DEFINITIONS
+        if definition.contract.identity is not None
     }
 )
+
+_BUILTIN_FORMULA_INPUTS: Final[Mapping[str, _BuiltinFormulaDefinition]] = MappingProxyType(
+    {
+        "arti/delta@1": _BUILTIN_FORMULA_DEFINITIONS[0],
+        "arti/affine@1": _BUILTIN_FORMULA_DEFINITIONS[1],
+        "arti/state@1": _BUILTIN_FORMULA_DEFINITIONS[2],
+    }
+)
+
+
+def resolve_builtin_formula(reference: str) -> _BuiltinFormulaDefinition | None:
+    """Resolve a builtin Formula from a canonical ref or source-only input."""
+
+    return BUILTIN_RECALL_FORMULAS.get(reference) or _BUILTIN_FORMULA_INPUTS.get(reference)
+
+
+def builtin_formula_reference(composition: RecallFormulaComposition) -> str:
+    for definition in _BUILTIN_FORMULA_DEFINITIONS:
+        if definition.composition == composition:
+            assert definition.contract.identity is not None
+            return definition.contract.identity.reference
+    raise ValueError(f"unknown builtin Formula composition: {composition!r}")
 
 
 def _module_contract(module: nn.Module) -> RecallFormulaContract | None:
@@ -923,6 +992,7 @@ def validate_formula(
 
 __all__ = [
     "BUILTIN_RECALL_FORMULAS",
+    "builtin_formula_reference",
     "FactorSpec",
     "MAX_RECALL_FORMULA_FACTORS",
     "MAX_RECALL_FORMULA_PROBE_ELEMENTS",
@@ -931,4 +1001,5 @@ __all__ = [
     "RecallFormulaLock",
     "RecallOutputSemantics",
     "validate_formula",
+    "resolve_builtin_formula",
 ]

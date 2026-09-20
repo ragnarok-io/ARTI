@@ -5,6 +5,7 @@ import torch
 
 import arti
 from arti import mechanisms
+from arti.component_registry import ComponentRef, canonical_contract_reference
 from arti.tensor_transaction import (
     CommitReceipt,
     ConflictReceipt,
@@ -89,6 +90,47 @@ def spec(snapshot: mechanisms.TensorSnapshot, *, run_id: str = "run-1") -> mecha
         future_tape_fingerprint="8" * 64,
         budgets=(mechanisms.BranchBudget(1, 4), mechanisms.BranchBudget(1, 4)),
     )
+
+
+def test_branch_provenance_retains_full_component_addresses() -> None:
+    store = runtime()
+    item = bound(store, store.snapshot())
+    branch_spec = spec(store.snapshot())
+
+    assert branch_spec.executor_ref == canonical_contract_reference(
+        "arti/formula-fabric-compute@1"
+    )
+    assert item.binding.component_ref == canonical_contract_reference(
+        "arti/formula-fabric@1"
+    )
+    assert ComponentRef.parse(branch_spec.executor_ref).reference == branch_spec.executor_ref
+    assert item.binding.state_schema_ref == arti.canonical_contract_reference(
+        "arti/formula-arena-value@1"
+    )
+
+    staged = external(item, 1.0)
+    assert staged.producer_ref == item.binding.component_ref
+
+
+def test_branch_provenance_rejects_short_component_addresses() -> None:
+    store = runtime()
+    snapshot = store.snapshot()
+    with pytest.raises(TensorTransactionContractError, match="full component contract"):
+        mechanisms.bind_external_tensor(
+            store,
+            snapshot,
+            "state",
+            address_namespace="session",
+            partition_id="main",
+            logical_id="state",
+            role="formula-state",
+            authority=mechanisms.TensorAuthority.READ_WRITE,
+            component_ref="arti/formula-fabric@sha256:123456789abc",
+            component_config_fingerprint=CONFIG,
+            state_schema_ref="arti/formula-arena-value@1",
+            producer_state_fingerprint=STATE,
+            provenance_fingerprint=HASH,
+        )
 
 
 def overlay(

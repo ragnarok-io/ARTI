@@ -7,7 +7,11 @@ import torch
 
 import arti
 from arti import mechanisms
-from arti.component_registry import component_spec
+from arti.component_registry import (
+    ComponentRef,
+    canonical_contract_reference,
+    component_spec,
+)
 
 
 def tensor_schema(*dimensions: int | str, axes: tuple[str, ...]) -> mechanisms.TensorSchema:
@@ -84,7 +88,7 @@ def signature(
             "kind": "softmax",
         },
         local_formula_ref="arti/formula-fabric@2",
-        local_refine_ref="arti/refine-policy@2",
+        local_iteration_ref="arti/execution-policy@2",
         terminal_adapter_ref="arti/bank-terminal-adapter@1",
         terminal_abi_ref="arti/terminal-output-abi@1",
         terminal_abi_fingerprint=abi.fingerprint,
@@ -114,6 +118,10 @@ def test_tensor_schema_round_trip_and_tamper_rejection() -> None:
     tampered["dimensions"][1] = 18
     with pytest.raises(mechanisms.TensorSchemaError, match="fingerprint"):
         mechanisms.TensorSchema.from_dict(tampered)
+    legacy_ref = deepcopy(payload)
+    legacy_ref["ref"] = "arti/tensor-schema@1"
+    with pytest.raises(mechanisms.TensorSchemaError, match="reference"):
+        mechanisms.TensorSchema.from_dict(legacy_ref)
 
 
 def test_preserves_shape_is_a_profile_not_a_core_requirement() -> None:
@@ -146,6 +154,10 @@ def test_terminal_abi_validates_named_outputs_and_cross_field_symbols() -> None:
 
 def test_terminal_abi_round_trip_and_config_identity() -> None:
     abi = terminal_abi()
+    assert all(
+        field["ref"] == canonical_contract_reference("arti/terminal-field@1")
+        for field in abi.to_dict()["fields"]
+    )
     restored = mechanisms.TerminalOutputABI.from_dict(abi.to_dict())
 
     assert restored == abi
@@ -160,6 +172,15 @@ def test_terminal_abi_round_trip_and_config_identity() -> None:
         gradient_contract=abi.gradient_contract,
     )
     assert not changed.compatible_with(abi)
+    legacy_ref = abi.to_dict()
+    legacy_ref["ref"] = "arti/terminal-output-abi@1"
+    with pytest.raises(mechanisms.TerminalABIError, match="reference"):
+        mechanisms.TerminalOutputABI.from_dict(legacy_ref)
+
+    legacy_field = abi.to_dict()
+    legacy_field["fields"][0]["ref"] = "arti/terminal-field@1"
+    with pytest.raises(mechanisms.TerminalABIError, match="reference"):
+        mechanisms.TerminalOutputABI.from_dict(legacy_field)
 
 
 def test_heterogeneous_bank_signatures_share_only_terminal_abi() -> None:
@@ -247,17 +268,18 @@ def test_federal_contract_component_identities_are_versioned() -> None:
         abi=abi,
     )
 
-    assert arti.component_ref(source.input_schema) == "arti/tensor-schema@1"
-    assert arti.component_ref(source.shape_relation) == "arti/shape-relation@1"
-    assert arti.component_ref(source.gradient_contract) == "arti/gradient-contract@1"
-    assert arti.component_ref(abi) == "arti/terminal-output-abi@1"
-    assert arti.component_ref(source) == "arti/bank-execution-signature@1"
+    for component in (
+        source.input_schema,
+        source.shape_relation,
+        source.gradient_contract,
+        abi,
+        source,
+    ):
+        ComponentRef.parse(arti.component_ref(component))
     assert component_spec(source).lifecycle == "stable"
-    assert component_spec(source).dependencies == (
-        "arti/gradient-contract@1",
-        "arti/shape-relation@1",
-        "arti/tensor-schema@1",
-        "arti/terminal-output-abi@1",
+    assert all(
+        ComponentRef.parse(reference)
+        for reference in component_spec(source).dependencies
     )
 
 

@@ -12,6 +12,8 @@ from typing import ClassVar, Mapping
 import torch
 from torch import Tensor
 
+from .component_registry import canonical_contract_reference
+
 
 TENSOR_VIEW_PATTERN_VERSION = 1
 AXIS_DESCRIPTOR_VERSION = 1
@@ -85,7 +87,7 @@ class AxisDescriptor:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "name": self.name,
             "role": self.role,
             "extent": self.extent,
@@ -110,7 +112,7 @@ class AxisDescriptor:
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise TensorViewError("AxisDescriptor payload contains missing or unknown fields")
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise TensorViewError("AxisDescriptor reference is invalid")
         result = cls(
             name=value["name"],
@@ -278,7 +280,7 @@ class TensorView:
     def descriptor_fingerprint(self) -> str:
         return _fingerprint(
             {
-                "ref": self._runtime_contract_ref,
+                "ref": canonical_contract_reference(self._runtime_contract_ref),
                 "axes": [axis.to_dict() for axis in self.axes],
                 "index_source_axes": (
                     None if self.index_map is None else list(self.index_map.source_axes)
@@ -367,7 +369,7 @@ class TensorViewPattern:
     def _payload(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "dtype": self.dtype,
             "device_class": self.device_class,
             "min_rank": self.min_rank,
@@ -396,7 +398,7 @@ class TensorViewPattern:
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise TensorViewError("TensorViewPattern payload contains missing or unknown fields")
-        if value["ref"] != cls._component_reference:
+        if value["ref"] != canonical_contract_reference(cls._component_reference):
             raise TensorViewError("TensorViewPattern reference is invalid")
         roles = value["allowed_axis_roles"]
         if not isinstance(roles, (list, tuple)):

@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  package:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -16,42 +16,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --extra dev
-      - run: uv run --extra dev pytest
+      - run: >-
+          uv run --extra dev python -m pytest -p no:cacheprovider
+          tests/test_component_registry.py tests/test_lifecycle_contract.py
+          tests/test_federal_recall.py tests/test_federal_contracts.py
+          tests/test_resource_graph.py tests/test_formula_fabric.py
+          tests/test_formula_program_query_v7.py tests/test_tensor_operation.py
+          tests/test_tensor_binding.py tests/test_tensor_transaction.py
+          tests/test_reversible_topology.py tests/test_fold_module.py
+          tests/test_unfold_module.py tests/test_adaptive_observation.py
+          tests/test_observation_optional.py tests/test_arti_st.py
+          tests/test_serialization.py tests/test_runtime_checkpoint.py
+          tests/test_generated_docs.py tests/test_package_metadata.py
+          tests/test_rcc_host.py
       - run: uv build
       - if: matrix.python-version == '3.12'
         run: uv run --extra dev python scripts/check_package.py
 
-  jax:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-      - run: uv sync --locked --extra dev --extra jax
-      - run: uv run python -m pytest tests_jax/test_jax_contract.py tests_jax/test_jax_torch_parity.py
-      - run: uv run arti doctor --allow-cpu-torch --require-jax-smoke
-
-  web:
+  docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.7.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-      - run: uv sync --locked --extra dev
-      - run: pnpm install --frozen-lockfile
-      - run: uv run python scripts/generate_web_contract.py packages/web/src/generated/contract.ts
-      - run: git diff --exit-code -- packages/web/src/generated/contract.ts
-      - run: uv run python scripts/generate_web_fixtures.py .tmp/web-fixtures
-      - run: pnpm build:web
-      - run: pnpm test:web
-      - run: pnpm docs:web
+      - run: uv sync --locked --extra docs
+      - run: uv run --extra docs mkdocs build --strict

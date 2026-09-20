@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from .nn import Fold as SoftWorkspaceFold
-from .vnext_contracts import EnvelopeRef, SupportDomain, TensorEnvelope
+from .runtime_contracts import EnvelopeRef, SupportDomain, TensorEnvelope
 
 
 class SoftFoldAggregate(nn.Module):

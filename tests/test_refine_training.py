@@ -70,15 +70,21 @@ def test_refine_training_components_are_alpha_runtime_contracts() -> None:
         policy=_policy(2),
     )
 
-    assert arti.component_ref(trainer) == "arti/refine-step-training@1"
-    assert arti.component_ref(rollout) == "arti/refine-rollout@1"
+    assert arti.component_ref(trainer) == arti.canonical_contract_reference(
+        "arti/refine-step-training@1"
+    )
+    assert arti.component_ref(rollout) == arti.canonical_contract_reference(
+        "arti/refine-rollout@1"
+    )
     assert arti.get_component_registry().registration_for(trainer).artifact_policy == (
         "runtime_only"
     )
     assert arti.get_component_registry().registration_for(rollout).artifact_policy == (
         "runtime_only"
     )
-    assert arti.component_spec(rollout).dependencies == ("arti/recall@4",)
+    assert arti.component_spec(rollout).dependencies == (
+        arti.canonical_contract_reference("arti/recall@4"),
+    )
 
 
 def test_capture_flattens_detached_adjacent_states_and_masks() -> None:

@@ -1,0 +1,3 @@
+# Functional
+
+::: arti.functional

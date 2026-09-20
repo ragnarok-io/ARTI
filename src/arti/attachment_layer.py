@@ -1,4 +1,4 @@
-"""AdaptivePulse-backed ARTI layers attached to arbitrary PyTorch paths."""
+"""Federated-program-backed ARTI layers attached to arbitrary PyTorch paths."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .adaptive_pulse import AdaptivePulse, PulseOutput
 from .arti_layer import ARTILayer
+from .federal_layer import ProgramLayerResult
 from .fit.insertion import get_parent_module, set_child_module
 from .fit.scanner import run_model
 from .tensor_boundary import TensorLayout, find_primary_tensor, replace_tensor_at_path
@@ -23,13 +23,13 @@ LayerFactory = Callable[["AttachedARTILayerSpec"], ARTILayer]
 
 @dataclass(frozen=True)
 class AttachedARTILayerSpec:
-    """Serializable host-boundary declaration for one ARTILayer@2 instance."""
+    """Serializable host-boundary declaration for one ARTILayer@3 instance."""
 
     path: str
     dim: int | None = None
     batch_axis: int | None = None
     feature_axis: int | None = None
-    pulse_manifest_fingerprint: str | None = None
+    program_contract_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not self.path:
@@ -62,7 +62,7 @@ class AttachedARTILayerConfig:
 
 
 class AttachedARTILayer(nn.Module):
-    """Preserve a host layer's output tree while applying ARTILayer@2."""
+    """Preserve a host layer's output tree while applying ARTILayer@3."""
 
     output_semantics = "layer_output"
 
@@ -80,7 +80,7 @@ class AttachedARTILayer(nn.Module):
         self.last_pre: Tensor | None = None
         self.last_delta: Tensor | None = None
         self.last_post: Tensor | None = None
-        self.last_result: PulseOutput | None = None
+        self.last_result: ProgramLayerResult | None = None
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         output = self.base(*args, **kwargs)
@@ -130,7 +130,7 @@ class AttachedARTILayer(nn.Module):
 
 
 class AttachedARTIModel(nn.Module):
-    """Path-indexed collection of AdaptivePulse-backed ARTILayer instances."""
+    """Path-indexed collection of federated-program-backed ARTILayer instances."""
 
     def __init__(self, model: nn.Module, config: AttachedARTILayerConfig) -> None:
         super().__init__()
@@ -146,7 +146,7 @@ class AttachedARTIModel(nn.Module):
         model: nn.Module,
         config: AttachedARTILayerConfig,
         *,
-        layer: ARTILayer | AdaptivePulse | LayerFactory | None = None,
+        layer: ARTILayer | LayerFactory | None = None,
         sample_batch: Any | None = None,
     ) -> "AttachedARTIModel":
         specs = list(config.layers)
@@ -174,18 +174,18 @@ class AttachedARTIModel(nn.Module):
                     f"cannot infer hidden dimension for {declared.path!r}; pass sample_batch or dim"
                 )
             instance = _make_layer(layer, replace(declared, dim=int(dim)))
-            fingerprint = instance.manifest.fingerprint
+            fingerprint = instance.program_contract_fingerprint
             if (
-                declared.pulse_manifest_fingerprint is not None
-                and declared.pulse_manifest_fingerprint != fingerprint
+                declared.program_contract_fingerprint is not None
+                and declared.program_contract_fingerprint != fingerprint
             ):
                 raise ValueError(
-                    f"ARTILayer Pulse manifest does not match layer {declared.path!r}"
+                    f"ARTILayer program contract does not match layer {declared.path!r}"
                 )
             spec = replace(
                 declared,
                 dim=int(dim),
-                pulse_manifest_fingerprint=fingerprint,
+                program_contract_fingerprint=fingerprint,
             )
             specs[index] = spec
             reference = next(
@@ -226,7 +226,7 @@ class AttachedARTIModel(nn.Module):
         with self.enabled_layers(()) as value:
             yield value
 
-    def diagnostics(self) -> dict[str, PulseOutput]:
+    def diagnostics(self) -> dict[str, ProgramLayerResult]:
         return {
             path: wrapper.last_result
             for path, wrapper in self.wrappers.items()
@@ -328,21 +328,19 @@ def runtime_path_dims(
 
 
 def _make_layer(
-    source: ARTILayer | AdaptivePulse | LayerFactory | None,
+    source: ARTILayer | LayerFactory | None,
     spec: AttachedARTILayerSpec,
 ) -> ARTILayer:
     if source is None:
         return ARTILayer()
     if isinstance(source, ARTILayer):
         return copy.deepcopy(source)
-    if isinstance(source, AdaptivePulse):
-        return ARTILayer(copy.deepcopy(source))
     if callable(source):
         result = source(spec)
         if not isinstance(result, ARTILayer):
             raise TypeError("layer factory must return ARTILayer")
         return result
-    raise TypeError("layer must be ARTILayer, AdaptivePulse, a layer factory, or None")
+    raise TypeError("layer must be ARTILayer, a layer factory, or None")
 
 
 def _compatible_mask(kwargs: Mapping[str, Any], sequence: Tensor) -> Tensor | None:

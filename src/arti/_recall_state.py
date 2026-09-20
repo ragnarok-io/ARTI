@@ -15,12 +15,20 @@ from torch import Tensor, nn
 from torch.func import functional_call, stack_module_state, vmap
 
 from .layers import ARTILayer
-from .recall_refine import RecallRoutePlan, RecallRouteStack
+from .execution import RetrievalRoutePlan, RetrievalRouteStack
 
 
 RECALL_STATE_SCHEMA_VERSION = 2
-RECALL_STATE_COMPONENT_REF = "arti/recall-state@1"
+RECALL_STATE_COMPONENT_DECLARATION = "arti/recall-state@1"
 _SUPPORTED_RECALL_STATE_SCHEMA_VERSIONS = frozenset({1, RECALL_STATE_SCHEMA_VERSION})
+
+
+def recall_state_contract_ref() -> str:
+    """Return the immutable component address for the values-only state type."""
+
+    from .component_registry import canonical_contract_reference
+
+    return canonical_contract_reference(RECALL_STATE_COMPONENT_DECLARATION)
 
 
 def _encode_contract_fingerprint(value: str) -> Tensor:
@@ -1318,9 +1326,9 @@ class _RecallWorkspaceBlock(nn.Module):
         recall_steps: int | None = None,
         selected_recall_groups: Tensor | None = None,
         return_candidate_groups: bool = False,
-        route_plan: RecallRoutePlan | None = None,
+        route_plan: RetrievalRoutePlan | None = None,
         return_route_plan: bool = False,
-    ) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, RecallRoutePlan]:
+    ) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, RetrievalRoutePlan]:
         if selected_recall_groups is not None and route_plan is not None:
             raise ValueError("pass candidate groups or a route plan, not both")
         if return_candidate_groups and return_route_plan:
@@ -1469,10 +1477,10 @@ class RecallValueUpdater(nn.Module):
         mask: Tensor | None = None,
         recall_steps: int | None = None,
         candidate_groups: Tensor | None = None,
-        route_stack: RecallRouteStack | None = None,
+        route_stack: RetrievalRouteStack | None = None,
         return_info: bool = False,
         return_route_stack: bool = False,
-    ) -> Tensor | tuple[Tensor, dict[str, Tensor | RecallRouteStack]]:
+    ) -> Tensor | tuple[Tensor, dict[str, Tensor | RetrievalRouteStack]]:
         """Return the complete next Bank value tensor.
 
         ``trace`` has shape ``[T, H]`` or ``[B, T, H]`` and ``previous_value``
@@ -1513,7 +1521,7 @@ class RecallValueUpdater(nn.Module):
                 selected_groups = selected_groups.squeeze(0)
         if not return_info and not return_route_stack:
             return next_value
-        info: dict[str, Tensor | RecallRouteStack] = {
+        info: dict[str, Tensor | RetrievalRouteStack] = {
             "update": update,
             "update_norm": torch.linalg.vector_norm(update.float(), dim=(-2, -1)),
             "slot_workspace": slot_workspace,
@@ -1532,9 +1540,9 @@ class RecallValueUpdater(nn.Module):
         recall_steps: int | None,
         candidate_groups: Tensor | None = None,
         return_candidate_groups: bool = False,
-        route_stack: RecallRouteStack | None = None,
+        route_stack: RetrievalRouteStack | None = None,
         return_route_stack: bool = False,
-    ) -> tuple[Tensor, Tensor, Tensor, bool, Tensor, RecallRouteStack | None]:
+    ) -> tuple[Tensor, Tensor, Tensor, bool, Tensor, RetrievalRouteStack | None]:
         """Return the state workspace before the independent output map."""
 
         trace_b, value_b, mask_b, squeeze = self._normalize_inputs(
@@ -1579,10 +1587,10 @@ class RecallValueUpdater(nn.Module):
         if route_stack is not None:
             if route_stack.axis != "block" or len(route_stack.items) != self.depth:
                 raise ValueError("route_stack must describe every Updater workspace block")
-            if any(not isinstance(item, RecallRoutePlan) for item in route_stack.items):
-                raise TypeError("Updater block route_stack must contain RecallRoutePlan items")
+            if any(not isinstance(item, RetrievalRoutePlan) for item in route_stack.items):
+                raise TypeError("Updater block route_stack must contain RetrievalRoutePlan items")
         selected_routes = []
-        selected_plans: list[RecallRoutePlan] = []
+        selected_plans: list[RetrievalRoutePlan] = []
         for block_index, block in enumerate(self.workspace):
             selected = (
                 None if candidate_groups_b is None else candidate_groups_b[:, block_index]
@@ -1623,7 +1631,7 @@ class RecallValueUpdater(nn.Module):
             else torch.empty(0, dtype=torch.long, device=trace_b.device)
         )
         selected_stack = (
-            RecallRouteStack(axis="block", items=tuple(selected_plans))
+            RetrievalRouteStack(axis="block", items=tuple(selected_plans))
             if selected_plans
             else None
         )
@@ -1907,9 +1915,9 @@ class StackedRecallValueUpdater(nn.Module):
         *,
         mask: Tensor,
         recall_steps: int | None = None,
-        route_stack: RecallRouteStack | None = None,
+        route_stack: RetrievalRouteStack | None = None,
         return_route_stack: bool = False,
-    ) -> Tensor | tuple[Tensor, RecallRouteStack]:
+    ) -> Tensor | tuple[Tensor, RetrievalRouteStack]:
         """Run one packed site when Python route objects are required."""
 
         if not 0 <= site < self.site_count:
@@ -1940,8 +1948,8 @@ class StackedRecallValueUpdater(nn.Module):
             raise RuntimeError("packed site update did not return route metadata")
         value, info = result
         route = info.get("route_stack")
-        if not isinstance(route, RecallRouteStack):
-            raise RuntimeError("packed site update did not return a RecallRouteStack")
+        if not isinstance(route, RetrievalRouteStack):
+            raise RuntimeError("packed site update did not return a RetrievalRouteStack")
         return value, route
 
     def train(self, mode: bool = True) -> "StackedRecallValueUpdater":
@@ -2097,10 +2105,11 @@ class StackedRecallValueUpdater(nn.Module):
 
 
 __all__ = [
-    "RECALL_STATE_COMPONENT_REF",
+    "RECALL_STATE_COMPONENT_DECLARATION",
     "RECALL_STATE_SCHEMA_VERSION",
     "RecallState",
     "RecallValueUpdater",
+    "recall_state_contract_ref",
     "StackedRecallValueUpdater",
     "migrate_recall_state",
 ]

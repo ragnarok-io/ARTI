@@ -572,13 +572,15 @@ def test_tensor_plane_component_identities_are_versioned() -> None:
     instruction = _instruction([0], [-1], [-1], [-1])
     result = mechanisms.TensorEditFormula(spec)(canvas, snapshot, instruction)
 
-    assert arti.component_ref(spec) == "arti/operable-tensor-port-spec@3"
-    assert arti.component_ref(port) == "arti/operable-tensor-port@2"
-    assert arti.component_ref(snapshot) == "arti/operable-tensor-snapshot@2"
-    assert arti.component_ref(canvas) == "arti/shared-canvas@3"
-    assert arti.component_ref(mechanisms.SharedCanvasFold(spec)) == "arti/shared-canvas-fold@3"
-    assert arti.component_ref(instruction) == "arti/tensor-edit-instruction@3"
-    assert arti.component_ref(result) == "arti/tensor-edit-result@3"
+    assert arti.component_ref(spec).startswith("arti/operable-tensor-port-spec@sha256:")
+    assert arti.component_ref(port).startswith("arti/operable-tensor-port@sha256:")
+    assert arti.component_ref(snapshot).startswith("arti/operable-tensor-snapshot@sha256:")
+    assert arti.component_ref(canvas).startswith("arti/shared-canvas@sha256:")
+    assert arti.component_ref(mechanisms.SharedCanvasFold(spec)).startswith(
+        "arti/shared-canvas-fold@sha256:"
+    )
+    assert arti.component_ref(instruction).startswith("arti/tensor-edit-instruction@sha256:")
+    assert arti.component_ref(result).startswith("arti/tensor-edit-result@sha256:")
 
 
 def _configured_copy_selector(spec: mechanisms.PortSpec) -> mechanisms.TensorOperationSelector:
@@ -963,13 +965,13 @@ def test_tensor_operation_components_have_canonical_alpha_identities() -> None:
     loop = mechanisms.TensorOperationLoop(operation)
     invocation = mechanisms.TensorInvocation(spec, torch.nn.Identity(), loop)
 
-    assert arti.component_ref(selector.query) == "arti/tensor-operation-query@4"
-    assert arti.component_ref(selector.bank) == "arti/tensor-operation-bank@3"
-    assert arti.component_ref(selector) == "arti/tensor-operation-selector@3"
-    assert arti.component_ref(decision) == "arti/tensor-operation-decision@3"
-    assert arti.component_ref(operation) == "arti/tensor-operation@3"
-    assert arti.component_ref(loop) == "arti/tensor-operation-loop@3"
-    assert arti.component_ref(invocation) == "arti/tensor-invocation@2"
+    assert arti.component_ref(selector.query).startswith("arti/tensor-operation-query@sha256:")
+    assert arti.component_ref(selector.bank).startswith("arti/tensor-operation-bank@sha256:")
+    assert arti.component_ref(selector).startswith("arti/tensor-operation-selector@sha256:")
+    assert arti.component_ref(decision).startswith("arti/tensor-operation-decision@sha256:")
+    assert arti.component_ref(operation).startswith("arti/tensor-operation@sha256:")
+    assert arti.component_ref(loop).startswith("arti/tensor-operation-loop@sha256:")
+    assert arti.component_ref(invocation).startswith("arti/tensor-invocation@sha256:")
 
 
 def test_tensor_operation_loop_refolds_and_requeries_latest_shadow() -> None:
@@ -1240,19 +1242,19 @@ def test_reader_and_operation_depths_are_orthogonal() -> None:
     r1_h1 = invocation(
         world,
         port.resolve(),
-        reader_schedule=mechanisms.ReaderRefineSchedule(1),
+        reader_schedule=mechanisms.ReaderIterationSchedule(1),
         operation_schedule=mechanisms.TensorOperationSchedule(1),
     )
     r3_h1 = invocation(
         world,
         port.resolve(),
-        reader_schedule=mechanisms.ReaderRefineSchedule(3),
+        reader_schedule=mechanisms.ReaderIterationSchedule(3),
         operation_schedule=mechanisms.TensorOperationSchedule(1),
     )
     r1_h3 = invocation(
         world,
         port.resolve(),
-        reader_schedule=mechanisms.ReaderRefineSchedule(1),
+        reader_schedule=mechanisms.ReaderIterationSchedule(1),
         operation_schedule=mechanisms.TensorOperationSchedule(3),
     )
 

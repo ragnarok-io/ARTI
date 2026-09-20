@@ -1,0 +1,3 @@
+# Training
+
+::: arti.training

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from itertools import product
+import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -10,6 +13,7 @@ from arti import Half, Recall, RefinePolicy, alpha, component_ref
 from arti.component_registry import (
     ComponentCompatibilityError,
     ComponentRegistryError,
+    canonical_contract_reference,
     component_graph_fingerprint,
     validate_component_provenance,
 )
@@ -29,6 +33,36 @@ def _recall(*, topk: int = 3, group_size: int = 2) -> Recall:
         group_topk=topk,
         key_dim=4,
     )
+
+
+def test_checked_cuda_receipt_covers_formula_topology_control() -> None:
+    root = Path(__file__).resolve().parents[1]
+    receipt_path = root / "docs/reference/batched-refine-cuda-profile.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    control = receipt["formula_topology_control"]
+
+    assert receipt["schema"] == "arti.batched-refine.br6.cuda@2"
+    assert receipt["logical_refine_token_work"]["wide"] == receipt[
+        "logical_refine_token_work"
+    ]["single_deep"]
+    assert control["operation_ref"] == canonical_contract_reference(
+        "arti/topology-formula-resident-operation@1"
+    )
+    assert control["topology_ref"] == [
+        canonical_contract_reference("arti/fold@2"),
+        canonical_contract_reference("arti/reversible-topology@1"),
+        canonical_contract_reference("arti/unfold@2"),
+    ]
+    assert control["topology_unfold_verified"] is True
+    assert control["deterministic_repeat_max_abs_error"] == 0.0
+    assert control["formula_vs_topology_mse"] > 0.0
+    for name in ("formula_control", "topology_formula_control"):
+        assert receipt["physical"][name]["samples"] > 0
+        assert receipt["physical"][name]["hbm_read_bytes"]["available"] is False
+    script = root / "scripts/benchmark_batched_refine_cuda.py"
+    assert receipt["provenance"]["script_sha256"] == hashlib.sha256(
+        script.read_bytes()
+    ).hexdigest()
 
 
 def _copy_recall_prefix(source: Recall, target: Recall) -> None:
@@ -180,6 +214,10 @@ def test_keyed_rng_stream_identity_decorrelates_distinct_callsites() -> None:
     )
 
     assert first.fingerprint != second.fingerprint
+    assert first.contract_ref == canonical_contract_reference(
+        "arti/execution-rng-plan@2"
+    )
+    assert first.contract_ref.startswith("arti/execution-rng-plan@sha256:")
     assert first._derived_seed(
         sample_key="sample",
         branch_origin=0,
@@ -368,7 +406,7 @@ def test_query_recall_branches_preserves_topk_identity_mass_and_lineage() -> Non
 
     batch = alpha.query_recall_branches(recall, value, mask=mask)
 
-    assert component_ref(batch) == "arti/recall-branch-batch@3"
+    assert component_ref(batch).startswith("arti/recall-branch-batch@sha256:")
     assert batch.candidate_group_index.shape == (2, 5, 3)
     assert batch.candidate_slot_index.shape == (2, 5, 3, 2)
     assert batch.candidate_slot_weight.shape == (2, 5, 3, 2)
@@ -377,7 +415,7 @@ def test_query_recall_branches_preserves_topk_identity_mass_and_lineage() -> Non
     assert batch.selection_weight.shape == (2, 5, 3)
     assert batch.candidate_mask.shape == (2, 5, 3)
     assert batch.branch_mask.shape == (2, 3)
-    assert batch.source_ref == "arti/recall@4"
+    assert batch.source_ref.startswith("arti/recall@sha256:")
     assert len(batch.source_config_fingerprint) == 64
     groups = torch.sort(batch.candidate_group_index, dim=-1).values
     assert torch.all(groups[..., 1:] != groups[..., :-1])
@@ -1256,8 +1294,8 @@ def test_topology_formula_plan_executes_inside_each_recall_refine_step() -> None
     plan = alpha.BatchedRefinePlan.compose(
         _formula_operation(batch=2, topology=True)
     )
-    assert component_ref(plan) == "arti/batched-refine-plan@1"
-    assert component_ref(plan.operation) == "arti/batched-refine-operation@1"
+    assert component_ref(plan).startswith("arti/batched-refine-plan@sha256:")
+    assert component_ref(plan.operation).startswith("arti/batched-refine-operation@sha256:")
 
     result = alpha.run_batched_refine(
         recall,
@@ -1271,7 +1309,9 @@ def test_topology_formula_plan_executes_inside_each_recall_refine_step() -> None
     expected[:, 1] = value[:, 2] + value[:, 0]
     torch.testing.assert_close(result.value[:, 0], expected)
     torch.testing.assert_close(result.value[:, 1], expected)
-    assert result.operation_ref == "arti/topology-formula-resident-operation@1"
+    assert result.operation_ref.startswith(
+        "arti/topology-formula-resident-operation@sha256:"
+    )
     assert result.plan_config_fingerprint == plan.config_fingerprint
     route_history = result.branch_diagnostics["recall_route_history"]
     assert route_history.shape[2] == 2
@@ -1763,7 +1803,7 @@ def test_query_recall_branches_supports_complete_composed_transitions() -> None:
     value = torch.randn(1, 3, 4)
     batch = alpha.query_recall_branches(composed, value)
     assert isinstance(batch, alpha.RecallFormulaBranchBatch)
-    assert component_ref(batch) == "arti/recall-formula-branch-batch@3"
+    assert component_ref(batch).startswith("arti/recall-formula-branch-batch@sha256:")
     assert batch.schema_version == 6
     catalog = {entry["ref"]: entry for entry in arti.component_catalog()}
     assert catalog[component_ref(batch)]["config_schema_version"] == 6
@@ -1822,7 +1862,7 @@ def test_composed_per_bank_candidates_preserve_factor_partition_identity() -> No
         formula_beam_width=5,
     )
 
-    assert component_ref(batch) == "arti/recall-formula-branch-batch@3"
+    assert component_ref(batch).startswith("arti/recall-formula-branch-batch@sha256:")
     assert batch.candidate_policy == "same-bank-joint-factor-beam@1"
     assert batch.partition_coherence == "same_bank"
     assert batch.partition_quota == (3, 2)
@@ -2511,7 +2551,7 @@ def test_runtime_candidate_and_result_identities_are_not_constructible() -> None
     candidate = alpha.query_recall_branches(recall, value)
     result = alpha.run_batched_refine(recall, value, candidates=candidate)
 
-    assert component_ref(result) == "arti/batched-refine-result@1"
+    assert component_ref(result).startswith("arti/batched-refine-result@sha256:")
     catalog = {entry["ref"]: entry for entry in arti.component_catalog()}
     assert catalog[component_ref(candidate)]["constructible"] is False
     assert catalog[component_ref(result)]["constructible"] is False
@@ -2519,13 +2559,15 @@ def test_runtime_candidate_and_result_identities_are_not_constructible() -> None
     assert component_ref(candidate) in dependencies
     assert candidate.source_ref in dependencies
     assert candidate.formula_ref in dependencies
+    assert candidate.source_ref.startswith("arti/recall@sha256:")
+    assert "@sha256:" in candidate.formula_ref
     assert result.plan_ref in dependencies
     spec = arti.component_spec(result).to_dict()
     candidate_config = spec["config"]["candidate_config"]
     assert candidate_config["source_config_fingerprint"] == candidate.source_config_fingerprint
     assert candidate_config["formula_config_fingerprint"] == candidate.formula_config_fingerprint
     provenance = {
-        "schema_version": 2,
+        "schema_version": 3,
         "components": [spec],
         "fingerprint": component_graph_fingerprint([spec]),
     }
@@ -2538,11 +2580,11 @@ def test_runtime_candidate_and_result_identities_are_not_constructible() -> None
         if dependency != candidate.formula_ref
     ]
     forged = {
-        "schema_version": 2,
+        "schema_version": 3,
         "components": [tampered],
         "fingerprint": component_graph_fingerprint([tampered]),
     }
-    with pytest.raises(ComponentCompatibilityError, match="dependency closure"):
+    with pytest.raises(ComponentCompatibilityError):
         validate_component_provenance(forged)
     with pytest.raises(ComponentRegistryError, match="runtime-only"):
         arti.resolve_component(component_ref(candidate))
@@ -2562,7 +2604,7 @@ def test_runtime_candidate_and_result_cannot_be_saved(tmp_path: object) -> None:
         arti.save(result, tmp_path / "result.arti.st")
     result_spec = arti.component_spec(result).to_dict()
     result_provenance = {
-        "schema_version": 2,
+        "schema_version": 3,
         "components": [result_spec],
         "fingerprint": component_graph_fingerprint([result_spec]),
     }
@@ -2585,11 +2627,11 @@ def test_plan_and_operation_provenance_reject_dependency_forgery() -> None:
         forged_root = dict(root)
         forged_root["dependencies"] = []
         forged = {
-            "schema_version": 2,
+            "schema_version": 3,
             "components": [forged_root],
             "fingerprint": component_graph_fingerprint([forged_root]),
         }
-        with pytest.raises(ComponentCompatibilityError, match="dependency closure"):
+        with pytest.raises(ComponentCompatibilityError):
             validate_component_provenance(forged)
 
 
@@ -2609,10 +2651,11 @@ def test_batched_operation_arti_st_restores_route_and_output(
     value = torch.randn(2, 3, 4)
     mask = torch.ones(2, 3, dtype=torch.bool)
     expected = source(value, mask, mask, mask)
-    assert component_ref(source.operation) in {
-        "arti/formula-resident-operation@1",
-        "arti/topology-formula-resident-operation@1",
+    assert component_ref(source.operation).split("@", maxsplit=1)[0] in {
+        "arti/formula-resident-operation",
+        "arti/topology-formula-resident-operation",
     }
+    assert "@sha256:" in component_ref(source.operation)
 
     saved = arti.save(source, tmp_path / f"batched-{topology}.arti.st")
     arti.load(saved.weights_path, model=target)

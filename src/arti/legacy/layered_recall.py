@@ -1,6 +1,6 @@
 """Legacy import path for the retired layered Recall experiment API."""
 
-from .._layered_recall import (
+from .layered_recall_impl import (
     LayerRecall,
     LayerRecallSpec,
     LayerRecallStack,

@@ -350,28 +350,31 @@ def test_component_versions_and_dependencies_are_explicit() -> None:
     new_fold = arti.resolve_component("arti/fold@2", active_count=2)
     new_unfold = arti.resolve_component("arti/unfold@2", active_count=2)
 
-    assert arti.component_ref(old_fold) == "arti/fold@1"
-    assert arti.component_ref(new_fold) == "arti/fold@2"
-    assert arti.component_ref(new_unfold) == "arti/unfold@2"
-    assert arti.component_ref(new_fold.topology) == "arti/reversible-topology@1"
-    assert arti.component_ref(new_fold.topology.policy) == "arti/fixed-topology-policy@1"
+    assert arti.component_ref(old_fold).startswith("arti/fold@sha256:")
+    assert arti.component_ref(new_fold).startswith("arti/fold@sha256:")
+    assert arti.component_ref(new_unfold).startswith("arti/unfold@sha256:")
+    assert arti.component_ref(new_fold.topology).startswith(
+        "arti/reversible-topology@sha256:"
+    )
+    assert arti.component_ref(new_fold.topology.policy).startswith(
+        "arti/fixed-topology-policy@sha256:"
+    )
 
     provenance = arti.component_provenance(new_fold)
     refs = {item["ref"] for item in provenance["components"]}
-    assert refs == {
-        "arti/fixed-topology-policy@1",
-        "arti/fold@2",
-        "arti/reversible-topology@1",
-        "arti/stable-priority-partition@1",
-    }
+    assert any(ref.startswith("arti/fixed-topology-policy@sha256:") for ref in refs)
+    assert any(ref.startswith("arti/fold@sha256:") for ref in refs)
+    assert any(ref.startswith("arti/reversible-topology@sha256:") for ref in refs)
+    assert any(ref.startswith("arti/stable-priority-partition@sha256:") for ref in refs)
     assert arti.validate_component_provenance(provenance) == provenance
 
     inverse_provenance = arti.component_provenance(new_unfold)
     inverse_refs = {item["ref"] for item in inverse_provenance["components"]}
-    assert inverse_refs == {
-        "arti/inverse-topology-contract@1",
-        "arti/unfold@2",
-    }
+    assert any(
+        ref.startswith("arti/inverse-topology-contract@sha256:")
+        for ref in inverse_refs
+    )
+    assert any(ref.startswith("arti/unfold@sha256:") for ref in inverse_refs)
     assert new_unfold.state_dict() == {}
 
 
@@ -406,11 +409,9 @@ def test_arti_st_round_trip_preserves_component_versions_and_order(tmp_path) -> 
     refs = {node["ref"] for node in loaded.manifest["architecture"]["component_graph"]["nodes"]}
 
     assert loaded.model is target
-    assert refs >= {
-        "arti/fixed-topology-policy@1",
-        "arti/fold@2",
-        "arti/reversible-topology@1",
-    }
+    assert any(ref.startswith("arti/fixed-topology-policy@sha256:") for ref in refs)
+    assert any(ref.startswith("arti/fold@sha256:") for ref in refs)
+    assert any(ref.startswith("arti/reversible-topology@sha256:") for ref in refs)
     assert torch.equal(
         source(_markers(batch=1)).record.permutation,
         target(_markers(batch=1)).record.permutation,

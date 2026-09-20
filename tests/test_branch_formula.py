@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 from arti.tensor_transaction import TensorTransactionContractError
 
 
@@ -151,6 +152,7 @@ def test_same_future_scores_real_candidates_before_explicit_host_commit() -> Non
     score = mechanisms.score_formula_branches((left, right), future, spec)
     assert score.scores[0] == 0.0
     assert score.scores[1] > 0.0
+    assert score.scorer_ref == canonical_contract_reference("arti/frozen-mse-scorer@1")
 
     bound = binding(store, snapshot)
     harness = mechanisms.K2BranchHarness(store, snapshot, spec)

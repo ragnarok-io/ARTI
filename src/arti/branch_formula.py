@@ -10,7 +10,8 @@ from typing import ClassVar, Sequence
 import torch
 from torch import Tensor
 
-from .branch_refine import (
+from .component_registry import canonical_contract_reference
+from .branch_search_runtime import (
     BranchBatchSpec,
     BranchRunReceipt,
     BranchWorkReceipt,
@@ -96,7 +97,7 @@ def deterministic_formula_rng_fingerprint() -> str:
 
     return _fingerprint(
         {
-            "ref": "arti/formula-branch-execution@1",
+            "ref": canonical_contract_reference("arti/formula-branch-execution@1"),
             "rng": "none",
         }
     )
@@ -227,7 +228,9 @@ def execute_fixed_formula_branch(
         raise TensorTransactionContractError("steps violate the branch budget")
     if route.estimator != "hard":
         raise TensorTransactionContractError("S3 requires a fixed hard Formula route")
-    if compute._component_reference != spec.executor_ref:
+    from .component_registry import component_ref
+
+    if component_ref(compute) != spec.executor_ref:
         raise TensorTransactionContractError("executor_ref does not match Formula compute")
     if compute.fabric.program.fingerprint != spec.program_fingerprint:
         raise TensorTransactionContractError("program fingerprint does not match Formula compute")
@@ -285,7 +288,9 @@ def execute_fixed_formula_branch(
     factor_fingerprint = None if factors is None else tensor_content_fingerprint(factors)
     execution_fingerprint = _fingerprint(
         {
-            "ref": FormulaBranchExecution._runtime_contract_ref,
+            "ref": canonical_contract_reference(
+                FormulaBranchExecution._runtime_contract_ref
+            ),
             "spec_fingerprint": spec.fingerprint,
             "branch_id": branch_id,
             "compute_config": compute.execution_config_fingerprint,
@@ -325,7 +330,7 @@ class FrozenMSEScoreReceipt:
     candidate_output_fingerprints: tuple[str, str]
     future_fingerprint: str
     scores: tuple[float, float]
-    scorer_ref: str = "arti/frozen-mse-scorer@1"
+    scorer_ref: str = canonical_contract_reference("arti/frozen-mse-scorer@1")
 
     def __init__(
         self,
@@ -354,7 +359,11 @@ class FrozenMSEScoreReceipt:
         )
         object.__setattr__(self, "future_fingerprint", future_fingerprint)
         object.__setattr__(self, "scores", scores)
-        object.__setattr__(self, "scorer_ref", "arti/frozen-mse-scorer@1")
+        object.__setattr__(
+            self,
+            "scorer_ref",
+            canonical_contract_reference("arti/frozen-mse-scorer@1"),
+        )
 
 
 def score_formula_branches(

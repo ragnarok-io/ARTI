@@ -16,6 +16,7 @@ from torch import Tensor, nn
 from torch.nn.modules import module as module_runtime
 
 from ._formula_finite_rows import _FiniteTensorRows
+from .component_registry import canonical_contract_reference
 from .formula_program_query import FormulaProgramArena, FormulaProgramQueryResult
 from .formula_program_query_v3 import (
     BankSlotRef,
@@ -715,7 +716,9 @@ class FormulaProgramEffectCandidateV3(FormulaProgramEffectCandidateV2):
         config = super().contract_config()
         config.update(
             {
-                "lineage_ref": "arti/formula-producer-lineage@2",
+                "lineage_ref": canonical_contract_reference(
+                    "arti/formula-producer-lineage@2"
+                ),
                 "proposal_visibility": "branch-local-on-next-ordinary-execution",
                 "execution_count": {
                     "source": (

@@ -9,6 +9,7 @@ import torch
 import arti
 from arti import mechanisms
 from arti.component_registry import (
+    ComponentRef,
     ComponentCompatibilityError,
     component_graph_fingerprint,
     component_provenance,
@@ -162,7 +163,9 @@ def test_registered_custom_query_seals_saves_and_reloads(tmp_path) -> None:
     restored = mechanisms.load_bank_query(saved.weights_path, CustomSquaredBankQuery())
 
     torch.testing.assert_close(restored(value).value, expected)
-    assert sealed.signature.query_ref == "arti/test-custom-squared-bank-query@1"
+    assert ComponentRef.parse(sealed.signature.query_ref).mechanism_id == (
+        "arti/test-custom-squared-bank-query"
+    )
 
 
 def test_seal_clears_training_gradients_and_rejects_runtime_unfreeze() -> None:
@@ -206,6 +209,10 @@ def test_query_signature_round_trip_and_tamper_rejection() -> None:
     tampered["state_fingerprint"] = "0" * 64
     with pytest.raises(mechanisms.BankQueryError, match="fingerprint"):
         mechanisms.QueryExecutionSignature.from_dict(tampered)
+    legacy_ref = deepcopy(signature.to_dict())
+    legacy_ref["ref"] = "arti/query-execution-signature@1"
+    with pytest.raises(mechanisms.BankQueryError, match="reference"):
+        mechanisms.QueryExecutionSignature.from_dict(legacy_ref)
 
 
 def test_query_signature_binds_api_state_roles_and_behavior_contracts() -> None:
@@ -291,10 +298,8 @@ def test_bank_execution_signature_v2_binds_exact_query_and_keeps_v1_identity() -
     restored = mechanisms.BankExecutionSignatureV2.from_dict(signature.to_dict())
 
     assert restored == signature
-    assert arti.component_ref(signature) == "arti/bank-execution-signature@2"
-    assert arti.component_ref(restored.query_signature) == "arti/query-execution-signature@1"
-    assert arti.component_ref(sealed) == "arti/sealed-bank-query@1"
-    assert arti.component_ref(sealed.query) == "arti/linear-bank-query@1"
+    for component in (signature, restored.query_signature, sealed, sealed.query):
+        ComponentRef.parse(arti.component_ref(component))
     assert component_spec(signature).lifecycle == "stable"
 
 
@@ -305,10 +310,10 @@ def test_component_provenance_closes_over_the_owned_query_identity() -> None:
     assert validate_component_provenance(provenance) == provenance
     tampered = deepcopy(provenance)
     tampered["components"][0]["dependencies"] = [
-        "arti/query-execution-signature@1"
+        arti.component_ref(sealed.query)
     ]
     tampered["fingerprint"] = component_graph_fingerprint(tampered["components"])
-    with pytest.raises(ComponentCompatibilityError, match="dependency closure"):
+    with pytest.raises(ComponentCompatibilityError, match="dependency closure is invalid"):
         validate_component_provenance(tampered)
 
 

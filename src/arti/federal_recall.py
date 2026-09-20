@@ -15,6 +15,7 @@ import torch
 from torch import Tensor, nn
 
 from .bank_query import BankQueryError, BankQueryResult, SealedBankQuery
+from .component_registry import canonical_contract_reference
 from .terminal_abi import (
     BankExecutionSignature,
     BankExecutionSignatureV2,
@@ -33,10 +34,10 @@ class FederalRecallError(ValueError):
     """Raised when a federated Bank path violates its declared contracts."""
 
 
-class BankLocalRefinePolicy(nn.Module):
-    """Bound the number of latest-state re-queries performed inside one Bank."""
+class LocalIterationPolicy(nn.Module):
+    """Bound latest-state retrieval iterations inside one local program."""
 
-    _component_reference: ClassVar[str] = "arti/bank-local-refine-policy@1"
+    _component_reference: ClassVar[str] = "arti/local-iteration-policy@1"
 
     def __init__(self, *, min_steps: int = 1, max_steps: int = 8) -> None:
         super().__init__()
@@ -170,11 +171,11 @@ class FederalCandidate:
 
 
 @dataclass(frozen=True)
-class BankLocalRefineTraceStep:
-    """JSON-safe evidence for one Query/Formula transition inside a Bank."""
+class LocalIterationTraceStep:
+    """JSON-safe evidence for one retrieval/formula iteration in a local program."""
 
     bank_id: str
-    local_step: int
+    iteration: int
     candidate_id: str
     action: str
     input_shape: tuple[int, ...]
@@ -185,25 +186,35 @@ class BankLocalRefineTraceStep:
     formula_ref: str | None
     exit_reason: str | None
 
-    _runtime_contract_ref: ClassVar[str] = "arti/bank-local-refine-trace-step@1"
+    _runtime_contract_ref: ClassVar[str] = "arti/local-iteration-trace-step@1"
 
     def __post_init__(self) -> None:
         _require_name(self.bank_id, field="bank_id")
         _require_name(self.candidate_id, field="candidate_id")
         if self.action not in {"continue-local", "descend", "terminal"}:
-            raise FederalRecallError("local refine trace action is invalid")
-        if isinstance(self.local_step, bool) or not isinstance(self.local_step, int) or self.local_step <= 0:
-            raise FederalRecallError("local_step must be a positive integer")
+            raise FederalRecallError("local iteration trace action is invalid")
+        if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
+            raise FederalRecallError("iteration must be a positive integer")
         object.__setattr__(self, "input_shape", tuple(self.input_shape))
         object.__setattr__(self, "query_shape", tuple(self.query_shape))
         if self.output_shape is not None:
             object.__setattr__(self, "output_shape", tuple(self.output_shape))
+        try:
+            object.__setattr__(self, "query_ref", canonical_contract_reference(self.query_ref))
+            if self.formula_ref is not None:
+                object.__setattr__(
+                    self,
+                    "formula_ref",
+                    canonical_contract_reference(self.formula_ref),
+                )
+        except (TypeError, ValueError) as error:
+            raise FederalRecallError("local iteration trace references must be contract refs") from error
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._runtime_contract_ref,
+            "ref": canonical_contract_reference(self._runtime_contract_ref),
             "bank_id": self.bank_id,
-            "local_step": self.local_step,
+            "iteration": self.iteration,
             "candidate_id": self.candidate_id,
             "action": self.action,
             "input_shape": list(self.input_shape),
@@ -221,7 +232,7 @@ class FederalBankStep:
     """The bounded candidates returned by one autonomous Bank invocation."""
 
     candidates: tuple[FederalCandidate, ...]
-    local_trace: tuple[BankLocalRefineTraceStep, ...] = ()
+    local_trace: tuple[LocalIterationTraceStep, ...] = ()
 
     _runtime_contract_ref: ClassVar[str] = "arti/federal-bank-step@1"
 
@@ -230,8 +241,8 @@ class FederalBankStep:
         object.__setattr__(self, "local_trace", tuple(self.local_trace))
         if any(not isinstance(item, FederalCandidate) for item in self.candidates):
             raise TypeError("candidates must contain FederalCandidate values")
-        if any(not isinstance(item, BankLocalRefineTraceStep) for item in self.local_trace):
-            raise TypeError("local_trace must contain BankLocalRefineTraceStep values")
+        if any(not isinstance(item, LocalIterationTraceStep) for item in self.local_trace):
+            raise TypeError("local_trace must contain LocalIterationTraceStep values")
         identities = tuple(item.candidate_id for item in self.candidates)
         if len(identities) != len(set(identities)):
             raise FederalRecallError("candidate_id values must be unique within one Bank step")
@@ -272,19 +283,19 @@ class BankOwnedQueryProgram(nn.Module, ABC):
         *,
         bank_id: str,
         query: SealedBankQuery,
-        local_refine: BankLocalRefinePolicy | None = None,
+        local_iteration: LocalIterationPolicy | None = None,
     ) -> None:
         super().__init__()
         _require_name(bank_id, field="bank_id")
         if not isinstance(query, SealedBankQuery):
             raise TypeError("query must be SealedBankQuery")
-        if local_refine is not None and not isinstance(
-            local_refine, BankLocalRefinePolicy
+        if local_iteration is not None and not isinstance(
+            local_iteration, LocalIterationPolicy
         ):
-            raise TypeError("local_refine must be BankLocalRefinePolicy or None")
+            raise TypeError("local_iteration must be LocalIterationPolicy or None")
         self.bank_id = bank_id
         self.query = query
-        self.local_refine = local_refine
+        self.local_iteration = local_iteration
         self._signature: BankExecutionSignatureV2 | None = None
 
     @property
@@ -311,12 +322,12 @@ class BankOwnedQueryProgram(nn.Module, ABC):
             raise FederalRecallError(
                 "mounted Bank Query does not match the Bank execution signature"
             )
-        if self.local_refine is not None:
+        if self.local_iteration is not None:
             from .component_registry import component_ref
 
-            if signature.local_refine_ref != component_ref(self.local_refine):
+            if signature.local_iteration_ref != component_ref(self.local_iteration):
                 raise FederalRecallError(
-                    "Bank execution signature does not match its local refine policy"
+                    "Bank execution signature does not match its local iteration policy"
                 )
         if (
             dict(signature.local_normalization_contract)
@@ -362,7 +373,7 @@ class BankOwnedQueryProgram(nn.Module, ABC):
             or max_candidates <= 0
         ):
             raise FederalRecallError("max_candidates must be a positive integer")
-        policy = self.local_refine
+        policy = self.local_iteration
         min_steps = 1 if policy is None else policy.min_steps
         max_steps = 1 if policy is None else policy.max_steps
         active = (
@@ -373,8 +384,8 @@ class BankOwnedQueryProgram(nn.Module, ABC):
             ),
         )
         completed: tuple[tuple[FederalCandidate, tuple[str, ...]], ...] = ()
-        trace: list[BankLocalRefineTraceStep] = []
-        for local_step in range(1, max_steps + 1):
+        trace: list[LocalIterationTraceStep] = []
+        for iteration in range(1, max_steps + 1):
             next_active: list[_BankLocalPath] = []
             next_completed = list(completed)
             saw_early_exit = False
@@ -392,7 +403,7 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                     )
                 if step.local_trace:
                     raise FederalRecallError(
-                        "BankOwnedQueryProgram.execute cannot forge local refine receipts"
+                        "BankOwnedQueryProgram.execute cannot forge local iteration receipts"
                     )
                 if len(step.candidates) > max_candidates:
                     raise FederalRecallError(
@@ -418,12 +429,12 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                     if is_local:
                         if policy is None:
                             raise FederalRecallError(
-                                "local continuation requires BankLocalRefinePolicy@1"
+                                "local continuation requires LocalIterationPolicy@1"
                             )
                         assert candidate.next_value is not None
                         trace.append(
                             self._local_trace_step(
-                                local_step=local_step,
+                                iteration=iteration,
                                 candidate=trace_candidate,
                                 input_value=current,
                                 query_result=query_result,
@@ -433,9 +444,9 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                         )
                         self.signature.input_schema.validate_tensor(
                             candidate.next_value,
-                            name=f"{self.bank_id}.local[{local_step}]",
+                            name=f"{self.bank_id}.local[{iteration}]",
                         )
-                        if local_step < max_steps:
+                        if iteration < max_steps:
                             next_active.append(
                                 _BankLocalPath(
                                     value=candidate.next_value,
@@ -445,7 +456,7 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                             )
                         continue
 
-                    if local_step < min_steps:
+                    if iteration < min_steps:
                         saw_early_exit = True
                         continue
                     if candidate.next_value is not None:
@@ -460,7 +471,7 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                     )
                     trace.append(
                         self._local_trace_step(
-                            local_step=local_step,
+                            iteration=iteration,
                             candidate=trace_candidate,
                             input_value=current,
                             query_result=query_result,
@@ -515,7 +526,7 @@ class BankOwnedQueryProgram(nn.Module, ABC):
                 tuple(trace),
             )
         raise FederalRecallError(
-            "Bank-local Refine reached max_steps without a valid exit"
+            "Bank-local iteration reached max_steps without a valid exit"
         )
 
     @staticmethod
@@ -543,21 +554,21 @@ class BankOwnedQueryProgram(nn.Module, ABC):
     def _local_trace_step(
         self,
         *,
-        local_step: int,
+        iteration: int,
         candidate: FederalCandidate,
         input_value: Tensor,
         query_result: BankQueryResult,
         action: str,
         exit_reason: str | None,
-    ) -> BankLocalRefineTraceStep:
+    ) -> LocalIterationTraceStep:
         output_shape = (
             None
             if candidate.next_value is None
             else tuple(int(size) for size in candidate.next_value.shape)
         )
-        return BankLocalRefineTraceStep(
+        return LocalIterationTraceStep(
             bank_id=self.bank_id,
-            local_step=local_step,
+            iteration=iteration,
             candidate_id=candidate.candidate_id,
             action=action,
             input_shape=tuple(int(size) for size in input_value.shape),
@@ -670,18 +681,18 @@ class FederalTraceStep:
     path_ids: tuple[str, ...]
     terminal_mask: tuple[bool, ...]
     cumulative_log_scores: tuple[float, ...]
-    local_refine: tuple[BankLocalRefineTraceStep, ...] = ()
+    local_iteration: tuple[LocalIterationTraceStep, ...] = ()
 
     _runtime_contract_ref: ClassVar[str] = "arti/federal-trace-step@2"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "local_refine", tuple(self.local_refine))
-        if any(not isinstance(item, BankLocalRefineTraceStep) for item in self.local_refine):
-            raise TypeError("local_refine must contain BankLocalRefineTraceStep values")
+        object.__setattr__(self, "local_iteration", tuple(self.local_iteration))
+        if any(not isinstance(item, LocalIterationTraceStep) for item in self.local_iteration):
+            raise TypeError("local_iteration must contain LocalIterationTraceStep values")
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._runtime_contract_ref,
+            "ref": canonical_contract_reference(self._runtime_contract_ref),
             "sample_index": self.sample_index,
             "depth": self.depth,
             "expanded_count": self.expanded_count,
@@ -690,7 +701,7 @@ class FederalTraceStep:
             "path_ids": list(self.path_ids),
             "terminal_mask": list(self.terminal_mask),
             "cumulative_log_scores": list(self.cumulative_log_scores),
-            "local_refine": [item.to_dict() for item in self.local_refine],
+            "local_iteration": [item.to_dict() for item in self.local_iteration],
         }
 
 
@@ -718,7 +729,7 @@ class FederalTrace:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "schema_version": self.schema_version,
             "max_k": self.max_k,
             "max_levels": self.max_levels,
@@ -865,7 +876,7 @@ class FederalRecall(nn.Module):
         receipts: list[FederalTraceStep] = []
         for depth in range(max_levels):
             expanded: list[_FederalPath] = []
-            local_receipts: list[BankLocalRefineTraceStep] = []
+            local_receipts: list[LocalIterationTraceStep] = []
             for current in paths:
                 if current.terminal is not None:
                     expanded.append(current)
@@ -940,7 +951,7 @@ class FederalRecall(nn.Module):
                         float(path.cumulative_log_score.detach().reshape(()).cpu())
                         for path in paths
                     ),
-                    local_refine=tuple(local_receipts),
+                    local_iteration=tuple(local_receipts),
                 )
             )
             if all(path.terminal is not None for path in paths):
@@ -1092,13 +1103,24 @@ class FederalRecallV2(FederalRecall):
         self._validity_field = validity_fields[0]
 
 
+# Canonical role names for routed-program callers. Historical Federal/Bank
+# classes remain the artifact-inspection implementation surface.
+ProgramExecutionPolicy = LocalIterationPolicy
+ProgramLocalExecutionTraceStep = LocalIterationTraceStep
+ProgramCandidate = FederalCandidate
+ProgramStep = FederalBankStep
+ProgramTerminalRecord = FederalTerminalRecord
+ProgramTraceStep = FederalTraceStep
+ProgramExecutionTrace = FederalTrace
+
+
 __all__ = [
     "FEDERAL_RECALL_VERSION",
     "FEDERAL_RECALL_V2_VERSION",
     "FEDERAL_TRACE_VERSION",
     "AutonomousBankProgram",
-    "BankLocalRefinePolicy",
-    "BankLocalRefineTraceStep",
+    "LocalIterationPolicy",
+    "LocalIterationTraceStep",
     "BankOwnedQueryProgram",
     "FederalBankStep",
     "FederalCandidate",
@@ -1108,4 +1130,11 @@ __all__ = [
     "FederalTerminalRecord",
     "FederalTrace",
     "FederalTraceStep",
+    "ProgramCandidate",
+    "ProgramExecutionPolicy",
+    "ProgramExecutionTrace",
+    "ProgramLocalExecutionTraceStep",
+    "ProgramStep",
+    "ProgramTerminalRecord",
+    "ProgramTraceStep",
 ]

@@ -10,7 +10,7 @@ from arti.mechanisms import (
     TypedTopologyOperandBank,
     TypedTopologyPriorityFormula,
 )
-from arti.component_registry import component_spec
+from arti.component_registry import canonical_contract_reference, component_spec
 
 
 def test_typed_topology_matches_v1_values_and_gradients() -> None:
@@ -54,8 +54,12 @@ def test_bank_emits_formula_bound_typed_operands() -> None:
     output = formula.evaluate_operands(operands, source=bank)
 
     assert operands.contract.kind is OperandKind.TOPOLOGY
-    assert operands.contract.source_ref == "arti/topology-operand-bank@2"
-    assert operands.contract.consumer_ref == "arti/topology-priority-formula@2"
+    assert operands.contract.source_ref == canonical_contract_reference(
+        "arti/topology-operand-bank@2"
+    )
+    assert operands.contract.consumer_ref == canonical_contract_reference(
+        "arti/topology-priority-formula@2"
+    )
     assert operands.contract.source_asset_fingerprint == bank.asset_fingerprint
     assert route.shape == (2, 5, 4)
     assert output.priority.shape == (2, 5)
@@ -94,13 +98,19 @@ def test_typed_topology_versions_and_dependency_graph_are_explicit() -> None:
         formula=formula,
     )
 
-    assert arti.component_ref(bank) == "arti/topology-operand-bank@2"
-    assert arti.component_ref(formula) == "arti/topology-priority-formula@2"
-    assert arti.component_ref(policy) == "arti/bank-formula-topology-policy@2"
+    assert arti.component_ref(bank) == canonical_contract_reference(
+        "arti/topology-operand-bank@2"
+    )
+    assert arti.component_ref(formula) == canonical_contract_reference(
+        "arti/topology-priority-formula@2"
+    )
+    assert arti.component_ref(policy) == canonical_contract_reference(
+        "arti/bank-formula-topology-policy@2"
+    )
     assert set(component_spec(policy).dependencies) == {
-        "arti/fixed-topology-query@1",
-        "arti/topology-operand-bank@2",
-        "arti/topology-priority-formula@2",
+        canonical_contract_reference("arti/fixed-topology-query@1"),
+        canonical_contract_reference("arti/topology-operand-bank@2"),
+        canonical_contract_reference("arti/topology-priority-formula@2"),
     }
 
 

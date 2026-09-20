@@ -17,6 +17,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 
+from .component_registry import canonical_contract_reference
 from .gpu_resident import (
     BoundHotPagePool,
     FixedPageRefs,
@@ -164,7 +165,7 @@ def _serialize_resident(
             "workset_slots": bucket.workset_slots,
             "feature_dim": bucket.feature_dim,
             "dtype": str(bucket.dtype),
-            "refine_steps": bucket.refine_steps,
+            "iteration_steps": bucket.iteration_steps,
         }
         refs_payload = _serialize_refs(resident.refs)
         snapshot_payload = {
@@ -525,7 +526,7 @@ def _restore_resident(
         feature_dim=bucket_data["feature_dim"],
         dtype=dtype,
         device=device,
-        refine_steps=bucket_data["refine_steps"],
+        iteration_steps=bucket_data["iteration_steps"],
     )
     refs_data = _require_mapping(resident.get("refs"), "resident refs")
     refs = FixedPageRefs(
@@ -589,7 +590,10 @@ def _load_runtime_checkpoint_locked(
     except (KeyError, TypeError, ValueError, TensorTransactionContractError) as error:
         raise RuntimeCheckpointError("runtime checkpoint binding is malformed") from error
     actual_refs = tuple(binding.component_ref for binding in bindings)
-    if tuple(expected_component_refs) != actual_refs:
+    expected_refs = tuple(
+        canonical_contract_reference(reference) for reference in expected_component_refs
+    )
+    if expected_refs != actual_refs:
         raise RuntimeCheckpointError("runtime checkpoint component refs mismatch")
     try:
         tensors = load_file(str(target), device="cpu")

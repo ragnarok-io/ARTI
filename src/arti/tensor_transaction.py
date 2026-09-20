@@ -93,6 +93,12 @@ def _require_sha256(value: str, name: str) -> str:
     return value
 
 
+def _canonical_runtime_ref(reference: str) -> str:
+    from .component_registry import canonical_contract_reference
+
+    return canonical_contract_reference(reference)
+
+
 def _own_tensor(value: Tensor, *, name: str) -> Tensor:
     if not isinstance(value, Tensor):
         raise TensorOwnershipError(f"{name} must be a Tensor")
@@ -147,7 +153,7 @@ class TensorRef:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "ref": self._runtime_contract_ref,
+            "ref": _canonical_runtime_ref(self._runtime_contract_ref),
             "key": self.key,
             "version": self.version,
             "content_sha256": self.content_sha256,

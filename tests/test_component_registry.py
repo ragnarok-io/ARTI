@@ -10,15 +10,22 @@ import torch
 from safetensors import safe_open
 
 import arti
+from arti.pulse import PulseCompressor
 from arti.component_registry import (
     ComponentCompatibilityError,
+    UnknownComponentError,
     component_graph_fingerprint,
     component_provenance,
+    get_component_registry,
     resolve_component,
+    resolve_component_with_receipt,
     register_component,
     validate_component_provenance,
 )
-from arti.pulse import PulseCompressor
+
+
+def _contract_ref(declaration: str) -> str:
+    return get_component_registry().canonical_reference(declaration)
 
 
 class _RuntimeOnlyArtifactFixture(torch.nn.Module):
@@ -126,14 +133,14 @@ def test_tensor_operation_provenance_rejects_rehashed_config_and_dependency_forg
     root = next(item for item in forged_executor["components"] if item["path"] == "$")
     root["config"]["executor"] = "forged"
     reseal(forged_executor)
-    with pytest.raises(ComponentCompatibilityError, match="Loop config"):
+    with pytest.raises(ComponentCompatibilityError, match="instance identity|Loop config"):
         validate_component_provenance(forged_executor)
 
     forged_dependencies = deepcopy(provenance)
     root = next(item for item in forged_dependencies["components"] if item["path"] == "$")
-    root["dependencies"].remove("arti/tensor-operation-stop@1")
+    root["dependencies"].remove(_contract_ref("arti/tensor-operation-stop@1"))
     reseal(forged_dependencies)
-    with pytest.raises(ComponentCompatibilityError, match="dependency closure"):
+    with pytest.raises(ComponentCompatibilityError, match="instance identity|dependency closure"):
         validate_component_provenance(forged_dependencies)
 
 
@@ -142,11 +149,52 @@ def test_public_components_have_canonical_refs_and_aliases() -> None:
     pulse = resolve_component("Pulse", k=2, dim=4)
     unfold = resolve_component("arti/unfold@1", dim=4, exposed=2)
 
-    assert arti.component_ref(half) == "arti/half@1"
-    assert arti.component_ref(pulse) == "arti/pulse@1"
-    assert arti.component_ref(resolve_component("arti/learned-pulse@1", k=2, dim=4)) == "arti/pulse@1"
-    assert arti.component_ref(unfold) == "arti/unfold@1"
+    assert arti.component_ref(half) == _contract_ref("arti/half@1")
+    assert arti.component_ref(pulse) == _contract_ref("arti/pulse@1")
+    assert arti.component_ref(resolve_component("arti/learned-pulse@1", k=2, dim=4)) == _contract_ref("arti/pulse@1")
+    assert arti.component_ref(unfold) == _contract_ref("arti/unfold@1")
     assert all("@" not in key for key in pulse.state_dict())
+
+
+def test_alias_resolution_emits_a_nonpersistent_requested_to_resolved_receipt() -> None:
+    pulse, receipt = resolve_component_with_receipt("Pulse", k=2, dim=4)
+
+    assert arti.component_ref(pulse) == _contract_ref("arti/pulse@1")
+    assert receipt.to_dict() == {
+        "requested_ref": "Pulse",
+        "resolved_ref": _contract_ref("arti/pulse@1"),
+        "resolution_kind": "alias",
+    }
+    assert '"Pulse"' not in json.dumps(component_provenance(pulse), sort_keys=True)
+    with pytest.raises(UnknownComponentError):
+        resolve_component("Half")
+
+
+def test_contract_identity_is_stable_while_instance_identity_tracks_config() -> None:
+    first = arti.Half(threshold=0.5)
+    second = arti.Half(threshold=0.75)
+
+    first_spec = arti.component_spec(first)
+    second_spec = arti.component_spec(second)
+    assert first_spec.reference == second_spec.reference == _contract_ref("arti/half@1")
+    assert first_spec.instance_sha256 != second_spec.instance_sha256
+    assert first_spec.to_dict()["contract_sha256"].startswith("sha256:")
+    assert first_spec.to_dict()["contract"]["semantic_key"] == "arti/half@1"
+
+
+def test_persisted_contract_refs_require_the_full_digest() -> None:
+    reference = _contract_ref("arti/half@1")
+
+    assert resolve_component(reference, stochastic=False).threshold == 1.0
+    resolved, receipt = resolve_component_with_receipt(reference[:-1], stochastic=False)
+    assert resolved.threshold == 1.0
+    assert receipt.to_dict() == {
+        "requested_ref": reference[:-1],
+        "resolved_ref": reference,
+        "resolution_kind": "short_hash",
+    }
+    with pytest.raises(UnknownComponentError):
+        resolve_component(reference[: reference.index("sha256:") + len("sha256:") + 11])
 
 
 def test_half_provenance_records_sampling_and_learning_options() -> None:
@@ -160,7 +208,7 @@ def test_half_provenance_records_sampling_and_learning_options() -> None:
         "stochastic": False,
         "learnable": True,
         "survival": {
-            "ref": "arti/survival@1",
+            "ref": arti.describe_survival("arti/survival@1").reference,
             "origin": "builtin",
             "portable": True,
             "runtime_only": False,
@@ -178,7 +226,7 @@ def test_contextual_half_has_a_distinct_mechanism_reference() -> None:
     half = arti.Half(stochastic=False, context_mode="contextual", context_axes=(-1,))
     root = next(item for item in component_provenance(half)["components"] if item["path"] == "$")
 
-    assert arti.component_ref(half) == "arti/half@2"
+    assert arti.component_ref(half) == _contract_ref("arti/half@2")
     assert root["variant"] == "contextual"
     assert root["config_schema_version"] == 3
     assert root["config"]["context_mode"] == "contextual"
@@ -191,8 +239,8 @@ def test_half_version_resolution_rejects_cross_version_modes() -> None:
     scalar = resolve_component("arti/half@1", stochastic=False)
     contextual = resolve_component("arti/half@2", stochastic=False)
 
-    assert arti.component_ref(scalar) == "arti/half@1"
-    assert arti.component_ref(contextual) == "arti/half@2"
+    assert arti.component_ref(scalar) == _contract_ref("arti/half@1")
+    assert arti.component_ref(contextual) == _contract_ref("arti/half@2")
     with pytest.raises(ValueError, match="half@1 requires context_mode='none'"):
         resolve_component("arti/half@1", context_mode="contextual")
     with pytest.raises(ValueError, match="half@2 requires context_mode='contextual'"):
@@ -204,14 +252,17 @@ def test_pulse_provenance_records_recursive_dependencies() -> None:
     refs = {item["ref"] for item in provenance["components"]}
     root = next(item for item in provenance["components"] if item["path"] == "$")
 
-    assert "arti/pulse@1" in refs
-    assert "arti/fold@1" in refs
-    assert "arti/half@1" in refs
-    assert set(root["dependencies"]) >= {"arti/fold@1", "arti/half@1"}
+    assert _contract_ref("arti/pulse@1") in refs
+    assert _contract_ref("arti/fold@1") in refs
+    assert _contract_ref("arti/half@1") in refs
+    assert set(root["dependencies"]) >= {
+        _contract_ref("arti/fold@1"),
+        _contract_ref("arti/half@1"),
+    }
     assert validate_component_provenance(provenance) == provenance
 
 
-def test_version_one_provenance_is_strictly_migrated_on_read() -> None:
+def test_old_provenance_is_rejected_without_a_private_compatibility_layer() -> None:
     current = component_provenance(arti.Half(stochastic=False))
     legacy_components = []
     for item in current["components"]:
@@ -224,7 +275,8 @@ def test_version_one_provenance_is_strictly_migrated_on_read() -> None:
         "fingerprint": component_graph_fingerprint(legacy_components),
     }
 
-    assert validate_component_provenance(legacy) == current
+    with pytest.raises(ComponentCompatibilityError, match="unsupported"):
+        validate_component_provenance(legacy)
 
 
 def test_reversible_runtime_record_identities_remain_registered() -> None:
@@ -234,22 +286,22 @@ def test_reversible_runtime_record_identities_remain_registered() -> None:
     )
     folded = topology.fold(torch.randn(1, 4, 3))
 
-    assert arti.component_ref(folded.record) == "arti/fold-record@1"
-    assert arti.component_ref(folded) == "arti/fold-state@1"
+    assert arti.component_ref(folded.record) == _contract_ref("arti/fold-record@1")
+    assert arti.component_ref(folded) == _contract_ref("arti/fold-state@1")
 
 
-def test_runtime_only_types_have_nonportable_canonical_identities() -> None:
+def test_volatile_runtime_runtime_types_have_nonportable_canonical_identities() -> None:
     catalog = {entry["ref"]: entry for entry in arti.component_catalog()}
     expected = {
-        "arti/fixed-resident-bucket@1": "runtime_only",
-        "arti/fixed-page-refs@1": "runtime_only",
-        "arti/hot-page-pool@1": "host_bound",
-        "arti/bound-hot-page-pool@1": "host_bound",
-        "arti/captured-hot-step@1": "host_bound",
-        "arti/resident-latency-receipt@1": "runtime_only",
-        "arti/cuda-activity-receipt@1": "runtime_only",
-        "arti/runtime-checkpoint-receipt@1": "runtime_only",
-        "arti/restored-runtime-checkpoint@1": "host_bound",
+        _contract_ref("arti/fixed-resident-bucket@1"): "runtime_only",
+        _contract_ref("arti/fixed-page-refs@1"): "runtime_only",
+        _contract_ref("arti/hot-page-pool@1"): "host_bound",
+        _contract_ref("arti/bound-hot-page-pool@1"): "host_bound",
+        _contract_ref("arti/captured-hot-step@1"): "host_bound",
+        _contract_ref("arti/resident-latency-receipt@1"): "runtime_only",
+        _contract_ref("arti/cuda-activity-receipt@1"): "runtime_only",
+        _contract_ref("arti/runtime-checkpoint-receipt@1"): "runtime_only",
+        _contract_ref("arti/restored-runtime-checkpoint@1"): "host_bound",
     }
 
     for reference, artifact_policy in expected.items():
@@ -260,28 +312,31 @@ def test_runtime_only_types_have_nonportable_canonical_identities() -> None:
 def test_disabled_optional_paths_are_not_recorded_as_dependencies() -> None:
     pulse = arti.Pulse(k=2, dim=4, use_half=False)
     pulse_root = next(item for item in component_provenance(pulse)["components"] if item["path"] == "$")
-    recall = arti.Recall(dim=4, slots=2, activation="none")
+    recall = arti.Retrieve(dim=4, slots=2, activation="none")
     recall_root = next(item for item in component_provenance(recall)["components"] if item["path"] == "$")
 
     assert isinstance(pulse.half_act, torch.nn.Identity)
-    assert "arti/half@1" not in pulse_root["dependencies"]
-    assert "arti/half@1" not in recall_root["dependencies"]
+    assert _contract_ref("arti/half@1") not in pulse_root["dependencies"]
+    assert _contract_ref("arti/half@1") not in recall_root["dependencies"]
 
 
-def test_formula_and_refiner_dependencies_are_versioned() -> None:
-    recall = arti.Recall(dim=4, slots=2)
-    refiner = arti.RecallRefiner(recall)
+def test_formula_and_executor_dependencies_are_versioned() -> None:
+    recall = arti.Retrieve(dim=4, slots=2)
+    executor = arti.RetrieveExecutor(recall)
     root = next(item for item in component_provenance(recall)["components"] if item["path"] == "$")
-    refiner_root = next(
-        item for item in component_provenance(refiner)["components"] if item["path"] == "$"
+    executor_root = next(
+        item for item in component_provenance(executor)["components"] if item["path"] == "$"
     )
 
-    assert "arti/delta@1" in root["dependencies"]
-    assert "arti/recall@4" in refiner_root["dependencies"]
+    assert any(
+        dependency.startswith("arti/delta@sha256:")
+        for dependency in root["dependencies"]
+    )
+    assert _contract_ref("arti/retrieve@1") in executor_root["dependencies"]
 
 
 def test_per_bank_recall_has_versioned_partition_provenance() -> None:
-    recall = arti.Recall(
+    recall = arti.Retrieve(
         dim=4,
         slots=8,
         activation="none",
@@ -300,7 +355,7 @@ def test_per_bank_recall_has_versioned_partition_provenance() -> None:
 
     spec = arti.component_spec(recall)
 
-    assert arti.component_ref(recall) == "arti/recall@4"
+    assert arti.component_ref(recall) == _contract_ref("arti/retrieve@1")
     assert spec.config_schema_version == 1
     assert spec.config["routing_normalizer"] == "per_bank"
     assert spec.config["expert_names"] == ["game", "animal"]
@@ -313,7 +368,7 @@ def test_per_bank_recall_has_versioned_partition_provenance() -> None:
 
 
 def test_global_recall_config_schema_tracks_expert_asset_identity() -> None:
-    recall = arti.Recall(
+    recall = arti.Retrieve(
         dim=4,
         slots=8,
         activation="none",
@@ -329,7 +384,7 @@ def test_global_recall_config_schema_tracks_expert_asset_identity() -> None:
 
     spec = arti.component_spec(recall)
 
-    assert spec.reference == "arti/recall@4"
+    assert spec.reference == _contract_ref("arti/retrieve@1")
     assert spec.config_schema_version == 1
     assert spec.config["expert_member_fingerprints"] == ["1" * 64]
 
@@ -355,8 +410,8 @@ def test_per_bank_recall_artifact_round_trip_binds_partition_assembly(tmp_path) 
         weights: tuple[float, float],
         influences: tuple[float, float] = (1.0, -0.25),
         fingerprints: tuple[str, str] = ("1" * 64, "2" * 64),
-    ) -> arti.Recall:
-        module = arti.Recall(
+    ) -> arti.Retrieve:
+        module = arti.Retrieve(
             dim=4,
             slots=8,
             activation="none",
@@ -413,7 +468,7 @@ def test_per_bank_recall_artifact_round_trip_binds_partition_assembly(tmp_path) 
     with pytest.raises(ValueError, match="provenance|architecture"):
         arti.load(saved.weights_path, model=wrong_asset)
 
-    global_recall = arti.Recall(
+    global_recall = arti.Retrieve(
         dim=4,
         slots=8,
         activation="none",
@@ -477,8 +532,8 @@ def test_config_fingerprint_is_order_independent() -> None:
 
 def test_unknown_version_and_legacy_require_explicit_admission() -> None:
     unknown = deepcopy(component_provenance(arti.Half()))
-    unknown["components"][0]["ref"] = "arti/half@3"
-    unknown["components"][0]["mechanism_version"] = 3
+    unknown["components"][0]["ref"] = "arti/half@sha256:" + "0" * 64
+    unknown["components"][0]["contract_sha256"] = "sha256:" + "0" * 64
     unknown["fingerprint"] = component_graph_fingerprint(unknown["components"])
     with pytest.raises(ComponentCompatibilityError, match="unknown component"):
         validate_component_provenance(unknown)

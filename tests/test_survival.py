@@ -10,9 +10,14 @@ from arti.component_registry import ComponentCompatibilityError, component_prove
 
 
 class _LearnedSurvival(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, declaration: str | None = None) -> None:
         super().__init__()
         self.logit = nn.Parameter(torch.tensor(0.0))
+        self.survival_contract = (
+            None
+            if declaration is None
+            else arti.SurvivalContract(identity=arti.SurvivalRef.parse(declaration))
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(self.logit).expand_as(x)
@@ -39,10 +44,11 @@ def test_half_can_resolve_builtin_survival_by_reference() -> None:
     )
     x = torch.randn(2, 3)
 
-    assert layer.survival_reference == "arti/survival@1"
+    reference = arti.describe_survival("arti/survival@1").reference
+    assert layer.survival_reference == reference
     assert torch.equal(layer(x), layer.survival(x) * x)
     root = next(item for item in component_provenance(layer)["components"] if item["path"] == "$")
-    assert root["dependencies"] == ["arti/survival@1"]
+    assert root["dependencies"] == [reference]
     assert root["config"]["survival"]["portable"] is True
 
 
@@ -86,7 +92,7 @@ def test_registered_application_survival_can_be_used_locally() -> None:
 
     arti.register_survival(
         reference,
-        factory=lambda config: _LearnedSurvival(),
+        factory=lambda config: _LearnedSurvival(reference),
         description="test-only survival",
     )
     registration = arti.resolve_survival(reference)
@@ -94,3 +100,9 @@ def test_registered_application_survival_can_be_used_locally() -> None:
     layer = arti.Half(stochastic=False, survival=reference)
     assert layer.survival_runtime_only is True
     assert torch.allclose(layer.survival(torch.ones(2, 3)), torch.full((2, 3), 0.5))
+    assert layer.survival_reference == arti.resolve_survival(reference).reference
+
+
+def test_source_declarations_cannot_be_serialized() -> None:
+    with pytest.raises(arti.InvalidSurvivalRefError, match="cannot be serialized"):
+        arti.SurvivalRef.parse("arti/survival@1").to_dict()

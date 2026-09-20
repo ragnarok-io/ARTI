@@ -6,6 +6,7 @@ import torch
 import arti
 import arti.formula_v3 as formula_v3
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 from arti.formula_v3 import apply_neural_plasticity_effect
 
 
@@ -528,7 +529,9 @@ def test_effect_has_no_owned_state_or_caller_target() -> None:
     action = _simple_action()
     config = action.contract_config()
 
-    assert arti.component_ref(action) == "arti/bank-local-formula-effect-action@1"
+    assert arti.component_ref(action) == canonical_contract_reference(
+        "arti/bank-local-formula-effect-action@1"
+    )
     assert config["target_resolution"] == "dynamic-immediate-predecessor-bank-slot"
     assert config["data_lane"] == "identity"
     assert "self_state" not in dict(action.named_buffers())

@@ -1,4 +1,4 @@
-"""Typed Bank and Formula topology components for the ARTI vNext pipeline."""
+"""Typed Bank and Formula topology components for the ARTI runtime."""
 
 from __future__ import annotations
 
@@ -9,13 +9,14 @@ from typing import ClassVar, Sequence
 import torch
 from torch import Tensor
 
+from .component_registry import canonical_contract_reference
 from .topology import (
     BankFormulaTopologyPolicy,
     TopologyFormulaOutput,
     TopologyOperandBank,
     TopologyPriorityFormula,
 )
-from .vnext_contracts import (
+from .runtime_contracts import (
     OperandContract,
     OperandKind,
     OperandOwnership,
@@ -68,7 +69,7 @@ class TypedTopologyOperandBank(TopologyOperandBank):
 
         contract = OperandContract(
             kind=OperandKind.TOPOLOGY,
-            source_ref=self._component_reference,
+            source_ref=canonical_contract_reference(self._component_reference),
             partition_id=self.bank_id,
             consumer_ref=component_ref(consumer),
             factor_dim=self.factor_dim,

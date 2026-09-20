@@ -16,6 +16,7 @@ from typing import Callable, ClassVar, Iterator, Literal, Mapping, NamedTuple, S
 import torch
 from torch import Tensor, nn
 
+from .component_registry import ComponentRef, canonical_contract_reference
 from .tensor_schema import (
     ShapeDimension,
     TensorSchemaError,
@@ -36,7 +37,7 @@ FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION = 1
 _AXIS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _COMPONENT_REF_RE = re.compile(
-    r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*@[1-9][0-9]*$"
+    r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*@sha256:[0-9a-f]{64}$"
 )
 _DTYPES = frozenset(
     {"floating", "float16", "bfloat16", "float32", "float64", "int64", "boolean"}
@@ -178,6 +179,30 @@ class FormulaBindingError(FormulaV2Error):
     pass
 
 
+def _canonical_contract_ref(reference: str, *, field: str) -> str:
+    try:
+        return canonical_contract_reference(reference)
+    except (TypeError, ValueError) as error:
+        raise FormulaSchemaError(
+            "FF2_INVALID_CONTRACT_REF", f"{field} must be a canonical component reference"
+        ) from error
+
+
+def _resolve_formula_atom_ref(reference: str) -> str:
+    """Map a persisted atom contract address back to its local dispatch key."""
+
+    if reference in _ATOM_SIGNATURES:
+        return reference
+    candidates = [
+        atom_ref
+        for atom_ref in _ATOM_SIGNATURES
+        if canonical_contract_reference(atom_ref) == reference
+    ]
+    if len(candidates) != 1:
+        raise FormulaSchemaError("FF2_UNKNOWN_ATOM", f"unknown atom contract {reference!r}")
+    return candidates[0]
+
+
 class FormulaProgramError(FormulaV2Error):
     pass
 
@@ -222,7 +247,7 @@ class FormulaLimits:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_LIMITS_V1_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_LIMITS_V1_SCHEMA_REF),
             "schema_version": self.schema_version,
             "max_bindings": self.max_bindings,
             "max_slots": self.max_slots,
@@ -252,7 +277,7 @@ class FormulaLimits:
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise FormulaSchemaError("FF2_LIMIT_SCHEMA", "limits have missing or unknown fields")
-        if value["schema_ref"] != FORMULA_LIMITS_V1_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(FORMULA_LIMITS_V1_SCHEMA_REF):
             raise FormulaSchemaError("FF2_LIMIT_SCHEMA", "limits schema reference is invalid")
         return cls(**{key: item for key, item in value.items() if key != "schema_ref"})
 
@@ -352,7 +377,7 @@ class TensorType:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_TENSOR_TYPE_V1_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_TENSOR_TYPE_V1_SCHEMA_REF),
             "axes": list(self.axis_names),
             "sizes": list(self.sizes),
             "dtype": self.dtype,
@@ -366,7 +391,7 @@ class TensorType:
             raise FormulaSchemaError(
                 "FF2_TYPE_SCHEMA", "TensorType payload contains missing or unknown fields"
             )
-        if value["schema_ref"] != FORMULA_TENSOR_TYPE_V1_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(FORMULA_TENSOR_TYPE_V1_SCHEMA_REF):
             raise FormulaSchemaError("FF2_TYPE_SCHEMA", "TensorType schema reference is invalid")
         axes = value["axes"]
         sizes = value["sizes"]
@@ -404,7 +429,11 @@ class BankBinding:
 
     def __post_init__(self) -> None:
         _validate_name(self.name, field="BankBinding.name")
-        _validate_component_ref(self.source_ref, field="BankBinding.source_ref")
+        object.__setattr__(
+            self,
+            "source_ref",
+            _canonical_contract_ref(self.source_ref, field="BankBinding.source_ref"),
+        )
         _validate_name(self.partition_id, field="BankBinding.partition_id")
         if isinstance(self.member_ids, (str, bytes)):
             raise FormulaSchemaError(
@@ -494,12 +523,17 @@ class FormulaBankOperand:
     def __post_init__(self) -> None:
         if not isinstance(self.value, Tensor):
             raise TypeError("FormulaBankOperand.value must be a Tensor")
-        if not isinstance(self.source_ref, str) or not _COMPONENT_REF_RE.fullmatch(
-            self.source_ref
-        ):
+        try:
+            source_ref = ComponentRef.parse(
+                _canonical_contract_ref(
+                    self.source_ref, field="FormulaBankOperand.source_ref"
+                )
+            ).reference
+        except (TypeError, ValueError) as error:
             raise FormulaBindingError(
                 "FF2_INVALID_BANK_REF", "source_ref must be a canonical component reference"
-            )
+            ) from error
+        object.__setattr__(self, "source_ref", source_ref)
         _validate_name(self.partition_id, field="FormulaBankOperand.partition_id")
         if isinstance(self.member_ids, (str, bytes)):
             raise FormulaBindingError(
@@ -683,7 +717,7 @@ class FormulaInstructionV2:
         return {
             "instruction_id": self.instruction_id,
             "step": self.step,
-            "atom_ref": self.atom_ref,
+            "atom_ref": canonical_contract_reference(self.atom_ref),
             "input_slots": list(self.input_slots),
             "output_slot": self.output_slot,
             "attributes": {key: _thaw_json(value) for key, value in self.attributes},
@@ -961,7 +995,7 @@ class FormulaProgram:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_PROGRAM_V2_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_PROGRAM_V2_SCHEMA_REF),
             "schema_version": self.schema_version,
             "bindings": [binding.to_dict() for binding in self.bindings],
             "slots": [slot.to_dict() for slot in self.slots],
@@ -987,7 +1021,7 @@ class FormulaProgram:
             )
         if value["schema_version"] != FORMULA_PROGRAM_V2_SCHEMA_VERSION:
             raise FormulaSchemaError("FF2_UNSUPPORTED_SCHEMA", "unsupported FormulaProgram schema")
-        if value["schema_ref"] != FORMULA_PROGRAM_V2_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(FORMULA_PROGRAM_V2_SCHEMA_REF):
             raise FormulaSchemaError(
                 "FF2_UNSUPPORTED_SCHEMA", "FormulaProgram schema reference is invalid"
             )
@@ -1071,7 +1105,7 @@ class FormulaProgram:
                 FormulaInstructionV2(
                     raw["instruction_id"],
                     raw["step"],
-                    raw["atom_ref"],
+                    _resolve_formula_atom_ref(raw["atom_ref"]),
                     tuple(raw_input_slots),
                     raw["output_slot"],
                     tuple(
@@ -2060,8 +2094,14 @@ class FormulaTraceV2:
             raise FormulaSchemaError(
                 "FF2_TRACE_SCHEMA", "trace identifiers must be sequences, not text"
             )
-        object.__setattr__(self, "instruction_ids", tuple(self.instruction_ids))
-        object.__setattr__(self, "atom_refs", tuple(self.atom_refs))
+        instruction_ids = tuple(self.instruction_ids)
+        atom_refs = tuple(self.atom_refs)
+        object.__setattr__(self, "instruction_ids", instruction_ids)
+        object.__setattr__(
+            self,
+            "atom_refs",
+            tuple(_canonical_contract_ref(item, field="FormulaTraceV2.atom_refs") for item in atom_refs),
+        )
         object.__setattr__(self, "output_slots", tuple(self.output_slots))
         if self.schema_version != FORMULA_TRACE_V1_SCHEMA_VERSION:
             raise FormulaSchemaError("FF2_UNSUPPORTED_TRACE", "unsupported FormulaTraceV2 schema")
@@ -2078,7 +2118,7 @@ class FormulaTraceV2:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_ref": FORMULA_TRACE_V1_SCHEMA_REF,
+            "schema_ref": canonical_contract_reference(FORMULA_TRACE_V1_SCHEMA_REF),
             "schema_version": self.schema_version,
             "program_fingerprint": self.program_fingerprint,
             "instruction_ids": list(self.instruction_ids),
@@ -2098,7 +2138,7 @@ class FormulaTraceV2:
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise FormulaSchemaError("FF2_TRACE_SCHEMA", "trace has missing or unknown fields")
-        if value["schema_ref"] != FORMULA_TRACE_V1_SCHEMA_REF:
+        if value["schema_ref"] != canonical_contract_reference(FORMULA_TRACE_V1_SCHEMA_REF):
             raise FormulaSchemaError("FF2_TRACE_SCHEMA", "trace schema reference is invalid")
         sequences = (value["instruction_ids"], value["atom_refs"], value["output_slots"])
         if any(
@@ -2125,7 +2165,10 @@ class FormulaTraceV2:
         expected_instruction_ids = tuple(
             instruction.instruction_id for instruction in program.instructions
         )
-        expected_atom_refs = tuple(instruction.atom_ref for instruction in program.instructions)
+        expected_atom_refs = tuple(
+            canonical_contract_reference(instruction.atom_ref)
+            for instruction in program.instructions
+        )
         if (
             self.program_fingerprint != program.fingerprint
             or self.instruction_ids != expected_instruction_ids
@@ -3378,8 +3421,10 @@ def _infer_instruction_output_type(
         ).value_type
     if instruction.atom_ref == "arti/fold@2" and len(operand_types) == 2:
         if (
-            attributes["record_schema_ref"] != "arti/fold-record@1"
-            or attributes["state_schema_ref"] != "arti/fold-state@1"
+            attributes["record_schema_ref"]
+            != canonical_contract_reference("arti/fold-record@1")
+            or attributes["state_schema_ref"]
+            != canonical_contract_reference("arti/fold-state@1")
         ):
             raise FormulaProgramError(
                 "FF2_ATOM_ATTRIBUTES", "Fold@2 runtime state schema is invalid"
@@ -3393,7 +3438,8 @@ def _infer_instruction_output_type(
     if instruction.atom_ref == "arti/unfold@2" and len(operand_types) == 3:
         if (
             attributes["mode"] != "replace"
-            or attributes["record_schema_ref"] != "arti/fold-record@1"
+            or attributes["record_schema_ref"]
+            != canonical_contract_reference("arti/fold-record@1")
         ):
             raise FormulaProgramError(
                 "FF2_ATOM_ATTRIBUTES", "UnFold@2 runtime record attributes are invalid"

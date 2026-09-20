@@ -17,13 +17,15 @@ from typing import ClassVar
 import torch
 from torch import Tensor
 
+from .component_registry import canonical_contract_reference
 from .recall_experts import (
+    _canonical_formula_reference,
     canonical_tensor_state_sha256,
     module_behavior_fingerprint,
     module_structure_fingerprint,
     module_value_sha256,
 )
-from .recall_refine import AdaptiveRefinePolicy, RecallStopReason, RefinePolicy
+from .execution import AdaptiveExecutionPolicy, ExecutionStopReason, ExecutionPolicy
 
 
 class RefineTrainingContractError(ValueError):
@@ -79,6 +81,21 @@ def _bank_fingerprint(recall: object) -> str:
     )
 
 
+def _formula_execution_identity(recall: object) -> dict[str, str]:
+    """Return a persisted identity without treating local formulas as registrations."""
+
+    field = _recall_field(recall)
+    try:
+        return {"kind": "registered", "ref": _canonical_formula_reference(recall.formula_id)}
+    except ValueError:
+        return {
+            "kind": "custom",
+            "structure_fingerprint": module_structure_fingerprint(field.formula),
+            "behavior_fingerprint": module_behavior_fingerprint(field.formula),
+            "program_fingerprint": _formula_program_fingerprint(field.formula) or "",
+        }
+
+
 def _formula_fingerprint(recall: object) -> str:
     field = _recall_field(recall)
     formula_state = _role_state(recall, frozenset({"formula"}))
@@ -95,7 +112,7 @@ def _formula_fingerprint(recall: object) -> str:
     )
     return _sha256_json(
         {
-            "formula_ref": getattr(recall, "formula_id", "arti/recall-single@1"),
+            "formula": _formula_execution_identity(recall),
             "factor_names": list(field.factor_names),
             "program_fingerprint": _formula_program_fingerprint(field.formula),
             "tensor_sha256": canonical_tensor_state_sha256(
@@ -119,8 +136,8 @@ def _execution_config_fingerprint(recall: object) -> str:
     config = recall.state.config
     return _sha256_json(
         {
-            "source_ref": recall._component_reference,
-            "formula_id": recall.formula_id,
+            "source_ref": canonical_contract_reference(recall._component_reference),
+            "formula": _formula_execution_identity(recall),
             "formula_program_fingerprint": _formula_program_fingerprint(field.formula),
             "breadth": recall.breadth,
             "breadth_mode": recall.breadth_mode,
@@ -338,6 +355,12 @@ class RefineRollout:
         if any(value.grad_fn is not None for value in tensors):
             raise RefineTrainingContractError("rollout tensors must not retain an autograd graph")
         _require_non_negative_int(self.snapshot_generation, name="snapshot_generation")
+        try:
+            source_ref = canonical_contract_reference(self.source_ref)
+        except ValueError as error:
+            raise ValueError("source_ref must be a component contract reference") from error
+        if source_ref != self.source_ref:
+            raise ValueError("source_ref must be a canonical contract reference")
         if isinstance(self.trajectory_count, bool) or self.trajectory_count <= 0:
             raise ValueError("trajectory_count must be positive")
         if isinstance(self.breadth, bool) or self.breadth <= 0:
@@ -543,7 +566,7 @@ class RefineStepTraining:
         recall: object,
         hidden_state: Tensor,
         *,
-        policy: AdaptiveRefinePolicy,
+        policy: AdaptiveExecutionPolicy,
         mask: Tensor | None = None,
         breadth: int = 1,
         snapshot_generation: int = 0,
@@ -556,8 +579,8 @@ class RefineStepTraining:
             raise RefineTrainingContractError(
                 "Recall state Bank must be calibrated before rollout capture"
             )
-        if not isinstance(policy, AdaptiveRefinePolicy):
-            raise TypeError("policy must be an AdaptiveRefinePolicy")
+        if not isinstance(policy, AdaptiveExecutionPolicy):
+            raise TypeError("policy must be an AdaptiveExecutionPolicy")
         if policy.max_steps <= 0:
             raise ValueError("rollout policy must execute at least one step")
         if policy.stop.scope != "token":
@@ -589,7 +612,7 @@ class RefineStepTraining:
                 _value, _delta, diagnostics = recall.state(
                     sequence,
                     token_mask,
-                    refine_policy=capture_policy,
+                    execution_policy=capture_policy,
                 )
                 branch_mask = token_mask.unsqueeze(1)
                 branch_diagnostics = {
@@ -599,14 +622,14 @@ class RefineStepTraining:
                     for name, value in diagnostics.items()
                 }
             else:
-                from .batched_refine import run_batched_refine
-                result = run_batched_refine(
+                from .branch_search import run_branch_search
+                result = run_branch_search(
                     recall,
                     sequence,
                     mask=token_mask,
                     max_k=breadth,
                     active_k=breadth,
-                    refine_policy=capture_policy,
+                    execution_policy=capture_policy,
                 )
                 origin = result.candidates.branch_origin_index
                 branch_mask = _canonical_branches(
@@ -675,7 +698,7 @@ class RefineStepTraining:
         per_step_reason = torch.where(
             is_terminal,
             stop_reason.unsqueeze(2),
-            torch.full_like(stop_reason.unsqueeze(2), int(RecallStopReason.MAX_STEPS)),
+            torch.full_like(stop_reason.unsqueeze(2), int(ExecutionStopReason.MAX_STEPS)),
         ).expand_as(attempted)
 
         batch = sequence.shape[0]
@@ -709,7 +732,7 @@ class RefineStepTraining:
             step_index=step.reshape(-1).clone(),
             trajectory_count=trajectory_count,
             breadth=breadth,
-            source_ref=recall._component_reference,
+            source_ref=canonical_contract_reference(recall._component_reference),
             source_structure_fingerprint=structure,
             source_behavior_fingerprint=behavior,
             source_execution_fingerprint=_execution_config_fingerprint(recall),
@@ -730,7 +753,7 @@ class RefineStepTraining:
         _assert_fixed_query(recall)
         _assert_deterministic_execution(recall)
         _require_non_negative_int(current_generation, name="current_generation")
-        if recall._component_reference != rollout.source_ref:
+        if canonical_contract_reference(recall._component_reference) != rollout.source_ref:
             raise RefineTrainingContractError("rollout source component does not match Recall")
         if module_structure_fingerprint(recall) != rollout.source_structure_fingerprint:
             raise RefineTrainingContractError("rollout source structure changed")
@@ -753,8 +776,8 @@ class RefineStepTraining:
             raise RefineTrainingContractError("same-generation Recall snapshot changed")
 
     @staticmethod
-    def _one_step_policy() -> AdaptiveRefinePolicy:
-        return RefinePolicy.adaptive(
+    def _one_step_policy() -> AdaptiveExecutionPolicy:
+        return ExecutionPolicy.adaptive(
             max_steps=1,
             min_steps=1,
             scope="token",
@@ -774,7 +797,7 @@ class RefineStepTraining:
         value, _delta, diagnostics = recall.state(
             hidden,
             mask,
-            refine_policy=RefineStepTraining._one_step_policy(),
+            execution_policy=RefineStepTraining._one_step_policy(),
             selected_groups=selected_groups,
             selected_groups_first_step_only=True,
         )
@@ -825,7 +848,7 @@ class RefineStepTraining:
                 token_mask = rollout.mask.index_select(0, local)
                 selected_groups = None
                 if select_first and rollout.breadth > 1:
-                    from .batched_refine import query_recall_branches
+                    from .branch_search import query_recall_branches
 
                     local_sample = rollout.sample_id.index_select(0, local)
                     sample_order = torch.argsort(local_sample, stable=True)

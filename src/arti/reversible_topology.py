@@ -11,12 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import re
 from typing import ClassVar, Sequence
 
 import torch
 from torch import Tensor, nn
 
+from .component_registry import ComponentRef, canonical_contract_reference
 from .topology import (
     SoftTopKTopologySurrogate,
     StablePriorityPartition,
@@ -27,6 +27,21 @@ from .topology import (
 
 FOLD_RECORD_SCHEMA_VERSION = 1
 FOLD_STATE_SCHEMA_VERSION = 1
+_FOLD_REF = "arti/fold@2"
+_UNFOLD_REF = "arti/unfold@2"
+_TOPOLOGY_REF = "arti/reversible-topology@1"
+
+
+def _record_contract_reference(reference: str) -> str:
+    """Resolve custom record identities without putting registry access in hot paths."""
+
+    if reference == "arti/fold@2":
+        return _FOLD_REF
+    if reference == "arti/unfold@2":
+        return _UNFOLD_REF
+    if reference == "arti/reversible-topology@1":
+        return _TOPOLOGY_REF
+    return reference
 
 
 @dataclass(frozen=True)
@@ -67,10 +82,12 @@ def _canonical_component_ref(value: object, *, role: str) -> str:
     reference = getattr(value, "_component_reference", None)
     if not isinstance(reference, str):
         raise TypeError(f"{role} must expose a stable component reference")
-    name = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
-    if re.fullmatch(rf"{name}/{name}@[1-9][0-9]*", reference) is None:
-        raise ValueError(f"{role} component reference must be canonical")
-    return reference
+    try:
+        resolved = canonical_contract_reference(reference)
+        ComponentRef.parse(resolved)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{role} component reference must resolve to a full contract address") from error
+    return resolved
 
 
 def _json_contract(value: object, *, role: str) -> dict[str, object]:
@@ -84,16 +101,20 @@ def _json_contract(value: object, *, role: str) -> dict[str, object]:
         json.dumps(contract, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as error:
         raise TypeError(f"{role} topology contract must be JSON-serializable") from error
-    return contract
+    result = dict(contract)
+    reference = result.get("ref")
+    if isinstance(reference, str):
+        result["ref"] = canonical_contract_reference(reference)
+    return result
 
 
 def _transport_contract_fingerprint(*, active_count: int, axis: int) -> str:
     return _sha256_json(
         {
-            "ref": "arti/reversible-topology@1",
+            "ref": _TOPOLOGY_REF,
             "active_count": active_count,
             "axis": axis,
-            "operator_ref": "arti/stable-priority-partition@1",
+            "operator_ref": canonical_contract_reference("arti/stable-priority-partition@1"),
             "tie_break": "stable-index",
             "inverse": "recorded-permutation",
             "original_instance_conservation": True,
@@ -198,9 +219,9 @@ class FoldRecord:
         object.__setattr__(self, "original_shape", shape)
         object.__setattr__(self, "axis", -2)
         object.__setattr__(self, "active_count", int(active_count))
-        object.__setattr__(self, "producer_ref", producer_ref)
-        object.__setattr__(self, "inverse_ref", inverse_ref)
-        object.__setattr__(self, "topology_ref", topology_ref)
+        object.__setattr__(self, "producer_ref", _record_contract_reference(producer_ref))
+        object.__setattr__(self, "inverse_ref", _record_contract_reference(inverse_ref))
+        object.__setattr__(self, "topology_ref", _record_contract_reference(topology_ref))
         object.__setattr__(self, "topology_config_fingerprint", topology_config_fingerprint)
         object.__setattr__(
             self, "producer_provenance_fingerprint", producer_provenance_fingerprint
@@ -362,7 +383,10 @@ def _unfold_state(
     if not isinstance(state, FoldedTensor):
         raise TypeError("unfold expects a FoldedTensor produced by Fold@2")
     record = state.record
-    if record.producer_ref != "arti/fold@2" or record.inverse_ref != "arti/unfold@2":
+    if (
+        record.producer_ref != _FOLD_REF
+        or record.inverse_ref != _UNFOLD_REF
+    ):
         raise ValueError("FoldRecord operation identities are incompatible")
     if record.topology_ref != topology_ref:
         raise ValueError("FoldRecord topology identity is incompatible")
@@ -405,8 +429,8 @@ def _materialize_overlay(
         raise TypeError("overlay unfold requires an internal active topology overlay")
     record = state.record
     if (
-        record.producer_ref != "arti/fold@2"
-        or record.inverse_ref != "arti/unfold@2"
+        record.producer_ref != _FOLD_REF
+        or record.inverse_ref != _UNFOLD_REF
         or record.topology_ref != topology_ref
         or record.active_count != active_count
         or record.axis != axis
@@ -446,7 +470,7 @@ class InverseTopologyContract(nn.Module):
             raise ValueError("InverseTopologyContract@1 only supports axis=-2")
         self.active_count = int(active_count)
         self.axis = int(axis)
-        self.topology_ref = "arti/reversible-topology@1"
+        self.topology_ref = canonical_contract_reference("arti/reversible-topology@1")
         self.contract_fingerprint = _transport_contract_fingerprint(
             active_count=self.active_count, axis=self.axis
         )
@@ -462,7 +486,7 @@ class InverseTopologyContract(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": _canonical_component_ref(self, role="inverse topology contract"),
             "active_count": self.active_count,
             "axis": self.axis,
             "topology_ref": self.topology_ref,
@@ -512,7 +536,7 @@ class FixedTopologyPolicy(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": _canonical_component_ref(self, role="fixed topology policy"),
             "order": self.order.detach().cpu().tolist(),
             "tie_break": "stable-index",
             "validity": "valid-first",
@@ -560,6 +584,9 @@ class ReversibleTopology(nn.Module):
             raise TypeError(
                 "ReversibleTopology@1 requires a canonical topology surrogate"
             )
+        self._topology_ref = _canonical_component_ref(
+            self, role="reversible topology"
+        )
         self._contract_fingerprint = self._make_contract_fingerprint()
         self._producer_provenance_fingerprint = self._make_producer_fingerprint()
         self.register_load_state_dict_post_hook(self._refresh_contract_fingerprint)
@@ -574,12 +601,12 @@ class ReversibleTopology(nn.Module):
         return _sha256_json(
             {
                 "policy": policy_contract,
-                "operator_ref": self.operator._component_reference,
+                "operator_ref": _canonical_component_ref(self.operator, role="topology operator"),
                 "surrogate": (
                     None
                     if self.surrogate is None
                     else {
-                        "ref": self.surrogate._component_reference,
+                        "ref": _canonical_component_ref(self.surrogate, role="topology surrogate"),
                         "temperature": self.surrogate.temperature,
                         "path": "backward-only",
                     }
@@ -599,7 +626,7 @@ class ReversibleTopology(nn.Module):
             {
                 "source_ref": source_ref,
                 "source_contract": source_contract,
-                "proposal_ref": TopologyProposal._component_reference,
+                "proposal_ref": canonical_contract_reference(TopologyProposal._component_reference),
                 "operator": self.operator.topology_contract(),
                 "surrogate": (
                     None
@@ -709,6 +736,7 @@ class ReversibleTopology(nn.Module):
             original_shape=x.shape,
             axis=self.axis,
             active_count=self.active_count,
+            topology_ref=self._topology_ref,
             topology_config_fingerprint=self.contract_fingerprint,
             producer_provenance_fingerprint=self.producer_provenance_fingerprint,
         )
@@ -955,6 +983,7 @@ class ReversibleTopology(nn.Module):
             original_shape=x.shape,
             axis=self.axis,
             active_count=self.active_count,
+            topology_ref=self._topology_ref,
             topology_config_fingerprint=self.contract_fingerprint,
             producer_provenance_fingerprint=(
                 self._source_provenance_fingerprint(source)
@@ -1032,7 +1061,7 @@ class ReversibleTopology(nn.Module):
             state,
             active_count=self.active_count,
             axis=self.axis,
-            topology_ref=self._component_reference,
+            topology_ref=self._topology_ref,
             contract_fingerprint=self.contract_fingerprint,
         )
 

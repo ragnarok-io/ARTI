@@ -11,11 +11,24 @@ from typing import ClassVar, Sequence
 import torch
 from torch import Tensor, nn
 
-from .vnext_contracts import ContractLimits, DEFAULT_CONTRACT_LIMITS
+from .runtime_contracts import ContractLimits, DEFAULT_CONTRACT_LIMITS
 
 
 FORMULA_FABRIC_PROGRAM_SCHEMA_VERSION = 1
 FORMULA_FABRIC_TRACE_SCHEMA_VERSION = 1
+
+
+def _canonical_contract_ref(reference: str) -> str:
+    """Resolve a source declaration before it enters a receipt or fingerprint."""
+
+    # Compiled route receipts are ephemeral graph values. Resolving through the
+    # registry here would capture its Python lock; eager artifact construction
+    # remains the canonical persistence boundary.
+    if torch.compiler.is_compiling():
+        return reference
+    from .component_registry import canonical_contract_reference
+
+    return canonical_contract_reference(reference)
 
 
 class FormulaPrimitive(str, Enum):
@@ -750,8 +763,8 @@ class FormulaFabricCompute(nn.Module):
         from .component_registry import component_spec
 
         execution_config = {
-            "ref": self._component_reference,
-            "fabric_ref": fabric._component_reference,
+            "ref": _canonical_contract_ref(self._component_reference),
+            "fabric_ref": _canonical_contract_ref(fabric._component_reference),
             "fabric_config_fingerprint": component_spec(fabric).config_fingerprint,
             "program_fingerprint": fabric.program.fingerprint,
             "limits": dict(fabric.limits.__dict__),
@@ -1119,7 +1132,10 @@ class BankFormulaRouteSource(nn.Module):
             "program_fingerprint": program.fingerprint,
             "active_count": active_count,
             "estimator": estimator,
-            "policy_refs": [policy._component_reference for policy in policies],
+            "policy_refs": [
+                _canonical_contract_ref(policy._component_reference)
+                for policy in policies
+            ],
             "policy_config_fingerprints": list(self._policy_config_fingerprints),
             "candidate_mask_hash": hashlib.sha256(
                 candidate_mask.to(torch.uint8).numpy().tobytes()
@@ -1386,7 +1402,7 @@ class BankFormulaRouteSource(nn.Module):
             fire.detach().clone(),
             commit.detach().clone(),
             torch.stack(availability_steps, dim=1).detach().clone(),
-            self._component_reference,
+            _canonical_contract_ref(self._component_reference),
             self.config_fingerprint,
         )
         return plan, info
@@ -1415,7 +1431,7 @@ class RoutedFormulaFabricCompute(nn.Module):
         self.route_source = route_source
         self.active_count = compute.active_count
         adapter_config = {
-            "ref": self._component_reference,
+            "ref": _canonical_contract_ref(self._component_reference),
             "compute": compute.execution_config_fingerprint,
             "route_source": route_source.config_fingerprint,
             "active_count": self.active_count,
@@ -1467,9 +1483,9 @@ class RoutedFormulaFabricCompute(nn.Module):
                 else route_info.route_source_config_fingerprint
             ),
             route=route_info,
-            executor_ref=self.compute._component_reference,
+            executor_ref=_canonical_contract_ref(self.compute._component_reference),
             executor_config_fingerprint=self.compute.execution_config_fingerprint,
-            adapter_ref=self._component_reference,
+            adapter_ref=_canonical_contract_ref(self._component_reference),
             adapter_config_fingerprint=self.config_fingerprint,
             commit_mode=self.compute.commit_mode,
             factor_contract=self.compute.factor_contract,
@@ -1511,7 +1527,7 @@ class IterativeRoutedFormulaFabricCompute(nn.Module):
         self.steps = steps
         self.active_count = routed.active_count
         config = {
-            "ref": self._component_reference,
+            "ref": _canonical_contract_ref(self._component_reference),
             "routed_config_fingerprint": routed.config_fingerprint,
             "steps": steps,
             "route_semantics": "requery-after-program",
@@ -1573,7 +1589,7 @@ class IterativeRoutedFormulaFabricCompute(nn.Module):
             iterations=tuple(records),
             configured_steps=self.steps,
             executed_steps=self.steps,
-            adapter_ref=self._component_reference,
+            adapter_ref=_canonical_contract_ref(self._component_reference),
             adapter_config_fingerprint=self.config_fingerprint,
             route_semantics="requery-after-program",
         )

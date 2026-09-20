@@ -11,6 +11,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from .component_registry import ComponentRef, canonical_contract_reference
 from .formula_v2 import (
     DEFAULT_FORMULA_LIMITS,
     BankBinding,
@@ -27,9 +28,13 @@ from .formula_v2 import (
 
 
 _PARTITION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-_COMPONENT_REF_RE = re.compile(
-    r"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*@[1-9][0-9]*$"
-)
+
+
+def _canonical_source_ref(value: str) -> str:
+    try:
+        return ComponentRef.parse(canonical_contract_reference(value)).reference
+    except (TypeError, ValueError) as error:
+        raise ValueError("source_ref must resolve to a full component contract reference") from error
 
 
 def _require_finite(value: Tensor, message: str, *, code: str) -> None:
@@ -148,8 +153,7 @@ class FormulaOperandBank(nn.Module):
             raise ValueError("keys must have shape [K, Q]")
         if not isinstance(operands, Mapping) or not operands:
             raise ValueError("operands must be a non-empty mapping")
-        if not isinstance(source_ref, str) or not _COMPONENT_REF_RE.fullmatch(source_ref):
-            raise ValueError("source_ref must be a canonical component reference")
+        resolved_source_ref = _canonical_source_ref(source_ref)
         if not isinstance(bundle_id, str) or not _PARTITION_RE.fullmatch(bundle_id):
             raise ValueError("bundle_id is invalid")
         if not bool(torch.isfinite(keys).all()):
@@ -196,7 +200,7 @@ class FormulaOperandBank(nn.Module):
         self.operands = nn.ParameterDict(
             {name: nn.Parameter(value) for name, value in sorted(normalized_operands.items())}
         )
-        self.source_ref = source_ref
+        self.source_ref = resolved_source_ref
         self.bundle_id = bundle_id
         self.member_ids = normalized_members
         lexical_rank = {

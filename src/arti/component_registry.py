@@ -22,15 +22,25 @@ import torch
 from torch import Tensor, nn
 
 
-COMPONENT_PROVENANCE_VERSION = 2
+COMPONENT_PROVENANCE_VERSION = 3
 COMPONENT_STATE_CONTRACT_VERSION = 1
+COMPONENT_CONTRACT_VERSION = 1
 ComponentLifecycle = Literal["stable", "alpha", "legacy", "deprecated"]
 ArtifactPolicy = Literal["portable", "runtime_only", "host_bound"]
 _LIFECYCLES = frozenset({"stable", "alpha", "legacy", "deprecated"})
 _ARTIFACT_POLICIES = frozenset({"portable", "runtime_only", "host_bound"})
 _COMPONENT_NAME = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
-_REFERENCE = re.compile(
+_CONTRACT_REFERENCE = re.compile(
+    rf"^(?P<namespace>{_COMPONENT_NAME})/(?P<name>{_COMPONENT_NAME})@sha256:(?P<digest>[0-9a-f]{{64}})$"
+)
+_SHORT_CONTRACT_REFERENCE = re.compile(
+    rf"^(?P<namespace>{_COMPONENT_NAME})/(?P<name>{_COMPONENT_NAME})@sha256:(?P<digest>[0-9a-f]{{12,63}})$"
+)
+_DECLARATION_REFERENCE = re.compile(
     rf"^(?P<namespace>{_COMPONENT_NAME})/(?P<name>{_COMPONENT_NAME})@(?P<version>[1-9][0-9]*)$"
+)
+_MECHANISM_REFERENCE = re.compile(
+    rf"^(?P<namespace>{_COMPONENT_NAME})/(?P<name>{_COMPONENT_NAME})$"
 )
 
 
@@ -65,6 +75,48 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _sha256_domain(domain: str, value: Any) -> str:
+    if not isinstance(domain, str) or not domain:
+        raise ValueError("hash domain must be a non-empty string")
+    prefix = f"ARTI\0{domain}\0v1\0".encode("ascii")
+    return hashlib.sha256(prefix + _canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _sha256_address(domain: str, value: Any) -> str:
+    return f"sha256:{_sha256_domain(domain, value)}"
+
+
+def canonical_contract_reference(reference: str) -> str:
+    """Normalize an input declaration into a full immutable contract ref.
+
+    Registered components resolve to their registered contract. A source-only
+    declaration for another typed contract domain receives a deterministic
+    external contract address. Persisted callers must supply the resulting
+    full reference; this helper is deliberately an input boundary.
+    """
+
+    try:
+        return ComponentRef.parse(reference).reference
+    except InvalidComponentRefError:
+        pass
+    if not isinstance(reference, str):
+        raise InvalidComponentRefError("component reference must be a string")
+    declaration = _DECLARATION_REFERENCE.fullmatch(reference)
+    if declaration is None:
+        raise InvalidComponentRefError(
+            "contract reference must use a full SHA-256 address or a source declaration"
+        )
+    registry = get_component_registry()
+    resolved = registry.canonical_reference(reference)
+    if resolved != reference:
+        return resolved
+    mechanism_id = f"{declaration.group('namespace')}/{declaration.group('name')}"
+    return (
+        f"{mechanism_id}@"
+        f"{_sha256_address('external-contract-declaration', {'semantic_key': reference})}"
+    )
 
 
 def _tensor_descriptor(value: Tensor) -> dict[str, Any]:
@@ -105,49 +157,116 @@ def _normalize(value: Any) -> Any:
 
 @dataclass(frozen=True, order=True)
 class ComponentRef:
-    """Canonical ``namespace/name@version`` component identity."""
+    """Canonical immutable ``namespace/name@sha256:<contract>`` identity."""
 
     namespace: str
     name: str
-    version: int
+    contract_sha256: str
 
     def __post_init__(self) -> None:
         if re.fullmatch(_COMPONENT_NAME, self.namespace) is None:
             raise InvalidComponentRefError("component namespace is invalid")
         if re.fullmatch(_COMPONENT_NAME, self.name) is None:
             raise InvalidComponentRefError("component name is invalid")
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version <= 0:
-            raise InvalidComponentRefError("component version must be a positive integer")
+        if re.fullmatch(r"[0-9a-f]{64}", self.contract_sha256) is None:
+            raise InvalidComponentRefError("component contract digest must be a lowercase SHA-256 hex digest")
 
     @property
     def mechanism_id(self) -> str:
         return f"{self.namespace}/{self.name}"
 
     @property
+    def address(self) -> str:
+        return f"sha256:{self.contract_sha256}"
+
+    @property
     def reference(self) -> str:
-        return f"{self.mechanism_id}@{self.version}"
+        return f"{self.mechanism_id}@{self.address}"
 
     @classmethod
     def parse(cls, reference: str) -> "ComponentRef":
         if not isinstance(reference, str):
             raise InvalidComponentRefError("component reference must be a string")
-        match = _REFERENCE.fullmatch(reference)
+        match = _CONTRACT_REFERENCE.fullmatch(reference)
         if match is None:
             raise InvalidComponentRefError(
-                "component reference must use namespace/name@version syntax"
+                "component reference must use namespace/name@sha256:<64-lowercase-hex> syntax"
             )
         return cls(
             namespace=match.group("namespace"),
             name=match.group("name"),
-            version=int(match.group("version")),
+            contract_sha256=match.group("digest"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "namespace": self.namespace,
             "name": self.name,
-            "version": self.version,
+            "contract_sha256": self.address,
         }
+
+
+@dataclass(frozen=True)
+class ComponentContract:
+    """Domain-separated, content-addressed API and ABI declaration.
+
+    The contract deliberately excludes a module's concrete configuration,
+    tensor values and build artifacts.  Those are instance, state and build
+    identities respectively, so changing a trained Bank never changes the
+    component API address.
+    """
+
+    mechanism_id: str
+    semantic_key: str
+    variant: str
+    config_schema_version: int
+    state_schema_version: int
+    capabilities: tuple[str, ...] = ()
+    declared_dependency_families: tuple[str, ...] = ()
+    schema_version: int = COMPONENT_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        if _MECHANISM_REFERENCE.fullmatch(self.mechanism_id) is None:
+            raise ValueError("component contract mechanism_id is invalid")
+        if not isinstance(self.semantic_key, str) or not self.semantic_key:
+            raise ValueError("component contract semantic_key must be non-empty")
+        if not isinstance(self.variant, str) or not self.variant:
+            raise ValueError("component contract variant must be non-empty")
+        if self.schema_version != COMPONENT_CONTRACT_VERSION:
+            raise ValueError("unsupported component contract schema version")
+        for value, name in (
+            (self.config_schema_version, "config_schema_version"),
+            (self.state_schema_version, "state_schema_version"),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if tuple(sorted(set(self.capabilities))) != self.capabilities:
+            raise ValueError("component contract capabilities must be sorted and unique")
+        if tuple(sorted(set(self.declared_dependency_families))) != self.declared_dependency_families:
+            raise ValueError("component contract dependencies must be sorted and unique")
+        if any(_MECHANISM_REFERENCE.fullmatch(value) is None for value in self.declared_dependency_families):
+            raise ValueError("component contract dependency family is invalid")
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "kind": "arti.component-contract",
+            "schema_version": self.schema_version,
+            "mechanism_id": self.mechanism_id,
+            "semantic_key": self.semantic_key,
+            "variant": self.variant,
+            "config_schema_version": self.config_schema_version,
+            "state_schema_version": self.state_schema_version,
+            "capabilities": list(self.capabilities),
+            "declared_dependency_families": list(self.declared_dependency_families),
+        }
+
+    @property
+    def address(self) -> str:
+        return _sha256_address("component-contract", self.payload())
+
+    @property
+    def digest(self) -> str:
+        return self.address.removeprefix("sha256:")
 
 
 ConfigBuilder = Callable[[Any], Mapping[str, Any]]
@@ -156,10 +275,35 @@ Factory = Callable[..., Any]
 
 
 @dataclass(frozen=True)
+class ComponentResolutionReceipt:
+    """Interactive resolution record; never part of persisted provenance."""
+
+    requested_ref: str
+    resolved_ref: str
+    resolution_kind: Literal[
+        "canonical", "declaration", "alias", "deprecated_alias", "short_hash"
+    ]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requested_ref, str) or not self.requested_ref:
+            raise ValueError("requested component reference must be a non-empty string")
+        ComponentRef.parse(self.resolved_ref)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "requested_ref": self.requested_ref,
+            "resolved_ref": self.resolved_ref,
+            "resolution_kind": self.resolution_kind,
+        }
+
+
+@dataclass(frozen=True)
 class ComponentRegistration:
     """A code-side registration for one exact component contract."""
 
     identity: ComponentRef
+    contract: ComponentContract
+    declaration_reference: str
     component_type: type[Any]
     lifecycle: ComponentLifecycle
     variant: str
@@ -175,6 +319,12 @@ class ComponentRegistration:
     capabilities: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.contract.mechanism_id != self.identity.mechanism_id:
+            raise ValueError("component registration contract and identity disagree")
+        if self.contract.digest != self.identity.contract_sha256:
+            raise ValueError("component registration contract digest disagrees with identity")
+        if _DECLARATION_REFERENCE.fullmatch(self.declaration_reference) is None:
+            raise ValueError("component declaration reference must use private legacy syntax")
         if self.lifecycle not in _LIFECYCLES:
             raise ValueError(f"unsupported component lifecycle: {self.lifecycle!r}")
         if not isinstance(self.component_type, type):
@@ -227,7 +377,8 @@ class ComponentRegistration:
             "kind": "module",
             "ref": self.reference,
             "mechanism_id": self.identity.mechanism_id,
-            "mechanism_version": self.identity.version,
+            "contract_sha256": self.identity.address,
+            "contract": self.contract.payload(),
             "variant": self.variant,
             "lifecycle": self.lifecycle,
             "config_schema_version": self.config_schema_version,
@@ -251,9 +402,11 @@ class ComponentSpec:
     lifecycle: ComponentLifecycle
     config_schema_version: int
     state_schema_version: int
+    contract: Mapping[str, Any]
     config: Mapping[str, Any]
     config_fingerprint: str
     parameter_schema_fingerprint: str
+    instance_sha256: str
     dependencies: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
 
@@ -268,7 +421,8 @@ class ComponentSpec:
             "api": self.api,
             "ref": self.reference,
             "mechanism_id": identity.mechanism_id,
-            "mechanism_version": identity.version,
+            "contract_sha256": identity.address,
+            "contract": _normalize(self.contract),
             "variant": self.variant,
             "lifecycle": self.lifecycle,
             "config_schema_version": self.config_schema_version,
@@ -276,6 +430,7 @@ class ComponentSpec:
             "config": _normalize(self.config),
             "config_fingerprint": self.config_fingerprint,
             "parameter_schema_fingerprint": self.parameter_schema_fingerprint,
+            "instance_sha256": self.instance_sha256,
             "dependencies": list(self.dependencies),
             "capabilities": list(self.capabilities),
         }
@@ -616,7 +771,7 @@ def _adaptive_pulse_config(component: Any) -> Mapping[str, Any]:
     _attr(component, "_validate_manifest_binding")()
     manifest = _attr(component, "manifest")
     return {
-        "manifest_ref": "arti/pulse-stage-graph@1",
+        "manifest_ref": canonical_contract_reference("arti/pulse-stage-graph@1"),
         "manifest": manifest.to_dict(),
         "manifest_fingerprint": manifest.fingerprint,
     }
@@ -625,19 +780,24 @@ def _adaptive_pulse_config(component: Any) -> Mapping[str, Any]:
 def _adaptive_pulse_dependencies(component: Any) -> Sequence[str]:
     _attr(component, "_validate_manifest_binding")()
     return (
-        "arti/pulse-stage-graph@1",
+        canonical_contract_reference("arti/pulse-stage-graph@1"),
         *_attr(component, "enabled_components"),
     )
 
 
 def _arti_layer_config(component: Any) -> Mapping[str, Any]:
-    return {
-        "pulse": component_spec(_attr(component, "pulse")).to_dict(),
-    }
+    return _attr(component, "contract_config")()
 
 
 def _arti_layer_dependencies(component: Any) -> Sequence[str]:
-    return (component_ref(_attr(component, "pulse")),)
+    program = _attr(component, "program")
+    graph = _attr(component, "graph")
+    dependencies: list[str] = []
+    if program is not None:
+        dependencies.append(component_ref(program))
+    if graph is not None:
+        dependencies.append(component_ref(graph))
+    return tuple(sorted(dependencies))
 
 
 def _learned_pulse_config(component: Any) -> Mapping[str, Any]:
@@ -647,8 +807,8 @@ def _learned_pulse_config(component: Any) -> Mapping[str, Any]:
         "k",
         "dim",
         "hidden_dim",
-        "refine_enabled",
-        "refine_mode",
+        "correction_enabled",
+        "correction_mode",
         "fold_mode",
         "fold_topk",
         "q_topk",
@@ -689,7 +849,7 @@ def _recall_config(component: Any) -> Mapping[str, Any]:
             _attr(component, "state.recall.expert_influences")
         ),
     }
-    if _attr(component, "_component_reference") == "arti/recall@4":
+    if _attr(component, "_component_reference") in {"arti/recall@4", "arti/retrieve@1"}:
         result.update(
             {
                 "breadth": _attr(component, "breadth"),
@@ -723,7 +883,7 @@ def _half_dependencies(component: Any) -> Sequence[str]:
     return (reference,) if isinstance(reference, str) else ()
 
 
-def _refiner_dependencies(component: Any) -> Sequence[str]:
+def _executor_dependencies(component: Any) -> Sequence[str]:
     result: list[str] = []
     recall = getattr(component, "recall_layer", None)
     registration = get_component_registry().registration_for(recall)
@@ -749,8 +909,8 @@ def _bank_execution_signature_v2_dependencies(component: Any) -> Sequence[str]:
     }
     if component.local_formula_ref is not None:
         result.add(component.local_formula_ref)
-    if component.local_refine_ref is not None:
-        result.add(component.local_refine_ref)
+    if component.local_iteration_ref is not None:
+        result.add(component.local_iteration_ref)
     return tuple(sorted(result))
 
 
@@ -783,25 +943,48 @@ def _bank_execution_signature_v3_dependencies(component: Any) -> Sequence[str]:
                 component.query_signature.matcher_ref,
                 component.terminal_adapter_ref,
                 component.local_formula_ref,
-                component.local_refine_ref,
+                component.local_iteration_ref,
             }
         )
     )
 
 
-def _federal_recall_v3_dependencies(component: Any) -> Sequence[str]:
-    result = {
-        "arti/bank-execution-signature@3",
-        "arti/sealed-bank-query@2",
-        "arti/terminal-output-abi@1",
-    }
-    for bank_id in component.banks:
-        result.update(
-            _bank_execution_signature_v3_dependencies(
-                component.banks[bank_id].signature
-            )
+def _federated_program_dependencies(component: Any) -> Sequence[str]:
+    """Resolve dependencies from the routed-program collection actually owned.
+
+    ``FederalRecallV3`` and ``FederatedProgram`` share this concrete layout.
+    The older ``banks`` collection belonged to a prior implementation and must
+    not remain a hidden dependency of the current program contract.
+    """
+
+    return tuple(
+        sorted(
+            {
+                "arti/terminal-output-abi@1",
+                *(component_ref(program) for program in component.programs.values()),
+            }
         )
-    return tuple(sorted(result))
+    )
+
+
+def _legacy_federal_recall_v3_dependencies(component: Any) -> Sequence[str]:
+    """Preserve the historical V3 contract closure for legacy artifacts."""
+
+    signatures = tuple(program.signature for program in component.programs.values())
+    return tuple(
+        sorted(
+            {
+                "arti/bank-execution-signature@3",
+                "arti/sealed-bank-query@2",
+                "arti/terminal-output-abi@1",
+                *(
+                    dependency
+                    for signature in signatures
+                    for dependency in _bank_execution_signature_v3_dependencies(signature)
+                ),
+            }
+        )
+    )
 
 
 def _target_bank_updater_config(component: Any) -> Mapping[str, Any]:
@@ -824,11 +1007,11 @@ def _target_bank_updater_config(component: Any) -> Mapping[str, Any]:
 
 def _target_bank_updater_dependencies(component: Any) -> Sequence[str]:
     result = [
-        "arti/write-refine-policy@1",
-        "arti/refine-budget@1",
+        "arti/write-integration-policy@1",
+        "arti/execution-budget@1",
     ]
     if _attr(component, "policy.stop") is not None:
-        result.append("arti/refine-stop@1")
+        result.append("arti/execution-stop@1")
     formula = getattr(component, "formula", None)
     registration = get_component_registry().registration_for(formula)
     if registration is not None:
@@ -875,7 +1058,7 @@ def _route_stack_dependencies(component: Any) -> Sequence[str]:
     for item in _attr(component, "items"):
         registration = get_component_registry().registration_for(item)
         if registration is None:
-            raise ValueError("RecallRouteStack contains an unregistered item")
+            raise ValueError("RetrievalRouteStack contains an unregistered item")
         result.append(registration.reference)
     return result
 
@@ -949,14 +1132,14 @@ def _recall_runtime_config(component: Any) -> Mapping[str, Any]:
         "slots": _attr(component, "slots"),
         "hidden_dim": _attr(component, "hidden_dim"),
         "bank_layout": "values-only",
-        "state_ref": "arti/recall-state@1",
+        "state_ref": canonical_contract_reference("arti/recall-state@1"),
         "recall_state_schema_version": _attr(component, "contract.state_schema_version"),
         "runtime_contract_schema_version": _attr(component, "contract.schema_version"),
     }
 
 
 def _recall_runtime_dependencies(component: Any) -> Sequence[str]:
-    result = ["arti/recall-state@1"]
+    result = [canonical_contract_reference("arti/recall-state@1")]
     registry = get_component_registry()
     for child in (getattr(component, "reader", None), getattr(component, "updater", None)):
         registration = registry.registration_for(child)
@@ -969,7 +1152,7 @@ def _resident_formula_operation_config(component: Any) -> Mapping[str, Any]:
     route = _attr(component, "route")
     factors = _attr(component, "factors")
     return {
-        "refine_steps": _attr(component, "resident_refine_steps"),
+        "iteration_steps": _attr(component, "resident_iteration_steps"),
         "route_estimator": _attr(route, "estimator"),
         "route_shape": list(_attr(route, "weights").shape),
         "factor_shape": None if factors is None else list(factors.shape),
@@ -1110,7 +1293,7 @@ def _recall_branch_batch_config(component: Any) -> Mapping[str, Any]:
     }
 
 
-def _batched_refine_result_config(component: Any) -> Mapping[str, Any]:
+def _branch_search_result_config(component: Any) -> Mapping[str, Any]:
     candidate = component.candidates
     candidate_config = _recall_branch_batch_config(candidate)
     return {
@@ -1124,7 +1307,7 @@ def _batched_refine_result_config(component: Any) -> Mapping[str, Any]:
         "operation_wrapper_ref": (
             None
             if component.operation_ref is None
-            else "arti/batched-refine-operation@1"
+            else "arti/branch-search-operation@1"
         ),
         "operation_ref": component.operation_ref,
         "formula_route_fingerprint": component.formula_route_fingerprint,
@@ -1140,7 +1323,7 @@ def _batched_refine_result_config(component: Any) -> Mapping[str, Any]:
     }
 
 
-def _batched_refine_result_dependencies(component: Any) -> Sequence[str]:
+def _branch_search_result_dependencies(component: Any) -> Sequence[str]:
     candidate = component.candidates
     return tuple(
         reference
@@ -1152,14 +1335,14 @@ def _batched_refine_result_dependencies(component: Any) -> Sequence[str]:
             (
                 None
                 if component.operation_ref is None
-                else "arti/batched-refine-operation@1"
+                else "arti/branch-search-operation@1"
             ),
             component.operation_ref,
             *component.topology_refs,
             (
                 None
                 if component.branch_policy_fingerprint is None
-                else "arti/branch-refine-policy@1"
+                else "arti/branch-search-policy@1"
             ),
         )
         if reference is not None
@@ -1172,6 +1355,7 @@ class ComponentRegistry:
     def __init__(self) -> None:
         self._lock = RLock()
         self._by_reference: dict[str, ComponentRegistration] = {}
+        self._by_declaration: dict[str, ComponentRegistration] = {}
         self._by_alias: dict[str, ComponentRegistration] = {}
 
     def register(
@@ -1191,16 +1375,39 @@ class ComponentRegistry:
         config_builder: ConfigBuilder | None = None,
         dependency_builder: DependencyBuilder | None = None,
         capabilities: Sequence[str] = (),
+        contract_key: str | None = None,
+        contract_dependencies: Sequence[str] = (),
     ) -> ComponentRegistration:
-        identity = ComponentRef.parse(reference)
+        declaration = _DECLARATION_REFERENCE.fullmatch(reference)
+        if declaration is None:
+            raise InvalidComponentRefError(
+                "component registrations must use a private namespace/name@integer declaration key"
+            )
+        mechanism_id = f"{declaration.group('namespace')}/{declaration.group('name')}"
         if type(constructible) is not bool:
             raise TypeError("constructible must be boolean")
         if not constructible and factory is not None:
             raise ValueError("a non-constructible component cannot expose a factory")
         if artifact_policy not in _ARTIFACT_POLICIES:
             raise ValueError(f"unsupported artifact policy: {artifact_policy!r}")
+        contract = ComponentContract(
+            mechanism_id=mechanism_id,
+            semantic_key=reference if contract_key is None else contract_key,
+            variant=variant,
+            config_schema_version=config_schema_version,
+            state_schema_version=state_schema_version,
+            capabilities=tuple(capabilities),
+            declared_dependency_families=tuple(sorted(set(contract_dependencies))),
+        )
+        identity = ComponentRef(
+            namespace=declaration.group("namespace"),
+            name=declaration.group("name"),
+            contract_sha256=contract.digest,
+        )
         registration = ComponentRegistration(
             identity=identity,
+            contract=contract,
+            declaration_reference=reference,
             component_type=component_type,
             lifecycle=lifecycle,
             variant=variant,
@@ -1220,22 +1427,24 @@ class ComponentRegistry:
             capabilities=tuple(capabilities),
         )
         with self._lock:
-            if reference in self._by_reference or reference in self._by_alias:
-                raise DuplicateComponentError(f"component reference is already registered: {reference}")
-            aliases_to_add = set(registration.aliases) | set(registration.deprecated_aliases)
-            for alias in {identity.mechanism_id, identity.name, component_type.__name__}:
-                if alias not in self._by_alias and alias not in self._by_reference:
-                    aliases_to_add.add(alias)
-            if reference in aliases_to_add:
+            if registration.reference in self._by_reference or registration.reference in self._by_alias:
                 raise DuplicateComponentError(
-                    f"component reference cannot also be an alias: {reference}"
+                    f"component reference is already registered: {registration.reference}"
+                )
+            if reference in self._by_declaration:
+                raise DuplicateComponentError(f"component declaration is already registered: {reference}")
+            aliases_to_add = set(registration.aliases) | set(registration.deprecated_aliases)
+            if registration.reference in aliases_to_add:
+                raise DuplicateComponentError(
+                    f"component reference cannot also be an alias: {registration.reference}"
                 )
             for alias in aliases_to_add:
                 if not isinstance(alias, str) or not alias:
                     raise InvalidComponentRefError("component aliases must be non-empty strings")
             if any(alias in self._by_reference or alias in self._by_alias for alias in aliases_to_add):
                 raise DuplicateComponentError(f"component alias is already registered: {sorted(aliases_to_add)}")
-            self._by_reference[reference] = registration
+            self._by_reference[registration.reference] = registration
+            self._by_declaration[reference] = registration
             for alias in aliases_to_add:
                 self._by_alias[alias] = registration
         return registration
@@ -1247,12 +1456,74 @@ class ComponentRegistry:
         except KeyError as error:
             raise UnknownComponentError(f"unknown component reference: {reference!r}") from error
 
-    def resolve_registration(self, reference_or_alias: str) -> ComponentRegistration:
+    def canonical_reference(self, reference: str) -> str:
+        """Resolve a registry declaration or canonical ref to its full contract address.
+
+        Integer declaration keys are deliberately accepted only as source-local
+        migration inputs.  Callers serializing configuration or artifacts must
+        always use the returned full SHA-256 address.
+        """
+
         with self._lock:
-            registration = self._by_reference.get(reference_or_alias) or self._by_alias.get(reference_or_alias)
+            registration = (
+                self._by_reference.get(reference)
+                or self._by_declaration.get(reference)
+                or self._by_alias.get(reference)
+            )
+        if registration is None:
+            return reference
+        return registration.reference
+
+    def resolve_registration(self, reference_or_alias: str) -> ComponentRegistration:
+        return self.resolve_registration_with_receipt(reference_or_alias)[0]
+
+    def resolve_registration_with_receipt(
+        self, reference_or_alias: str
+    ) -> tuple[ComponentRegistration, ComponentResolutionReceipt]:
+        with self._lock:
+            registration = self._by_reference.get(reference_or_alias)
+            resolution_kind: Literal[
+                "canonical", "declaration", "alias", "deprecated_alias", "short_hash"
+            ]
+            if registration is not None:
+                resolution_kind = "canonical"
+            else:
+                registration = self._by_declaration.get(reference_or_alias)
+                if registration is not None:
+                    resolution_kind = "declaration"
+                else:
+                    registration = self._by_alias.get(reference_or_alias)
+                    if registration is None:
+                        resolution_kind = "alias"
+                    elif reference_or_alias in registration.deprecated_aliases:
+                        resolution_kind = "deprecated_alias"
+                    else:
+                        resolution_kind = "alias"
+                if registration is None:
+                    short = _SHORT_CONTRACT_REFERENCE.fullmatch(reference_or_alias)
+                    if short is not None:
+                        mechanism_id = f"{short.group('namespace')}/{short.group('name')}"
+                        candidates = tuple(
+                            item
+                            for item in self._by_reference.values()
+                            if item.identity.mechanism_id == mechanism_id
+                            and item.identity.contract_sha256.startswith(short.group("digest"))
+                        )
+                        if len(candidates) == 1:
+                            registration = candidates[0]
+                            resolution_kind = "short_hash"
+                        elif len(candidates) > 1:
+                            raise UnknownComponentError(
+                                "ambiguous short component contract reference: "
+                                f"{reference_or_alias!r}"
+                            )
         if registration is None:
             raise UnknownComponentError(f"unknown component reference or alias: {reference_or_alias!r}")
-        return registration
+        return registration, ComponentResolutionReceipt(
+            requested_ref=reference_or_alias,
+            resolved_ref=registration.reference,
+            resolution_kind=resolution_kind,
+        )
 
     def registration_for(self, value: Any) -> ComponentRegistration | None:
         if value is None:
@@ -1260,7 +1531,9 @@ class ComponentRegistry:
         with self._lock:
             preferred_reference = getattr(value, "_component_reference", None)
             if isinstance(preferred_reference, str):
-                preferred = self._by_reference.get(preferred_reference)
+                preferred = self._by_reference.get(preferred_reference) or self._by_declaration.get(
+                    preferred_reference
+                )
                 if preferred is not None and isinstance(value, preferred.component_type):
                     return preferred
             for registration in self._by_reference.values():
@@ -1282,12 +1555,18 @@ class ComponentRegistry:
         return tuple(registration.to_dict() for registration in self.registrations())
 
     def resolve(self, reference_or_alias: str, **kwargs: Any) -> Any:
-        registration = self.resolve_registration(reference_or_alias)
+        value, _receipt = self.resolve_with_receipt(reference_or_alias, **kwargs)
+        return value
+
+    def resolve_with_receipt(
+        self, reference_or_alias: str, **kwargs: Any
+    ) -> tuple[Any, ComponentResolutionReceipt]:
+        registration, receipt = self.resolve_registration_with_receipt(reference_or_alias)
         if registration.factory is None:
             raise ComponentRegistryError(
                 f"component {registration.reference!r} is runtime-only and cannot be constructed"
             )
-        return registration.factory(**kwargs)
+        return registration.factory(**kwargs), receipt
 
 
 _DEFAULT_REGISTRY: ComponentRegistry | None = None
@@ -1306,6 +1585,7 @@ def _build_default_registry() -> ComponentRegistry:
     from .context import FrameContext, TensorContext
     from .emission import EmissionRouter, EmissionRouterConfig
     from .arti_layer import ARTILayer
+    from .federal_layer import ProgramRuntime
     from .layers import (
         ARTIDynamicStateLayer,
         ARTILatentRecallField,
@@ -1317,17 +1597,17 @@ def _build_default_registry() -> ComponentRegistry:
     from .membrane import MembraneVisibilityRouter
     from .aggregate import ReunionAggregate, SoftFoldAggregate
     from .adaptive_pulse import AdaptivePulse
-    from .batched_refine import (
-        BatchedRefineOperation,
-        BatchedRefinePlan,
-        BatchedRefineResult,
-        BranchRefinePolicy,
+    from .branch_search import (
+        BranchSearchOperation,
+        BranchSearchPlan,
+        BranchSearchResult,
+        BranchSearchPolicy,
         ExecutionRNGPlan,
         RecallBranchBatch,
         RecallFormulaBranchBatch,
     )
-    from .branch_refine import (
-        BatchedRefineExecutor,
+    from .branch_search_runtime import (
+        BranchSearchExecutor,
         ExecutionContextReceipt,
         ResidentBranchCommitReceipt,
         ResidentBranchDecision,
@@ -1406,8 +1686,19 @@ def _build_default_registry() -> ComponentRegistry:
         RestoredRuntimeCheckpoint,
         RuntimeCheckpointReceipt,
     )
+    from .resource_graph import Connection, LearnableAffineTransfer, ProgramGraph, ProgramNode, TensorResource
     from .selective_recall import SelectiveRecallKernel
-    from .nn import Fold, FusionPulse, Half, LearnedPulse, Recall, RecallRefiner, UnFold
+    from .nn import (
+        Fold,
+        FusionPulse,
+        Half,
+        LearnedPulse,
+        Recall,
+        RecallExecutor,
+        Retrieve,
+        RetrieveExecutor,
+        UnFold,
+    )
     from .pulse import PulseCompressor
     from .reversible_topology import (
         FOLD_RECORD_SCHEMA_VERSION,
@@ -1493,37 +1784,47 @@ def _build_default_registry() -> ComponentRegistry:
         BankExecutionSignatureV3,
         TerminalOutputABI,
     )
-    from .federal_recall import BankLocalRefinePolicy, FederalRecall, FederalRecallV2
+    from .federal_recall import LocalIterationPolicy, FederalRecall, FederalRecallV2
     from .federal_tensor_view import (
-        FederalRecallV3,
+        FederatedProgram,
+        FederatedProgramNode,
+        RoutedProgram,
+        RoutedProgramNode,
         TensorViewFormulaEffectAction,
         TensorViewFormulaAction,
-        TensorViewFormulaProgram,
+        TensorViewResourceGraphAction,
         TensorViewLayoutTransition,
     )
-    from .recall_refine import (
-        AdaptiveRefinePolicy,
-        RecallRoutePlan,
-        RecallRouteStack,
-        RecallTraceV3,
-        RefineBudget,
-        RefinePolicy,
-        RefineStop,
+    from .legacy.federal_program import FederalRecallV3, TensorViewFormulaProgram
+    from .legacy.refine import (
+        AdaptiveRefinePolicy as LegacyAdaptiveRefinePolicy,
+        RefineBudget as LegacyRefineBudget,
+        RefinePolicy as LegacyRefinePolicy,
+        RefineStop as LegacyRefineStop,
+    )
+    from .execution import (
+        AdaptiveExecutionPolicy,
+        ExecutionBudget,
+        ExecutionPolicy,
+        ExecutionStop,
+        RetrievalRoutePlan,
+        RetrievalRouteStack,
+        ExecutionTraceV3,
     )
     from .refine_training import RefineRollout, RefineStepTraining
     from .refine_exit import FormulaRefineExit, RefineExitControl, RefineExitRequest
     from .refine_exit_training import RefineExitCurve, RefineExitTraining
-    from .target_bank import TargetBankUpdater, WriteRefinePolicy
+    from .target_bank import TargetBankUpdater, WriteIntegrationPolicy
     from .objective_bank import ObjectiveExposureBank
     from .objective_formula import ObjectiveFormulaFabricCompute
     from .recall_runtime import RecallRuntime
-    from .vnext_contracts import (
+    from .runtime_contracts import (
         PULSE_STAGE_GRAPH_SCHEMA_VERSION,
         PULSE_STAGE_SCHEMA_VERSION,
         PulseStageGraph,
         PulseStageSpec,
     )
-    from .vnext_pipeline import PulseExecutor
+    from .pulse_runtime import PulseExecutor
     from .observation import (
         AdaptiveObservation,
         FixedObservationPolicy,
@@ -1542,7 +1843,7 @@ def _build_default_registry() -> ComponentRegistry:
         OperableTensorPort,
         PortSnapshot,
         PortSpec,
-        ReaderRefineSchedule,
+        ReaderIterationSchedule,
         SharedCanvas,
         SharedCanvasFold,
         TensorEditInstruction,
@@ -1587,6 +1888,7 @@ def _build_default_registry() -> ComponentRegistry:
         kwargs: dict[str, Any],
         *,
         breadth_mode: str,
+        component_type: type[Recall] = Recall,
     ) -> Recall:
         requested = kwargs.pop("routing_normalizer", normalizer)
         if requested != normalizer:
@@ -1619,7 +1921,7 @@ def _build_default_registry() -> ComponentRegistry:
         expert_influences = tuple(
             float(value) for value in kwargs.pop("expert_influences", ())
         )
-        module = Recall(routing_normalizer=normalizer, **kwargs)
+        module = component_type(routing_normalizer=normalizer, **kwargs)
         if (
             expert_names
             or expert_ranges
@@ -1653,6 +1955,17 @@ def _build_default_registry() -> ComponentRegistry:
         if normalizer not in {"global", "per_bank"}:
             raise ValueError("arti/recall@4 requires a supported routing_normalizer")
         return recall_factory(normalizer, kwargs, breadth_mode="independent")
+
+    def retrieve_factory(**kwargs: Any) -> Retrieve:
+        normalizer = kwargs.pop("routing_normalizer", "global")
+        if normalizer not in {"global", "per_bank"}:
+            raise ValueError("arti/retrieve@1 requires a supported routing_normalizer")
+        return recall_factory(
+            normalizer,
+            kwargs,
+            breadth_mode="independent",
+            component_type=Retrieve,
+        )
 
     def coupled_target_bank_updater_factory(**kwargs: Any) -> TargetBankUpdater:
         requested = kwargs.get("target_coupling", "required_after_bootstrap")
@@ -2430,7 +2743,7 @@ def _build_default_registry() -> ComponentRegistry:
             "feature_dim": component.feature_dim,
             "dtype": str(component.dtype),
             "device": str(component.device),
-            "refine_steps": component.refine_steps,
+            "iteration_steps": component.iteration_steps,
         },
     )
     add(
@@ -2558,11 +2871,11 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/batched-refine-operation@1",
-        BatchedRefineOperation,
+        "arti/branch-search-operation@1",
+        BranchSearchOperation,
         lifecycle=stable,
         variant="existing-formula-topology-step-operation",
-        capabilities=("recall.batched-refine.operation",),
+        capabilities=("execution.branch-search.operation",),
         config_builder=lambda component: {
             "operation_ref": component.operation_ref,
             "operation_config_fingerprint": component_spec(
@@ -2572,13 +2885,13 @@ def _build_default_registry() -> ComponentRegistry:
         dependency_builder=lambda component: (component.operation_ref,),
     )
     add(
-        "arti/execution-rng-plan@2",
+        "arti/execution-rng-plan@3",
         ExecutionRNGPlan,
         lifecycle=stable,
         variant="runtime-only-callsite-and-branch-origin-keyed-rng-plan",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.rng-plan",),
+        capabilities=("execution.branch-search.rng-plan",),
         config_builder=lambda component: {
             "algorithm": component.algorithm,
             "stream_key": component.stream_key,
@@ -2593,7 +2906,7 @@ def _build_default_registry() -> ComponentRegistry:
         variant="runtime-only-keyed-or-deterministic-execution-context",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.execution-context",),
+        capabilities=("execution.branch-search.execution-context",),
         config_builder=lambda component: {
             "schema_version": component.schema_version,
             "mode": component.mode,
@@ -2605,13 +2918,13 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
-        "arti/batched-refine@1",
-        BatchedRefineExecutor,
+        "arti/branch-search-executor@1",
+        BranchSearchExecutor,
         lifecycle=stable,
         variant="factory-owned-authority-closure",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.executor",),
+        capabilities=("execution.branch-search.executor",),
         config_schema_version=2,
         config_builder=lambda component: {
             "schema_version": component.schema_version,
@@ -2644,7 +2957,7 @@ def _build_default_registry() -> ComponentRegistry:
                 (
                     None
                     if component.branch_policy_fingerprint is None
-                    else "arti/branch-refine-policy@1"
+                    else "arti/branch-search-policy@1"
                 ),
             )
             if reference is not None
@@ -2658,7 +2971,7 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         artifact_policy="host_bound",
         capabilities=(
-            "recall.batched-refine.resident",
+            "execution.branch-search.resident",
             "tensor.authority.host-mediated",
         ),
         config_builder=lambda component: {
@@ -2680,7 +2993,7 @@ def _build_default_registry() -> ComponentRegistry:
         variant="runtime-only-host-visible-k-score-receipt",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.resident-score",),
+        capabilities=("execution.branch-search.resident-score",),
         config_builder=lambda component: {
             "spec_fingerprint": component.spec_fingerprint,
             "run_instance_token": component.run_instance_token,
@@ -2702,7 +3015,7 @@ def _build_default_registry() -> ComponentRegistry:
         variant="runtime-only-host-authority-decision",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.resident-decision",),
+        capabilities=("execution.branch-search.resident-decision",),
         config_builder=lambda component: {
             "kind": component.kind,
             "run_instance_token": component.run_instance_token,
@@ -2721,7 +3034,7 @@ def _build_default_registry() -> ComponentRegistry:
         variant="runtime-only-gpu-resident-publication-receipt",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.resident-commit",),
+        capabilities=("execution.branch-search.resident-commit",),
         config_builder=lambda component: {
             "status": component.status,
             "decision_fingerprint": component.decision_fingerprint,
@@ -2736,11 +3049,11 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     add(
-        "arti/batched-refine-plan@1",
-        BatchedRefinePlan,
+        "arti/branch-search-plan@1",
+        BranchSearchPlan,
         lifecycle=stable,
         variant="candidate-recall-operation-requery",
-        capabilities=("recall.batched-refine.plan",),
+        capabilities=("execution.branch-search.plan",),
         config_builder=lambda component: {
             "schema_version": component.schema_version,
             "execution_layout": component.execution_layout,
@@ -2758,12 +3071,12 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/branch-refine-policy@1",
-        BranchRefinePolicy,
+        "arti/branch-search-policy@1",
+        BranchSearchPolicy,
         lifecycle=stable,
         variant="runtime-only-candidate-bound-branch-policy",
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.branch-policy",),
+        capabilities=("execution.branch-search.branch-policy",),
         config_builder=lambda component: {
             "config_fingerprint": component.config_fingerprint,
             "base_ref": component.base._component_reference,
@@ -2777,7 +3090,7 @@ def _build_default_registry() -> ComponentRegistry:
         variant="runtime-only-single-value-candidate-batch",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.candidates",),
+        capabilities=("execution.branch-search.candidates",),
         config_schema_version=3,
         config_builder=_recall_branch_batch_config,
         dependency_builder=lambda component: (component.source_ref,),
@@ -2790,7 +3103,7 @@ def _build_default_registry() -> ComponentRegistry:
         constructible=False,
         artifact_policy="runtime_only",
         capabilities=(
-            "recall.batched-refine.candidates",
+            "execution.branch-search.candidates",
             "recall.formula.factor-aware",
         ),
         config_schema_version=6,
@@ -2801,16 +3114,16 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/batched-refine-result@1",
-        BatchedRefineResult,
+        "arti/branch-search-result@1",
+        BranchSearchResult,
         lifecycle=stable,
         variant="runtime-only-branch-result",
         constructible=False,
         artifact_policy="runtime_only",
-        capabilities=("recall.batched-refine.result",),
+        capabilities=("execution.branch-search.result",),
         config_schema_version=4,
-        config_builder=_batched_refine_result_config,
-        dependency_builder=_batched_refine_result_dependencies,
+        config_builder=_branch_search_result_config,
+        dependency_builder=_branch_search_result_dependencies,
     )
     add(
         "arti/bank-formula-route-source@1",
@@ -2835,7 +3148,7 @@ def _build_default_registry() -> ComponentRegistry:
         "arti/iterative-routed-formula-fabric-compute@1",
         IterativeRoutedFormulaFabricCompute,
         lifecycle=stable,
-        variant="state-conditioned-route-refinement",
+        variant="state-conditioned-route-iteration",
         capabilities=("pulse.stage.selective-compute",),
         config_builder=lambda component: {
             "routed": component_spec(component.routed).to_dict(),
@@ -2868,11 +3181,11 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("selective.compute.kernel",),
         config_builder=lambda component: {
             "recall": component_spec(component.recall).to_dict(),
-            "refine_policy": component_spec(component.refine_policy).to_dict(),
+            "execution_policy": component_spec(component.execution_policy).to_dict(),
         },
         dependency_builder=lambda component: (
             component_ref(component.recall),
-            component_ref(component.refine_policy),
+            component_ref(component.execution_policy),
         ),
     )
     add(
@@ -3086,12 +3399,12 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=("federal.contract.shape-polymorphic-bank-signature",),
     )
     add(
-        "arti/bank-local-refine-policy@1",
-        BankLocalRefinePolicy,
+        "arti/local-iteration-policy@1",
+        LocalIterationPolicy,
         lifecycle=stable,
         variant="latest-local-state-requery-budget",
         config_builder=lambda component: component.contract_config(),
-        capabilities=("federal.bank-local-refine.policy",),
+        capabilities=("federal.local-iteration.policy",),
     )
     add(
         "arti/bank-local-formula-action@1",
@@ -3156,9 +3469,10 @@ def _build_default_registry() -> ComponentRegistry:
             sorted(
                 {
                     *(component_ref(action) for action in component.actions),
+                    *(component_ref(action) for action in component.direct_actions),
                     component_ref(component.terminal_action),
                     component_ref(component.query),
-                    component_ref(component.local_refine),
+                    component_ref(component.local_iteration),
                     "arti/bank-execution-signature@2",
                     "arti/terminal-output-abi@1",
                 }
@@ -3212,8 +3526,8 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/tensor-view-formula-program@2",
         TensorViewFormulaProgram,
-        lifecycle="alpha",
-        variant="winner-owned-predecessor-bank-local-refine-program",
+        lifecycle="legacy",
+        variant="winner-owned-predecessor-bank-local-iteration-program",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: tuple(
@@ -3222,7 +3536,7 @@ def _build_default_registry() -> ComponentRegistry:
                     *(component_ref(action) for action in component.actions),
                     component_ref(component.terminal_action),
                     component_ref(component.query),
-                    component_ref(component.local_refine),
+                    component_ref(component.local_iteration),
                     "arti/bank-execution-signature@3",
                     "arti/terminal-output-abi@1",
                     "arti/tensor-view-pattern@1",
@@ -3232,7 +3546,8 @@ def _build_default_registry() -> ComponentRegistry:
         capabilities=(
             "federal.bank-local.latest-tensor-view-requery",
             "federal.bank-local.predecessor-bank-plasticity",
-            "federal.bank-local.variable-rank-refine",
+            "federal.bank-local.variable-rank-iteration",
+            "program.connection.direct",
         ),
     )
     add(
@@ -3352,6 +3667,44 @@ def _build_default_registry() -> ComponentRegistry:
         LinearContextPlacementEncoder,
         RecursiveContextCompiler,
         SinusoidalTokenPositionEncoder,
+    )
+    add(
+        "arti/routed-program@1",
+        RoutedProgram,
+        lifecycle="alpha",
+        variant="role-oriented-local-routing-program",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted(
+                {
+                    *(component_ref(action) for action in component.actions),
+                    *(component_ref(action) for action in component.direct_actions),
+                    component_ref(component.terminal_action),
+                    component_ref(component.query),
+                    component_ref(component.local_iteration),
+                    "arti/bank-execution-signature@3",
+                    "arti/terminal-output-abi@1",
+                    "arti/tensor-view-pattern@1",
+                }
+            )
+        ),
+        capabilities=(
+            "program.local-routing",
+            "program.variable-rank-iteration",
+        ),
+    )
+    add(
+        "arti/tensor-view-resource-graph-action@1",
+        TensorViewResourceGraphAction,
+        lifecycle="alpha",
+        variant="functional-branch-local-resource-subprogram",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "federal.bank-local.resource-subprogram",
+            "federal.winner-committed-resource-state",
+        ),
     )
 
     add(
@@ -3838,15 +4191,15 @@ def _build_default_registry() -> ComponentRegistry:
     add(
         "arti/federal-recall@3",
         FederalRecallV3,
-        lifecycle="alpha",
-        variant="shape-polymorphic-bank-local-refine-federation",
+        lifecycle="legacy",
+        variant="shape-polymorphic-bank-local-iteration-federation",
         constructible=False,
         config_builder=lambda component: component.contract_config(),
-        dependency_builder=_federal_recall_v3_dependencies,
+        dependency_builder=_legacy_federal_recall_v3_dependencies,
         capabilities=(
             "federal.fixed-k-wide",
             "federal.hard-one-winner",
-            "federal.shape-polymorphic-local-refine",
+            "federal.shape-polymorphic-local-iteration",
         ),
     )
     add(
@@ -3857,7 +4210,7 @@ def _build_default_registry() -> ComponentRegistry:
         state_schema_version=PULSE_STAGE_GRAPH_SCHEMA_VERSION,
         config_builder=lambda component: component.to_dict(),
         dependency_builder=lambda component: (
-            "arti/pulse-stage@1",
+            canonical_contract_reference("arti/pulse-stage@1"),
             *component.enabled_dependencies,
         ),
     )
@@ -3867,13 +4220,13 @@ def _build_default_registry() -> ComponentRegistry:
         lifecycle=stable,
         variant="manifest-bound-executor",
         config_builder=lambda component: {
-            "manifest_ref": "arti/pulse-stage-graph@1",
+            "manifest_ref": canonical_contract_reference("arti/pulse-stage-graph@1"),
             "manifest": component.manifest.to_dict(),
             "manifest_fingerprint": component.manifest.fingerprint,
             "enabled_stage_ids": sorted(component.enabled_stage_ids),
         },
         dependency_builder=lambda component: (
-            "arti/pulse-stage-graph@1",
+            canonical_contract_reference("arti/pulse-stage-graph@1"),
             *component.manifest.enabled_dependencies,
         ),
     )
@@ -3926,19 +4279,39 @@ def _build_default_registry() -> ComponentRegistry:
         "arti/recall@4",
         Recall,
         lifecycle=stable,
-        variant="independent-k-wide-refine",
+        variant="independent-k-wide-iteration",
         config_schema_version=1,
         factory=wide_recall_factory,
         config_builder=_recall_config,
         dependency_builder=_recall_dependencies,
     )
     add(
-        "arti/recall-refiner@2",
-        RecallRefiner,
+        "arti/recall-executor@2",
+        RecallExecutor,
         lifecycle=stable,
         variant="runtime-policy-adapter",
         config_builder=lambda _component: {},
-        dependency_builder=_refiner_dependencies,
+        dependency_builder=_executor_dependencies,
+    )
+    add(
+        "arti/retrieve@1",
+        Retrieve,
+        lifecycle=stable,
+        variant="operand-retrieval-and-state-transition",
+        config_schema_version=1,
+        factory=retrieve_factory,
+        config_builder=_recall_config,
+        dependency_builder=_recall_dependencies,
+        capabilities=("execution.iterative", "operation.retrieve"),
+    )
+    add(
+        "arti/retrieve-executor@1",
+        RetrieveExecutor,
+        lifecycle=stable,
+        variant="execution-policy-adapter",
+        config_builder=lambda _component: {},
+        dependency_builder=_executor_dependencies,
+        capabilities=("execution.policy", "operation.retrieve"),
     )
     add(
         "arti/target-bank-updater@1",
@@ -3961,14 +4334,14 @@ def _build_default_registry() -> ComponentRegistry:
         dependency_builder=_target_bank_updater_dependencies,
     )
     add(
-        "arti/write-refine-policy@1",
-        WriteRefinePolicy,
+        "arti/write-integration-policy@1",
+        WriteIntegrationPolicy,
         lifecycle=stable,
         variant="runtime-only",
         config_builder=_fields("budget", "stop", "exposure_schedule"),
         dependency_builder=lambda component: (
-            "arti/refine-budget@1",
-            *(("arti/refine-stop@1",) if _attr(component, "stop") is not None else ()),
+            "arti/execution-budget@1",
+            *(("arti/execution-stop@1",) if _attr(component, "stop") is not None else ()),
         ),
     )
     add(
@@ -4010,8 +4383,8 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/refine-policy@1",
-        RefinePolicy,
-        lifecycle=stable,
+        LegacyRefinePolicy,
+        lifecycle="legacy",
         variant="runtime-only",
         config_builder=_fields(
             "max_steps",
@@ -4028,15 +4401,15 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/refine-budget@1",
-        RefineBudget,
-        lifecycle=stable,
+        LegacyRefineBudget,
+        lifecycle="legacy",
         variant="runtime-only",
         config_builder=_fields("max_steps", "min_steps"),
     )
     add(
         "arti/refine-stop@1",
-        RefineStop,
-        lifecycle=stable,
+        LegacyRefineStop,
+        lifecycle="legacy",
         variant="runtime-only",
         config_builder=_fields(
             "scope",
@@ -4050,11 +4423,11 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/refine-policy@2",
-        AdaptiveRefinePolicy,
-        lifecycle=stable,
+        LegacyAdaptiveRefinePolicy,
+        lifecycle="legacy",
         variant="adaptive-runtime",
         config_schema_version=2,
-        factory=RefinePolicy.adaptive,
+        factory=ExecutionPolicy.adaptive,
         config_builder=_fields(
             "budget",
             "stop",
@@ -4068,6 +4441,68 @@ def _build_default_registry() -> ComponentRegistry:
         dependency_builder=lambda _component: (
             "arti/refine-budget@1",
             "arti/refine-stop@1",
+        ),
+    )
+    add(
+        "arti/execution-budget@1",
+        ExecutionBudget,
+        lifecycle=stable,
+        variant="runtime-only",
+        config_builder=_fields("max_steps", "min_steps"),
+    )
+    add(
+        "arti/execution-stop@1",
+        ExecutionStop,
+        lifecycle=stable,
+        variant="runtime-only",
+        config_builder=_fields(
+            "scope",
+            "absolute_tolerance",
+            "relative_tolerance",
+            "route_tolerance",
+            "patience",
+            "cycle_tolerance",
+            "cycle_periods",
+        ),
+    )
+    add(
+        "arti/execution-policy@1",
+        ExecutionPolicy,
+        lifecycle=stable,
+        variant="runtime-only",
+        config_builder=_fields(
+            "max_steps",
+            "min_steps",
+            "tolerance",
+            "checkpoints",
+            "trace_level",
+            "cycle_tolerance",
+            "cycle_periods",
+            "check_finite",
+            "nonfinite_action",
+            "checkpoint_mode",
+        ),
+    )
+    add(
+        "arti/execution-policy@2",
+        AdaptiveExecutionPolicy,
+        lifecycle=stable,
+        variant="adaptive-runtime",
+        config_schema_version=2,
+        factory=ExecutionPolicy.adaptive,
+        config_builder=_fields(
+            "budget",
+            "stop",
+            "checkpoints",
+            "trace_level",
+            "check_finite",
+            "nonfinite_action",
+            "checkpoint_mode",
+            "executor",
+        ),
+        dependency_builder=lambda _component: (
+            "arti/execution-budget@1",
+            "arti/execution-stop@1",
         ),
     )
     add(
@@ -4451,8 +4886,8 @@ def _build_default_registry() -> ComponentRegistry:
         ),
     )
     add(
-        "arti/reader-refine-schedule@1",
-        ReaderRefineSchedule,
+        "arti/reader-iteration-schedule@1",
+        ReaderIterationSchedule,
         lifecycle=stable,
         variant="independent-reader-depth",
         constructible=False,
@@ -4495,7 +4930,7 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/recall-trace@3",
-        RecallTraceV3,
+        ExecutionTraceV3,
         lifecycle=stable,
         variant="post-transition-neural-exit-trace",
         constructible=False,
@@ -4505,7 +4940,7 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/recall-route-plan@1",
-        RecallRoutePlan,
+        RetrievalRoutePlan,
         lifecycle=stable,
         variant="runtime-only",
         config_schema_version=1,
@@ -4521,7 +4956,7 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add(
         "arti/recall-route-stack@1",
-        RecallRouteStack,
+        RetrievalRouteStack,
         lifecycle=stable,
         variant="runtime-only",
         config_schema_version=1,
@@ -4545,6 +4980,141 @@ def _build_default_registry() -> ComponentRegistry:
         config_builder=_recall_state_config,
     )
     add("arti/updater@1", RecallValueUpdater, lifecycle=stable, config_builder=_updater_config)
+    add(
+        "arti/tensor-resource@1",
+        TensorResource,
+        lifecycle="alpha",
+        variant="explicit-default-backed-tensor-resource",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda _component: ("arti/tensor-view-pattern@1",),
+        capabilities=(
+            "program.resource.default-backing",
+            "program.resource.functional-state",
+            "program.resource.hot-mount",
+        ),
+    )
+    add(
+        "arti/connection@1",
+        Connection,
+        lifecycle="alpha",
+        variant="explicit-direct-or-local-conditional-relation",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "program.connection.direct",
+            "program.connection.local-condition",
+            "program.connection.resource-binding",
+        ),
+    )
+    add(
+        "arti/program-graph@1",
+        ProgramGraph,
+        lifecycle="alpha",
+        variant="explicit-resource-and-connection-composition",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted(
+                {
+                    *(component_ref(resource) for resource in component.resources.values()),
+                    *(component_ref(connection) for connection in component.connections.values()),
+                    *(component_ref(node) for node in component.nodes.values()),
+                }
+            )
+        ),
+        capabilities=(
+            "program.graph.connection-dependencies",
+            "program.graph.functional-branches",
+            "program.graph.mounted-regions",
+            "program.graph.resource-composition",
+        ),
+    )
+    add(
+        "arti/program-node@1",
+        ProgramNode,
+        lifecycle="alpha",
+        variant="typed-local-program-region",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("program.node.typed-input", "program.node.typed-output"),
+    )
+    add(
+        "arti/affine-resource-transfer@1",
+        LearnableAffineTransfer,
+        lifecycle="alpha",
+        variant="input-independent-direct-connection",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "program.connection.direct",
+            "program.connection.input-independent",
+            "program.connection.trainable",
+        ),
+    )
+    add(
+        "arti/federated-program@1",
+        FederatedProgram,
+        lifecycle="alpha",
+        variant="role-oriented-routed-program-composition",
+        constructible=False,
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=_federated_program_dependencies,
+        capabilities=(
+            "program.federated-composition",
+            "program.fixed-k-wide",
+            "program.hard-one-winner",
+        ),
+    )
+    add(
+        "arti/federated-program-node@1",
+        FederatedProgramNode,
+        lifecycle="alpha",
+        variant="federated-region-mounted-in-resource-graph",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.program),),
+        capabilities=(
+            "program.node.federated-region",
+            "program.node.functional-resource-publication",
+        ),
+    )
+    add(
+        "arti/routed-program-node@1",
+        RoutedProgramNode,
+        lifecycle="alpha",
+        variant="terminal-local-region-mounted-in-resource-graph",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.program),),
+        capabilities=(
+            "program.node.functional-resource-publication",
+            "program.node.local-iteration",
+            "program.node.routed-region",
+        ),
+    )
+    add(
+        "arti/program-runtime@1",
+        ProgramRuntime,
+        lifecycle=stable,
+        variant="tensor-boundary-program-host",
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (
+            *(()
+              if component.program is None
+              else (component_ref(component.program),)),
+            *(()
+              if component.graph is None
+              else (component_ref(component.graph),)),
+        ),
+        capabilities=("program.host", "program.tensor-boundary"),
+    )
     add("arti/affine-updater@1", AffineRecallValueUpdater, lifecycle=stable, config_builder=_affine_updater_config)
     add("arti/normalized-updater@1", NormalizedDeltaRecallValueUpdater, lifecycle=stable, config_builder=_normalised_updater_config)
     add("arti/stacked-updater@1", StackedRecallValueUpdater, lifecycle=stable, config_builder=_fields("site_count", "hidden_dim", "slots", "workspace_dim", "depth", "recall_group_topk"))
@@ -4561,11 +5131,11 @@ def _build_default_registry() -> ComponentRegistry:
     )
     add("arti/membrane-router@1", MembraneVisibilityRouter, lifecycle="legacy", variant="adapter", config_builder=_default_config)
     add(
-        "arti/layer@2",
+        "arti/layer@3",
         ARTILayer,
-        lifecycle=stable,
-        variant="adaptive-pulse-host",
-        config_schema_version=2,
+        lifecycle="alpha",
+        variant="federal-bank-host",
+        config_schema_version=3,
         aliases=("ARTILayer",),
         config_builder=_arti_layer_config,
         dependency_builder=_arti_layer_dependencies,
@@ -4608,7 +5178,7 @@ def component_catalog() -> list[dict[str, Any]]:
                 "kind": "formula",
                 "ref": formula.reference,
                 "mechanism_id": f"{formula.namespace}/{formula.name}",
-                "mechanism_version": formula.version,
+                "mechanism_contract_sha256": formula.contract_sha256,
                 "variant": formula.provider_kind,
                 "lifecycle": "stable" if formula.origin in {"builtin", "registered"} else "deprecated",
                 "config_schema_version": 1,
@@ -4625,7 +5195,7 @@ def component_catalog() -> list[dict[str, Any]]:
                 "kind": "survival",
                 "ref": survival.reference,
                 "mechanism_id": f"{survival.namespace}/{survival.name}",
-                "mechanism_version": survival.version,
+                "mechanism_contract_sha256": survival.contract_sha256,
                 "variant": "survival",
                 "lifecycle": "stable",
                 "config_schema_version": 1,
@@ -4649,6 +5219,14 @@ def resolve_component(reference_or_alias: str, **kwargs: Any) -> Any:
     """Resolve an exact component reference or explicit convenience alias."""
 
     return get_component_registry().resolve(reference_or_alias, **kwargs)
+
+
+def resolve_component_with_receipt(
+    reference_or_alias: str, **kwargs: Any
+) -> tuple[Any, ComponentResolutionReceipt]:
+    """Resolve an interactive input and return its non-persistent receipt."""
+
+    return get_component_registry().resolve_with_receipt(reference_or_alias, **kwargs)
 
 
 def component_ref(value: Any) -> str:
@@ -4694,6 +5272,53 @@ def _direct_registered_dependencies(module: nn.Module, registry: ComponentRegist
     return tuple(sorted(result))
 
 
+def _canonicalize_component_config_contract_refs(value: Any) -> Any:
+    """Resolve component declarations before they participate in a spec hash.
+
+    Configuration may embed contracts from a domain that has no local registry
+    entry.  ``canonical_contract_reference`` gives those declarations a stable
+    external address, while ordinary strings remain ordinary metadata.
+    """
+
+    if isinstance(value, str):
+        try:
+            return canonical_contract_reference(value)
+        except InvalidComponentRefError:
+            return value
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                item
+                if value.get("kind") == "arti.component-contract" and key == "semantic_key"
+                else _canonicalize_component_config_contract_refs(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_canonicalize_component_config_contract_refs(item) for item in value)
+    if isinstance(value, list):
+        return [_canonicalize_component_config_contract_refs(item) for item in value]
+    return value
+
+
+def _component_instance_address(
+    *,
+    reference: str,
+    config: Mapping[str, Any],
+    parameter_schema_fingerprint: str,
+    dependencies: Sequence[str],
+) -> str:
+    return _sha256_address(
+        "component-instance",
+        {
+            "contract_ref": reference,
+            "config": config,
+            "parameter_schema_fingerprint": parameter_schema_fingerprint,
+            "dependencies": list(dependencies),
+        },
+    )
+
+
 def _make_component_spec(
     value: Any,
     registration: ComponentRegistration,
@@ -4701,7 +5326,18 @@ def _make_component_spec(
     path: str,
     dependencies: Sequence[str] = (),
 ) -> ComponentSpec:
-    config = registration.config(value)
+    config = _canonicalize_component_config_contract_refs(registration.config(value))
+    dependencies = tuple(
+        sorted(
+            {
+                canonical_contract_reference(reference)
+                for reference in (*dependencies, *registration.dependencies(value))
+            }
+        )
+    )
+    parameter_schema_fingerprint = (
+        _parameter_schema_fingerprint(value) if isinstance(value, nn.Module) else _sha256_json(config)
+    )
     return ComponentSpec(
         path=path,
         reference=registration.reference,
@@ -4710,12 +5346,17 @@ def _make_component_spec(
         lifecycle=registration.lifecycle,
         config_schema_version=registration.config_schema_version,
         state_schema_version=registration.state_schema_version,
+        contract=registration.contract.payload(),
         config=config,
         config_fingerprint=_sha256_json(config),
-        parameter_schema_fingerprint=(
-            _parameter_schema_fingerprint(value) if isinstance(value, nn.Module) else _sha256_json(config)
+        parameter_schema_fingerprint=parameter_schema_fingerprint,
+        instance_sha256=_component_instance_address(
+            reference=registration.reference,
+            config=config,
+            parameter_schema_fingerprint=parameter_schema_fingerprint,
+            dependencies=dependencies,
         ),
-        dependencies=tuple(sorted(set(dependencies) | set(registration.dependencies(value)))),
+        dependencies=dependencies,
         capabilities=registration.capabilities,
     )
 
@@ -4889,6 +5530,24 @@ def _is_known_dependency(reference: str, registry: ComponentRegistry) -> bool:
                 return False
 
 
+def _canonical_dependency_refs(values: Sequence[str]) -> list[str]:
+    registry = get_component_registry()
+    resolved: set[str] = set()
+    for value in values:
+        try:
+            resolved.add(registry.canonical_reference(value))
+        except UnknownComponentError:
+            # Formula and survival registries still own their independent
+            # versioned contracts. They remain explicit until their own
+            # contract migrations land.
+            resolved.add(value)
+    return sorted(resolved)
+
+
+def _same_dependency_closure(actual: Sequence[str], expected: Sequence[str]) -> bool:
+    return list(actual) == _canonical_dependency_refs(expected)
+
+
 def _validate_tensor_operation_dependency_closure(
     reference: str,
     config: Any,
@@ -4916,6 +5575,7 @@ def _validate_tensor_operation_dependency_closure(
             raise ComponentCompatibilityError("TensorEditSurrogate config is invalid")
         expected = {spec_ref, "arti/tensor-edit-formula@3"}
     elif reference == "arti/tensor-operation-query@4":
+        query_ref = canonical_contract_reference(reference)
         required = {
             "ref",
             "key_dim",
@@ -4931,7 +5591,7 @@ def _validate_tensor_operation_dependency_closure(
         }
         if (
             set(config) != required
-            or config["ref"] != reference
+            or config["ref"] != query_ref
             or not _is_positive_int(config["key_dim"])
             or type(config["seed"]) is not int
             or not _is_sha256(config["basis_hash"])
@@ -4946,6 +5606,8 @@ def _validate_tensor_operation_dependency_closure(
             raise ComponentCompatibilityError("TensorOperationQuery config is invalid")
         expected = {spec_ref}
     elif reference == "arti/tensor-operation-bank@3":
+        bank_ref = canonical_contract_reference(reference)
+        field_ref = canonical_contract_reference("arti/tensor-operation-field-spec@2")
         required = {
             "ref",
             "schema_version",
@@ -4970,7 +5632,7 @@ def _validate_tensor_operation_dependency_closure(
         candidate_count = config.get("candidate_count")
         if (
             set(config) != required
-            or config["ref"] != reference
+            or config["ref"] != bank_ref
             or config["schema_version"] != 3
             or not _is_positive_int(candidate_count)
             or not _is_positive_int(config["key_dim"])
@@ -4985,7 +5647,7 @@ def _validate_tensor_operation_dependency_closure(
                 "index_dtype",
                 "value_dtype",
             }
-            or field["ref"] != "arti/tensor-operation-field-spec@2"
+            or field["ref"] != field_ref
             or not _is_positive_int(field["support_size"])
             or not _is_positive_int(field["source_capacity"])
             or field["collision_policy"] != "last_element"
@@ -5079,9 +5741,10 @@ def _validate_tensor_operation_dependency_closure(
             "arti/tensor-operation-bank@3",
         }
     elif reference == "arti/tensor-operation@3":
+        surrogate_ref = canonical_contract_reference("arti/tensor-edit-surrogate@3")
         if set(config) != {"surrogate"} or config["surrogate"] not in {
             None,
-            "arti/tensor-edit-surrogate@3",
+            surrogate_ref,
         }:
             raise ComponentCompatibilityError("TensorOperation config is invalid")
         expected = {
@@ -5122,7 +5785,7 @@ def _validate_tensor_operation_dependency_closure(
             "arti/tensor-operation-stop@1",
         }
 
-    if dependencies != sorted(expected):
+    if not _same_dependency_closure(dependencies, sorted(expected)):
         raise ComponentCompatibilityError(
             f"TensorOperation dependency closure is invalid for {reference!r}"
         )
@@ -5149,12 +5812,12 @@ def _is_sha256(value: Any) -> bool:
     )
 
 
-def _validate_vnext_dependency_closure(
+def _validate_pulse_dependency_closure(
     reference: str,
     config: Any,
     dependencies: list[str],
 ) -> None:
-    """Recompute dependency closure for manifest-owned vNext components."""
+    """Recompute dependency closure for manifest-owned Pulse components."""
 
     if _validate_tensor_operation_dependency_closure(reference, config, dependencies):
         return
@@ -5195,7 +5858,7 @@ def _validate_vnext_dependency_closure(
         expected = sorted(
             {"arti/gradient-contract@1", "arti/tensor-schema@1"}
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "LinearBankQuery dependency closure is invalid"
             )
@@ -5217,7 +5880,7 @@ def _validate_vnext_dependency_closure(
                 signature.query_ref,
             }
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "QueryExecutionSignature dependency closure is invalid"
             )
@@ -5240,7 +5903,7 @@ def _validate_vnext_dependency_closure(
                 signature.matcher_ref,
             }
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "TensorViewQueryExecutionSignature dependency closure is invalid"
             )
@@ -5260,7 +5923,7 @@ def _validate_vnext_dependency_closure(
         expected = sorted(
             {"arti/query-execution-signature@1", signature.query_ref}
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "SealedBankQuery dependency closure is invalid"
             )
@@ -5282,7 +5945,7 @@ def _validate_vnext_dependency_closure(
         expected = sorted(
             {"arti/query-execution-signature@2", signature.query_ref}
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "SealedTensorViewBankQuery dependency closure is invalid"
             )
@@ -5314,12 +5977,12 @@ def _validate_vnext_dependency_closure(
                 ),
                 *(
                     ()
-                    if signature.local_refine_ref is None
-                    else (signature.local_refine_ref,)
+                    if signature.local_iteration_ref is None
+                    else (signature.local_iteration_ref,)
                 ),
             }
         )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "BankExecutionSignatureV2 dependency closure is invalid"
             )
@@ -5335,13 +5998,13 @@ def _validate_vnext_dependency_closure(
                 "BankExecutionSignatureV3 config is invalid"
             ) from exc
         expected = list(_bank_execution_signature_v3_dependencies(signature))
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "BankExecutionSignatureV3 dependency closure is invalid"
             )
         return
 
-    if reference == "arti/bank-local-refine-policy@1":
+    if reference == "arti/local-iteration-policy@1":
         required = {
             "min_steps",
             "max_steps",
@@ -5359,7 +6022,7 @@ def _validate_vnext_dependency_closure(
             or config["exit_semantics"] != "formula-request-after-min-steps"
         ):
             raise ComponentCompatibilityError(
-                "BankLocalRefinePolicy config is invalid"
+                "LocalIterationPolicy config is invalid"
             )
         return
 
@@ -5412,7 +6075,7 @@ def _validate_vnext_dependency_closure(
                 _bank_execution_signature_v2_dependencies(signature)
             )
         expected = sorted(expected_set)
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "FederalRecall@2 dependency closure is invalid"
             )
@@ -5466,7 +6129,7 @@ def _validate_vnext_dependency_closure(
             expected_set.update(
                 _bank_execution_signature_v3_dependencies(signature)
             )
-        if dependencies != sorted(expected_set):
+        if not _same_dependency_closure(dependencies, sorted(expected_set)):
             raise ComponentCompatibilityError(
                 "FederalRecall@3 dependency closure is invalid"
             )
@@ -5561,7 +6224,7 @@ def _validate_vnext_dependency_closure(
             raise ComponentCompatibilityError(
                 "Formula effect program config is invalid"
             ) from exc
-        if dependencies != list(program.dependency_refs):
+        if not _same_dependency_closure(dependencies, list(program.dependency_refs)):
             raise ComponentCompatibilityError(
                 "Formula effect program dependency closure is invalid"
             )
@@ -5575,7 +6238,7 @@ def _validate_vnext_dependency_closure(
             raise ComponentCompatibilityError(
                 "Formula effect program v2 config is invalid"
             ) from exc
-        if dependencies != list(program.dependency_refs):
+        if not _same_dependency_closure(dependencies, list(program.dependency_refs)):
             raise ComponentCompatibilityError(
                 "Formula effect program v2 dependency closure is invalid"
             )
@@ -5589,7 +6252,7 @@ def _validate_vnext_dependency_closure(
             raise ComponentCompatibilityError(
                 "Formula effect program v3 config is invalid"
             ) from exc
-        if dependencies != list(program.dependency_refs):
+        if not _same_dependency_closure(dependencies, list(program.dependency_refs)):
             raise ComponentCompatibilityError(
                 "Formula effect program v3 dependency closure is invalid"
             )
@@ -5624,7 +6287,7 @@ def _validate_vnext_dependency_closure(
         except (TypeError, ValueError, KeyError) as exc:
             raise ComponentCompatibilityError("FormulaFabric@3 config is invalid") from exc
         expected = sorted({"arti/formula-effect-program@1", *program.dependency_refs})
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "FormulaFabric@3 dependency closure is invalid"
             )
@@ -5648,7 +6311,8 @@ def _validate_vnext_dependency_closure(
             program = FormulaEffectProgramV2.from_dict(config["effect_program"])
             if (
                 config["effect_program_fingerprint"] != program.fingerprint
-                or config["effect_atom_ref"] != program.effect_instruction.atom_ref
+                or config["effect_atom_ref"]
+                != canonical_contract_reference(program.effect_instruction.atom_ref)
                 or config["data_lane"] != "identity"
                 or config["target_binding"] != "runtime-predecessor-bank"
                 or config["state_access"] != "effect-operands-only"
@@ -5659,7 +6323,7 @@ def _validate_vnext_dependency_closure(
         except (TypeError, ValueError, KeyError) as exc:
             raise ComponentCompatibilityError("FormulaFabric@4 config is invalid") from exc
         expected = sorted({"arti/formula-effect-program@2", *program.dependency_refs})
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "FormulaFabric@4 dependency closure is invalid"
             )
@@ -5683,7 +6347,10 @@ def _validate_vnext_dependency_closure(
             if not isinstance(config, Mapping) or set(config) != required:
                 raise ValueError("FormulaFabric@5 config fields")
             program = FormulaEffectProgramV3.from_dict(config["effect_program"])
-            effect_refs = [effect.atom_ref for effect in program.effect_instructions]
+            effect_refs = [
+                canonical_contract_reference(effect.atom_ref)
+                for effect in program.effect_instructions
+            ]
             if (
                 config["effect_program_fingerprint"] != program.fingerprint
                 or config["effect_atom_refs"] != effect_refs
@@ -5699,7 +6366,7 @@ def _validate_vnext_dependency_closure(
         except (TypeError, ValueError, KeyError) as exc:
             raise ComponentCompatibilityError("FormulaFabric@5 config is invalid") from exc
         expected = sorted({"arti/formula-effect-program@3", *program.dependency_refs})
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
                 "FormulaFabric@5 dependency closure is invalid"
             )
@@ -5713,7 +6380,9 @@ def _validate_vnext_dependency_closure(
             scan = FormulaScan.from_dict(config)
         except (TypeError, ValueError, KeyError) as exc:
             raise ComponentCompatibilityError("Scan config is invalid") from exc
-        if dependencies != sorted(formula_program_dependency_refs(scan.body)):
+        if not _same_dependency_closure(
+            dependencies, sorted(formula_program_dependency_refs(scan.body))
+        ):
             raise ComponentCompatibilityError("Scan body dependencies differ")
         return
 
@@ -5851,7 +6520,8 @@ def _validate_vnext_dependency_closure(
             )
 
             if (
-                config["schema_ref"] != FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF
+                    config["schema_ref"]
+                    != canonical_contract_reference(FORMULA_EXECUTION_PLAN_V1_SCHEMA_REF)
                 or config["schema_version"]
                 != FORMULA_EXECUTION_PLAN_V1_SCHEMA_VERSION
             ):
@@ -5859,9 +6529,9 @@ def _validate_vnext_dependency_closure(
             if config["binding_names"] != [binding.name for binding in program.bindings]:
                 raise ComponentCompatibilityError("Formula execution binding order is invalid")
         expected_dependencies = list(formula_program_dependency_refs(program))
-        if dependencies != expected_dependencies or not set(dependencies).issubset(
-            formula_instruction_refs
-        ):
+        if not _same_dependency_closure(dependencies, expected_dependencies) or not set(
+            dependencies
+        ).issubset(_canonical_dependency_refs(formula_instruction_refs)):
             raise ComponentCompatibilityError("Formula execution dependency closure is invalid")
         return
     if reference in formula_atom_refs:
@@ -6159,11 +6829,11 @@ def _validate_vnext_dependency_closure(
             raise ComponentCompatibilityError("Formula atom config is invalid") from exc
         return
 
-    if reference == "arti/batched-refine-operation@1":
+    if reference == "arti/branch-search-operation@1":
         required = {"operation_ref", "operation_config_fingerprint"}
         if not isinstance(config, Mapping) or set(config) != required:
             raise ComponentCompatibilityError(
-                "BatchedRefineOperation config is incomplete"
+                "BranchSearchOperation config is incomplete"
             )
         operation_ref = config["operation_ref"]
         operation_fingerprint = config["operation_config_fingerprint"]
@@ -6177,13 +6847,13 @@ def _validate_vnext_dependency_closure(
                 character not in "0123456789abcdef"
                 for character in operation_fingerprint
             )
-            or dependencies != [operation_ref]
+            or not _same_dependency_closure(dependencies, [operation_ref])
         ):
             raise ComponentCompatibilityError(
-                "BatchedRefineOperation dependency closure is invalid"
+                "BranchSearchOperation dependency closure is invalid"
             )
         return
-    if reference == "arti/batched-refine-plan@1":
+    if reference == "arti/branch-search-plan@1":
         required = {
             "schema_version",
             "execution_layout",
@@ -6191,7 +6861,7 @@ def _validate_vnext_dependency_closure(
             "operation_ref",
         }
         if not isinstance(config, Mapping) or set(config) != required:
-            raise ComponentCompatibilityError("BatchedRefinePlan config is incomplete")
+            raise ComponentCompatibilityError("BranchSearchPlan config is incomplete")
         fingerprint = config["config_fingerprint"]
         operation_ref = config["operation_ref"]
         if (
@@ -6201,23 +6871,23 @@ def _validate_vnext_dependency_closure(
             or len(fingerprint) != 64
             or any(character not in "0123456789abcdef" for character in fingerprint)
         ):
-            raise ComponentCompatibilityError("BatchedRefinePlan config is invalid")
-        expected = [] if operation_ref is None else ["arti/batched-refine-operation@1"]
+            raise ComponentCompatibilityError("BranchSearchPlan config is invalid")
+        expected = [] if operation_ref is None else ["arti/branch-search-operation@1"]
         if operation_ref is not None and (
             not isinstance(operation_ref, str)
             or not operation_ref.startswith("arti/")
             or "@" not in operation_ref
         ):
             raise ComponentCompatibilityError(
-                "BatchedRefinePlan operation reference is invalid"
+                "BranchSearchPlan operation reference is invalid"
             )
-        if dependencies != expected:
+        if not _same_dependency_closure(dependencies, expected):
             raise ComponentCompatibilityError(
-                "BatchedRefinePlan dependency closure is invalid"
+                "BranchSearchPlan dependency closure is invalid"
             )
         return
 
-    if reference == "arti/batched-refine-result@1":
+    if reference == "arti/branch-search-result@1":
         required = {
             "schema_version",
             "candidate_ref",
@@ -6239,22 +6909,22 @@ def _validate_vnext_dependency_closure(
         }
         if not isinstance(config, Mapping) or set(config) != required:
             raise ComponentCompatibilityError(
-                "BatchedRefineResult config is incomplete"
+                "BranchSearchResult config is incomplete"
             )
         if config["candidate_config_fingerprint"] != _sha256_json(
             config["candidate_config"]
         ):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult candidate config fingerprint is invalid"
+                "BranchSearchResult candidate config fingerprint is invalid"
             )
         if config["execution_layout"] not in {"static_capacity", "packed_active"}:
             raise ComponentCompatibilityError(
-                "BatchedRefineResult execution layout is invalid"
+                "BranchSearchResult execution layout is invalid"
             )
         candidate = config["candidate_config"]
         if not isinstance(candidate, Mapping):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult candidate config must be a mapping"
+                "BranchSearchResult candidate config must be a mapping"
             )
         expected = {
             config["candidate_ref"],
@@ -6273,20 +6943,20 @@ def _validate_vnext_dependency_closure(
                 )
             ):
                 raise ComponentCompatibilityError(
-                    "BatchedRefineResult branch policy fingerprint is invalid"
+                    "BranchSearchResult branch policy fingerprint is invalid"
                 )
-            expected.add("arti/branch-refine-policy@1")
+            expected.add("arti/branch-search-policy@1")
         rng_fingerprint = config["execution_rng_fingerprint"]
         rng_stream = config["execution_rng_stream_key"]
         rng_domains = config["execution_rng_domains"]
         if (rng_fingerprint is None) != (rng_stream is None):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult RNG identity is incomplete"
+                "BranchSearchResult RNG identity is incomplete"
             )
         if rng_fingerprint is None:
             if rng_domains != []:
                 raise ComponentCompatibilityError(
-                    "deterministic BatchedRefineResult cannot consume RNG domains"
+                    "deterministic BranchSearchResult cannot consume RNG domains"
                 )
         elif (
             not isinstance(rng_fingerprint, str)
@@ -6297,7 +6967,7 @@ def _validate_vnext_dependency_closure(
             or not rng_domains
         ):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult RNG identity is invalid"
+                "BranchSearchResult RNG identity is invalid"
             )
         operation_ref = config["operation_ref"]
         wrapper_ref = config["operation_wrapper_ref"]
@@ -6323,23 +6993,23 @@ def _validate_vnext_dependency_closure(
             )
         ):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult topology lineage is invalid"
+                "BranchSearchResult topology lineage is invalid"
             )
         expected.update(topology_refs)
         if operation_ref is None:
             if wrapper_ref is not None:
                 raise ComponentCompatibilityError(
-                    "BatchedRefineResult operation wrapper requires an operation"
+                    "BranchSearchResult operation wrapper requires an operation"
                 )
         else:
-            if wrapper_ref != "arti/batched-refine-operation@1":
+            if wrapper_ref != "arti/branch-search-operation@1":
                 raise ComponentCompatibilityError(
-                    "BatchedRefineResult operation wrapper is invalid"
+                    "BranchSearchResult operation wrapper is invalid"
                 )
             expected.update({wrapper_ref, operation_ref})
-        if None in expected or dependencies != sorted(expected):
+        if None in expected or not _same_dependency_closure(dependencies, sorted(expected)):
             raise ComponentCompatibilityError(
-                "BatchedRefineResult dependency closure is invalid"
+                "BranchSearchResult dependency closure is invalid"
             )
         return
     if reference not in {
@@ -6348,7 +7018,10 @@ def _validate_vnext_dependency_closure(
         "arti/pulse@2",
     }:
         return
-    from .vnext_contracts import PulseStageGraph
+    from .runtime_contracts import PulseStageGraph
+
+    stage_ref = canonical_contract_reference("arti/pulse-stage@1")
+    stage_graph_ref = canonical_contract_reference("arti/pulse-stage-graph@1")
 
     if reference == "arti/pulse-stage-graph@1":
         graph = PulseStageGraph.from_dict(config)
@@ -6361,7 +7034,7 @@ def _validate_vnext_dependency_closure(
         }
         if not isinstance(config, Mapping) or set(config) != required:
             raise ComponentCompatibilityError("PulseExecutor config is incomplete")
-        if config["manifest_ref"] != "arti/pulse-stage-graph@1":
+        if config["manifest_ref"] != stage_graph_ref:
             raise ComponentCompatibilityError("PulseExecutor manifest reference is invalid")
         graph = PulseStageGraph.from_dict(config["manifest"])
         if config["manifest_fingerprint"] != graph.fingerprint:
@@ -6375,18 +7048,18 @@ def _validate_vnext_dependency_closure(
         required = {"manifest_ref", "manifest", "manifest_fingerprint"}
         if not isinstance(config, Mapping) or set(config) != required:
             raise ComponentCompatibilityError("Pulse@2 config is incomplete")
-        if config["manifest_ref"] != "arti/pulse-stage-graph@1":
+        if config["manifest_ref"] != stage_graph_ref:
             raise ComponentCompatibilityError("Pulse@2 manifest reference is invalid")
         graph = PulseStageGraph.from_dict(config["manifest"])
         if config["manifest_fingerprint"] != graph.fingerprint:
             raise ComponentCompatibilityError("Pulse@2 manifest fingerprint is invalid")
     root_dependency = (
-        "arti/pulse-stage@1"
+        stage_ref
         if reference == "arti/pulse-stage-graph@1"
-        else "arti/pulse-stage-graph@1"
+        else stage_graph_ref
     )
     expected_dependencies = sorted({root_dependency, *graph.enabled_dependencies})
-    if dependencies != expected_dependencies:
+    if not _same_dependency_closure(dependencies, expected_dependencies):
         raise ComponentCompatibilityError(
             f"component dependency closure is invalid for {reference!r}"
         )
@@ -6407,7 +7080,7 @@ def validate_component_provenance(
             "component provenance has missing or unknown top-level fields"
         )
     schema_version = value.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, COMPONENT_PROVENANCE_VERSION}:
+    if schema_version != COMPONENT_PROVENANCE_VERSION:
         raise ComponentCompatibilityError("unsupported component provenance schema version")
     components = value.get("components")
     if not isinstance(components, list) or any(not isinstance(item, Mapping) for item in components):
@@ -6424,7 +7097,8 @@ def validate_component_provenance(
             "api",
             "ref",
             "mechanism_id",
-            "mechanism_version",
+            "contract_sha256",
+            "contract",
             "variant",
             "lifecycle",
             "config_schema_version",
@@ -6432,10 +7106,10 @@ def validate_component_provenance(
             "config",
             "config_fingerprint",
             "parameter_schema_fingerprint",
+            "instance_sha256",
             "dependencies",
+            "capabilities",
         }
-        if schema_version >= 2:
-            required.add("capabilities")
         if set(item) != required:
             raise ComponentCompatibilityError("component provenance entry has missing or unknown fields")
         path = item["path"]
@@ -6443,7 +7117,7 @@ def validate_component_provenance(
             raise ComponentCompatibilityError("component provenance paths must be unique non-empty strings")
         paths.add(path)
         identity = ComponentRef.parse(item["ref"])
-        if item["mechanism_id"] != identity.mechanism_id or item["mechanism_version"] != identity.version:
+        if item["mechanism_id"] != identity.mechanism_id or item["contract_sha256"] != identity.address:
             raise ComponentCompatibilityError(f"component identity fields disagree at {path!r}")
         try:
             registration = registry.registration_for_reference(identity.reference)
@@ -6462,13 +7136,11 @@ def validate_component_provenance(
             )
         if item["variant"] != registration.variant or item["lifecycle"] != registration.lifecycle:
             raise ComponentCompatibilityError(f"component lifecycle or variant drift at {path!r}")
+        if item["contract"] != registration.contract.payload():
+            raise ComponentCompatibilityError(f"component contract drift at {path!r}")
         if item["config_schema_version"] != registration.config_schema_version or item["state_schema_version"] != registration.state_schema_version:
             raise ComponentCompatibilityError(f"component schema version drift at {path!r}")
-        capabilities = (
-            item["capabilities"]
-            if schema_version >= 2
-            else list(registration.capabilities)
-        )
+        capabilities = item["capabilities"]
         if capabilities != list(registration.capabilities):
             raise ComponentCompatibilityError(f"component capability drift at {path!r}")
         if item["config_fingerprint"] != _sha256_json(item["config"]):
@@ -6476,7 +7148,18 @@ def validate_component_provenance(
         dependencies = item["dependencies"]
         if not isinstance(dependencies, list) or any(not isinstance(dep, str) or not _is_known_dependency(dep, registry) for dep in dependencies):
             raise ComponentCompatibilityError(f"component dependencies are invalid at {path!r}")
-        _validate_vnext_dependency_closure(identity.reference, item["config"], dependencies)
+        for dependency in dependencies:
+            if registry.canonical_reference(dependency) != dependency:
+                raise ComponentCompatibilityError(f"component dependencies must use canonical addresses at {path!r}")
+        _validate_pulse_dependency_closure(registration.declaration_reference, item["config"], dependencies)
+        expected_instance = _component_instance_address(
+            reference=identity.reference,
+            config=item["config"],
+            parameter_schema_fingerprint=item["parameter_schema_fingerprint"],
+            dependencies=dependencies,
+        )
+        if item["instance_sha256"] != expected_instance:
+            raise ComponentCompatibilityError(f"component instance identity is invalid at {path!r}")
         normalized.append({**dict(item), "capabilities": capabilities})
     normalized_fingerprint = component_graph_fingerprint(normalized)
     return {
@@ -6507,9 +7190,11 @@ __all__ = [
     "COMPONENT_PROVENANCE_VERSION",
     "COMPONENT_STATE_CONTRACT_VERSION",
     "ArtifactPolicy",
+    "ComponentContract",
     "ComponentCompatibilityError",
     "ComponentLifecycle",
     "ComponentRef",
+    "ComponentResolutionReceipt",
     "ComponentRegistration",
     "ComponentRegistry",
     "ComponentRegistryError",
@@ -6519,6 +7204,7 @@ __all__ = [
     "UnknownComponentError",
     "component_graph_fingerprint",
     "component_catalog",
+    "canonical_contract_reference",
     "component_manifest",
     "component_provenance",
     "component_ref",
@@ -6527,6 +7213,7 @@ __all__ = [
     "get_component_registry",
     "register_component",
     "resolve_component",
+    "resolve_component_with_receipt",
     "validate_component_provenance",
     "validate_component_state_contract",
     "verify_component_provenance",

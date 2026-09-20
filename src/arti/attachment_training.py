@@ -77,7 +77,7 @@ class ARTITrainingSession:
         parameters = list(attachment.parameters())
         if not parameters:
             raise ValueError(
-                "attached ARTILayer graph has no trainable parameters; configure a trainable Pulse stage"
+                "attached ARTILayer graph has no trainable parameters; configure a trainable FederatedProgram graph"
             )
         if optimizer is not None and _optimizer_parameter_ids(optimizer) != {id(parameter) for parameter in parameters}:
             raise ValueError("optimizer parameters must exactly match the selected ARTI trainable role")

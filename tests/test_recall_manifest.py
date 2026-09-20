@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from arti.recall_formula import BUILTIN_RECALL_FORMULAS
+from arti.recall_formula import resolve_builtin_formula
+from arti.recall_registry import InvalidRecallFormulaIdError
 from arti.recall_manifest import (
     RecallFormulaManifest,
     RecallLayoutManifest,
@@ -15,10 +16,10 @@ from arti.recall_manifest import (
 
 
 def _manifest(*, origin: str = "builtin", portable: bool = True) -> RecallFormulaManifest:
-    factors = BUILTIN_RECALL_FORMULAS["arti/state@1"].contract.factor_names
+    formula = resolve_builtin_formula("arti/state@1")
+    factors = formula.contract.factor_names
     return RecallFormulaManifest(
-        id="arti/state",
-        version="1",
+        formula_ref=formula.contract.identity.reference,
         factor_names=factors,
         origin=origin,
         portable=portable,
@@ -61,8 +62,7 @@ def test_formula_rejects_mismatched_factor_order_and_duplicates() -> None:
     layout = RecallLayoutManifest(factor_order=("content", "gain"))
     with pytest.raises(ValueError, match="exactly match"):
         RecallFormulaManifest(
-            id="arti/state",
-            version="1",
+            formula_ref=resolve_builtin_formula("arti/state@1").contract.identity.reference,
             factor_names=("gain", "content"),
             origin="builtin",
             portable=True,
@@ -95,8 +95,7 @@ def test_portable_builtin_manifest_must_match_immutable_builtin_contract() -> No
     factors = ("content",)
     with pytest.raises(ValueError, match="immutable builtin"):
         RecallFormulaManifest(
-            id="forged",
-            version="1",
+            formula_ref="arti/forged@sha256:" + "0" * 64,
             factor_names=factors,
             origin="builtin",
             portable=True,
@@ -108,9 +107,7 @@ def test_portable_builtin_manifest_must_match_immutable_builtin_contract() -> No
     ("field", "value", "error"),
     [
         ("api_version", True, "integer"),
-        ("id", "package.module:Formula", "invalid format"),
-        ("version", ">=1.0", "invalid format"),
-        ("version", "1.*", "invalid format"),
+        ("formula_ref", "package.module:Formula", "full SHA-256"),
         ("origin", "plugin", "origin"),
         ("portable", 1, "boolean"),
         ("factor_names", ("content",), "JSON array"),
@@ -129,7 +126,7 @@ def test_from_dict_strictly_validates_field_types_and_values(
 
 def test_from_dict_rejects_missing_unknown_and_executable_reference_fields() -> None:
     missing = _manifest().to_dict()
-    missing.pop("version")
+    missing.pop("formula_ref")
     with pytest.raises(ValueError, match="missing required fields"):
         RecallFormulaManifest.from_dict(missing)
 
@@ -140,13 +137,32 @@ def test_from_dict_rejects_missing_unknown_and_executable_reference_fields() -> 
             RecallFormulaManifest.from_dict(payload)
 
 
+def test_from_dict_rejects_precanonical_api_version() -> None:
+    payload = _manifest().to_dict()
+    payload["api_version"] = 1
+
+    with pytest.raises(ValueError, match="unsupported"):
+        RecallFormulaManifest.from_dict(payload)
+
+
+def test_manifest_rejects_source_declarations() -> None:
+    factors = ("content",)
+    with pytest.raises(ValueError, match="full SHA-256"):
+        RecallFormulaManifest(
+            formula_ref="arti/delta@1",
+            factor_names=factors,
+            origin="builtin",
+            portable=True,
+            layout=RecallLayoutManifest(factor_order=factors),
+        )
+
+
 def test_constructor_rejects_callables_and_noncanonical_capabilities() -> None:
     factors = ("content",)
     layout = RecallLayoutManifest(factor_order=factors)
-    with pytest.raises(TypeError, match="id must be a string"):
+    with pytest.raises(InvalidRecallFormulaIdError, match="must be a string"):
         RecallFormulaManifest(
-            id=lambda: None,  # type: ignore[arg-type]
-            version="1",
+            formula_ref=lambda: None,  # type: ignore[arg-type]
             factor_names=factors,
             origin="custom",
             portable=False,
@@ -154,8 +170,7 @@ def test_constructor_rejects_callables_and_noncanonical_capabilities() -> None:
         )
     with pytest.raises(ValueError, match="sorted"):
         RecallFormulaManifest(
-            id="arti/state",
-            version="1",
+            formula_ref=resolve_builtin_formula("arti/state@1").contract.identity.reference,
             factor_names=factors,
             origin="builtin",
             portable=True,

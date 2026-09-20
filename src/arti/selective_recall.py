@@ -1,4 +1,4 @@
-"""Recall kernel for the vNext selective-compute workspace."""
+"""Recall kernel for the runtime selective-compute workspace."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import ClassVar
 from torch import Tensor, nn
 
 from .nn import Recall
-from .recall_refine import AdaptiveRefinePolicy, RefinePolicy
+from .execution import AdaptiveExecutionPolicy, ExecutionPolicy
 
 
 class SelectiveRecallKernel(nn.Module):
@@ -19,17 +19,17 @@ class SelectiveRecallKernel(nn.Module):
         self,
         recall: Recall,
         *,
-        refine_policy: RefinePolicy | AdaptiveRefinePolicy | None = None,
+        execution_policy: ExecutionPolicy | AdaptiveExecutionPolicy | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(recall, Recall):
             raise TypeError("SelectiveRecallKernel requires arti.nn.Recall")
-        if refine_policy is None:
-            refine_policy = RefinePolicy.fixed(1)
-        if not isinstance(refine_policy, (RefinePolicy, AdaptiveRefinePolicy)):
-            raise TypeError("refine_policy must be a versioned Recall refine policy")
+        if execution_policy is None:
+            execution_policy = ExecutionPolicy.fixed(1)
+        if not isinstance(execution_policy, (ExecutionPolicy, AdaptiveExecutionPolicy)):
+            raise TypeError("execution_policy must be a versioned Recall execution policy")
         self.recall = recall
-        self.refine_policy = refine_policy
+        self.execution_policy = execution_policy
 
     def forward(
         self,
@@ -45,7 +45,7 @@ class SelectiveRecallKernel(nn.Module):
         return self.recall(
             query,
             mask=query_mask,
-            refine_policy=self.refine_policy,
+            execution_policy=self.execution_policy,
         )
 
 

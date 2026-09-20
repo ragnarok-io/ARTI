@@ -16,6 +16,8 @@ from typing import ClassVar, Sequence
 import torch
 from torch import Tensor, nn
 
+from .component_registry import canonical_contract_reference
+
 
 def _tensor_hash(value: Tensor) -> str:
     payload = value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
@@ -75,7 +77,7 @@ class StablePriorityPartition(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "order": "stable-descending",
             "tie_break": "original-index-ascending",
             "validity": "valid-first",
@@ -182,7 +184,7 @@ class SoftTopKTopologySurrogate(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "temperature": self.temperature,
             "equation": "cardinality-threshold-with-detached-rank-anchors",
             "path": "backward-only",
@@ -260,7 +262,7 @@ class PairwiseRankTopologySurrogate(SoftTopKTopologySurrogate):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "rank_temperature": self.temperature,
             "position_temperature": self.position_temperature,
             "soft_rank": "r_i=sum_j sigmoid((s_j-s_i)/rank_temperature)",
@@ -323,7 +325,7 @@ class LearnedTopologyPolicy(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "dim": self.dim,
             "hidden_dim": self.hidden_dim,
             "value_input": "detached",
@@ -408,7 +410,7 @@ class FixedTopologyQuery(nn.Module):
 
     def topology_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "dim": self.dim,
             "key_dim": self.key_dim,
             "seed": self.seed,
@@ -532,7 +534,7 @@ class TopologyOperandBank(nn.Module):
     @property
     def structure_contract(self) -> dict[str, object]:
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "bank_id": self.bank_id,
             "slots": self.slots,
             "key_dim": self.key_dim,
@@ -716,7 +718,7 @@ class BankFormulaTopologyPolicy(nn.Module):
             parameter.requires_grad for parameter in self.formula.parameters()
         )
         return {
-            "ref": self._component_reference,
+            "ref": canonical_contract_reference(self._component_reference),
             "dim": self.dim,
             "key_dim": self.key_dim,
             "query_seed": self.query_seed,

@@ -9,7 +9,7 @@ from arti.alpha import (
     FederalParallel,
     FederalPath,
     FederalPathCompiler,
-    FederalRefine,
+    FederalIteration,
     FederalResidual,
     FederalStaticFold,
     FederalStaticUnFold,
@@ -20,6 +20,7 @@ from arti.alpha import (
     FederalTopologyBlock,
 )
 from arti import mechanisms
+from arti.component_registry import canonical_contract_reference
 from arti.formula_fabric import (
     FormulaFabric,
     FormulaFabricProgram,
@@ -98,10 +99,12 @@ def test_frozen_federal_path_compiles_to_independent_layerwise_network(tmp_path)
         torch.testing.assert_close(actual_node, expected_node)
     actual.square().mean().backward()
     assert value.grad is not None
-    assert compiled.manifest.source_ref == "arti/federal-recall@2"
+    assert compiled.manifest.source_ref.startswith("arti/federal-recall@sha256:")
     assert compiled.manifest.refine_steps == 2
     assert compiled.manifest.input_shape == (None, 4)
     assert compiled.manifest.output_shape == (None, 4)
+    assert compiled.manifest.action_sha256.startswith("sha256:")
+    assert compiled.manifest.action_sha256 != compiled.manifest.fingerprint
     assert not any(module is path for module in compiled.modules())
 
     with torch.no_grad():
@@ -111,6 +114,22 @@ def test_frozen_federal_path_compiles_to_independent_layerwise_network(tmp_path)
     compiled.save(tmp_path)
     restored = compiled.load(tmp_path, _path())
     torch.testing.assert_close(restored(value.detach()), actual.detach())
+
+
+def test_compile_action_identity_tracks_the_complete_compile_request():
+    first = FederalPathCompiler.compile(_path()).manifest
+    changed = FederalPath(
+        _path().operations,
+        source_ref="arti/federal-recall@2",
+        source_snapshot_fingerprint="other-snapshot",
+        path_ids=("root",),
+        terminal_abi_ref="arti/terminal-output-abi@1",
+        input_shape=(None, 4),
+        output_shape=(None, 4),
+    )
+    second = FederalPathCompiler.compile(changed).manifest
+
+    assert first.action_sha256 != second.action_sha256
 
 
 @pytest.mark.parametrize(
@@ -173,7 +192,7 @@ def test_fixed_topology_refine_and_residual_compile_as_ordinary_modules():
     path = FederalPath(
         (
             FederalTopologyBlock(fold, nn.Linear(4, 4), unfold),
-            FederalRefine(nn.Identity(), steps=3),
+            FederalIteration(nn.Identity(), steps=3),
             FederalResidual(nn.Identity()),
         ),
         source_ref="arti/federal-recall@3",
@@ -188,7 +207,10 @@ def test_fixed_topology_refine_and_residual_compile_as_ordinary_modules():
     compiled = FederalPathCompiler.compile(path)
     value = torch.randn(2, 4, 4)
     torch.testing.assert_close(compiled(value), path(value))
-    assert compiled.manifest.dependency_refs == ("arti/fold@2", "arti/unfold@2")
+    assert tuple(
+        reference.split("@", maxsplit=1)[0]
+        for reference in compiled.manifest.dependency_refs
+    ) == ("arti/fold", "arti/unfold")
 
 
 def test_dynamic_topology_is_not_compiled_as_a_fixed_path():
@@ -237,7 +259,10 @@ def test_fixed_shape_changing_fold_unfold_compile_as_tensor_transport():
     actual = compiled(value)
     torch.testing.assert_close(actual, expected)
     assert actual.shape == (2, 6, 4)
-    assert compiled.manifest.dependency_refs == ("arti/fold@2", "arti/unfold@2")
+    assert tuple(
+        reference.split("@", maxsplit=1)[0]
+        for reference in compiled.manifest.dependency_refs
+    ) == ("arti/fold", "arti/unfold")
 
 
 def test_path_can_be_built_from_federal_trace_without_serializing_runtime_state():
@@ -259,6 +284,10 @@ def test_path_can_be_built_from_federal_trace_without_serializing_runtime_state(
 
     assert path.path_ids == ("root", "child", "terminal")
     assert path.source_snapshot_fingerprint == "snapshot-trace-1"
+    assert path.source_ref == canonical_contract_reference("arti/federal-recall@3")
+    assert path.terminal_abi_ref == canonical_contract_reference(
+        "arti/terminal-output-abi@1"
+    )
 
 
 def test_fixed_formula_fabric_route_compiles_to_tensor_module():
@@ -290,7 +319,10 @@ def test_fixed_formula_fabric_route_compiles_to_tensor_module():
     value = torch.randn(3, 4, 4)
 
     torch.testing.assert_close(compiled(value), path(value))
-    assert compiled.manifest.dependency_refs == ("arti/formula-fabric@1",)
+    assert tuple(
+        reference.split("@", maxsplit=1)[0]
+        for reference in compiled.manifest.dependency_refs
+    ) == ("arti/formula-fabric",)
 
 
 def test_tensorized_query_requeries_latest_state_without_python_dispatch():

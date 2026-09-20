@@ -12,7 +12,7 @@ import arti
 from arti import mechanisms
 
 
-SOURCE_REF = "arti/test-predecessor-bank@1"
+SOURCE_REF = "arti/federated-predecessor-bank@1"
 SLOTS = ("x", "primary", "decoy", "after-effect")
 
 
@@ -181,9 +181,15 @@ def test_pending_effect_is_write_only_and_changes_only_next_invocation() -> None
 def test_corrected_contract_has_no_effect_owned_state_or_explicit_target() -> None:
     query, primary, _decoy, effect = _query()
 
-    assert arti.component_ref(query) == "arti/formula-program-query@3"
-    assert arti.component_ref(primary) == "arti/formula-program-tensor-candidate@2"
-    assert arti.component_ref(effect) == "arti/formula-program-effect-candidate@2"
+    assert arti.component_ref(query) == arti.canonical_contract_reference(
+        "arti/formula-program-query@3"
+    )
+    assert arti.component_ref(primary) == arti.canonical_contract_reference(
+        "arti/formula-program-tensor-candidate@2"
+    )
+    assert arti.component_ref(effect) == arti.canonical_contract_reference(
+        "arti/formula-program-effect-candidate@2"
+    )
     config = effect.contract_config()
     assert config["target_resolution"] == "dynamic-immediate-predecessor-bank-slot"
     assert config["data_lane"] == "identity"
@@ -307,7 +313,9 @@ def test_composed_lora_producer_can_own_zero_initialized_plastic_bank() -> None:
     reread.square().mean().backward()
     assert effect.operand_store.tensor("writer").grad is not None
     assert effect.operand_store.tensor("rate").grad is not None
-    assert arti.component_ref(producer.candidate) == "arti/formula-program-candidate@2"
+    assert arti.component_ref(producer.candidate) == arti.canonical_contract_reference(
+        "arti/formula-program-candidate@2"
+    )
 
 
 def test_two_event_training_uses_only_reexecuted_predecessor_output() -> None:
@@ -349,7 +357,9 @@ def test_two_event_training_uses_only_reexecuted_predecessor_output() -> None:
     assert contract["route_teacher"] is False
     assert (
         arti.component_ref(trainer)
-        == "arti/exact-formula-program-query-training@3"
+        == arti.canonical_contract_reference(
+            "arti/exact-formula-program-query-training@3"
+        )
     )
 
 

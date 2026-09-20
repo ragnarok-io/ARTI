@@ -6,6 +6,7 @@ import torch
 import pytest
 
 import arti
+from arti.component_registry import canonical_contract_reference
 from arti.recall_formula import FactorSpec, RecallFormulaContract
 from arti.recall_registry import RecallFormulaId
 
@@ -42,7 +43,7 @@ def test_refine_policy_is_versioned_but_runtime_only() -> None:
         checkpoints=(1, 3, 6),
     )
 
-    assert arti.component_ref(policy) == "arti/refine-policy@1"
+    assert arti.component_ref(policy) == canonical_contract_reference("arti/refine-policy@1")
     assert arti.component_spec(policy).variant == "runtime-only"
     assert arti.component_spec(policy).config["max_steps"] == 6
 
@@ -59,12 +60,14 @@ def test_adaptive_refine_policy_is_composed_and_versioned() -> None:
     )
 
     assert isinstance(policy, arti.AdaptiveRefinePolicy)
-    assert arti.component_ref(policy) == "arti/refine-policy@2"
-    assert arti.component_ref(policy.budget) == "arti/refine-budget@1"
-    assert arti.component_ref(policy.stop) == "arti/refine-stop@1"
+    assert arti.component_ref(policy) == canonical_contract_reference("arti/refine-policy@2")
+    assert arti.component_ref(policy.budget) == canonical_contract_reference(
+        "arti/refine-budget@1"
+    )
+    assert arti.component_ref(policy.stop) == canonical_contract_reference("arti/refine-stop@1")
     assert arti.component_spec(policy).dependencies == (
-        "arti/refine-budget@1",
-        "arti/refine-stop@1",
+        canonical_contract_reference("arti/refine-budget@1"),
+        canonical_contract_reference("arti/refine-stop@1"),
     )
 
 
@@ -189,14 +192,18 @@ def test_route_stack_is_versioned_recursive_runtime_composition() -> None:
     block = arti.RecallRouteStack(axis="block", items=(plan,))
     site = arti.RecallRouteStack(axis="site", items=(block,))
 
-    assert arti.component_ref(site) == "arti/recall-route-stack@1"
+    assert arti.component_ref(site) == canonical_contract_reference(
+        "arti/recall-route-stack@1"
+    )
     spec = arti.component_spec(site)
     assert spec.variant == "runtime-only"
     assert spec.config["schema_version"] == 1
     assert spec.config["axis"] == "site"
     assert spec.config["count"] == 1
-    assert spec.config["items"][0]["reference"] == "arti/recall-route-stack@1"
-    assert spec.dependencies == ("arti/recall-route-stack@1",)
+    assert spec.config["items"][0]["reference"] == canonical_contract_reference(
+        "arti/recall-route-stack@1"
+    )
+    assert spec.dependencies == (canonical_contract_reference("arti/recall-route-stack@1"),)
     assert site.detach().items[0].items[0].weights.grad_fn is None
     assert site.clone().items[0].items[0].weights.data_ptr() != plan.weights.data_ptr()
 
@@ -287,11 +294,11 @@ def test_recall_runtime_state_contract_does_not_include_runtime_budget() -> None
     deep = arti.mechanisms.RecallRuntime(updater_b, arti.Recall(4, 4))
 
     assert shallow.contract_fingerprint == deep.contract_fingerprint
-    assert arti.component_ref(shallow) == "arti/recall-runtime@1"
+    assert arti.component_ref(shallow) == canonical_contract_reference("arti/recall-runtime@1")
     spec = arti.component_spec(shallow)
     assert spec.variant == "values-only-session"
-    assert "arti/recall-state@1" in spec.dependencies
-    assert "arti/recall@4" in spec.dependencies
+    assert canonical_contract_reference("arti/recall-state@1") in spec.dependencies
+    assert canonical_contract_reference("arti/recall@4") in spec.dependencies
     assert "max_steps" not in spec.config
 
 
@@ -348,7 +355,9 @@ def test_frozen_route_is_versioned_and_reads_current_bank_values() -> None:
         return_info=True,
     )
     plan = recall.route_plan(info)
-    assert arti.component_ref(plan) == "arti/recall-route-plan@1"
+    assert arti.component_ref(plan) == canonical_contract_reference(
+        "arti/recall-route-plan@1"
+    )
 
     policy = arti.RefinePolicy.fixed(
         2,

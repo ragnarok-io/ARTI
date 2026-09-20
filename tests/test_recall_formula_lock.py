@@ -44,6 +44,30 @@ def test_contract_and_lock_round_trip_without_executable_state() -> None:
     assert "state_dict" not in json.dumps(lock.to_dict())
 
 
+def test_formula_semantic_digest_excludes_name_but_binds_execution_contract() -> None:
+    first = _contract()
+    renamed = RecallFormulaContract(
+        identity=arti.RecallFormulaId.parse("tests/renamed@9"),
+        factors=first.factors,
+        identity_preserving=first.identity_preserving,
+        composition=first.composition,
+        capabilities=first.capabilities,
+        execution=first.execution,
+    )
+    changed = RecallFormulaContract(
+        identity=arti.RecallFormulaId.parse("tests/changed@9"),
+        factors=(FactorSpec("gain", route="shared", init="zero"),),
+        identity_preserving=first.identity_preserving,
+        composition=first.composition,
+        capabilities=first.capabilities,
+        execution=first.execution,
+    )
+
+    assert first.semantic_sha256 == renamed.semantic_sha256
+    assert first.fingerprint != renamed.fingerprint
+    assert first.semantic_sha256 != changed.semantic_sha256
+
+
 def test_contract_and_lock_use_schema_v2_and_reject_v1() -> None:
     contract = _contract()
     lock = RecallFormulaLock.bind(contract, hidden_dim=16, slots=8)

@@ -12,10 +12,10 @@ import torch
 from torch import Tensor, nn
 
 from ._recall_state import (
-    RECALL_STATE_COMPONENT_REF,
     RECALL_STATE_SCHEMA_VERSION,
     RecallState,
     migrate_recall_state,
+    recall_state_contract_ref,
 )
 from .component_registry import (
     ComponentRef,
@@ -24,6 +24,8 @@ from .component_registry import (
     validate_component_provenance,
 )
 from .recall_experts import module_behavior_fingerprint, module_structure_fingerprint
+from .recall_formula import RecallFormulaLock
+from .recall_manifest import RecallFormulaManifest
 
 
 RECALL_RUNTIME_CONTRACT_VERSION = 1
@@ -64,10 +66,22 @@ def _formula_descriptor(reader: nn.Module) -> dict[str, Any]:
         if callable(getattr(candidate, "to_dict", None)):
             manifest = candidate.to_dict()
     lock = getattr(reader, "formula_lock", None)
+    lock_payload = lock.to_dict() if callable(getattr(lock, "to_dict", None)) else None
+    reference = None
+    if isinstance(manifest, Mapping):
+        reference = manifest.get("formula_ref")
+    if reference is None and isinstance(lock_payload, Mapping):
+        identity = lock_payload.get("contract", {}).get("identity")
+        if isinstance(identity, Mapping):
+            namespace = identity.get("namespace")
+            name = identity.get("name")
+            digest = identity.get("contract_sha256")
+            if all(isinstance(item, str) for item in (namespace, name, digest)):
+                reference = f"{namespace}/{name}@sha256:{digest}"
     content = {
-        "reference": getattr(reader, "formula_id", None),
+        "reference": reference,
         "manifest": manifest,
-        "lock": lock.to_dict() if callable(getattr(lock, "to_dict", None)) else None,
+        "lock": lock_payload,
         "module": (
             None
             if not isinstance(formula, nn.Module)
@@ -94,7 +108,7 @@ def _bank_layout_descriptor(slots: int, hidden_dim: int) -> dict[str, Any]:
 
 def _state_descriptor(slots: int, hidden_dim: int) -> dict[str, Any]:
     content = {
-        "ref": RECALL_STATE_COMPONENT_REF,
+        "ref": recall_state_contract_ref(),
         "variant": "values-only",
         "lifecycle": "stable",
         "schema_version": RECALL_STATE_SCHEMA_VERSION,
@@ -119,7 +133,8 @@ def _validate_component_descriptor(name: str, value: Mapping[str, Any]) -> None:
         "api",
         "ref",
         "mechanism_id",
-        "mechanism_version",
+        "contract_sha256",
+        "contract",
         "variant",
         "lifecycle",
         "config_schema_version",
@@ -127,6 +142,7 @@ def _validate_component_descriptor(name: str, value: Mapping[str, Any]) -> None:
         "config",
         "config_fingerprint",
         "parameter_schema_fingerprint",
+        "instance_sha256",
         "dependencies",
         "capabilities",
         "component_provenance",
@@ -137,7 +153,10 @@ def _validate_component_descriptor(name: str, value: Mapping[str, Any]) -> None:
     if not isinstance(value, Mapping) or set(value) != required:
         raise ValueError(f"Recall runtime {name} descriptor has missing or unknown fields")
     identity = ComponentRef.parse(str(value["ref"]))
-    if value["mechanism_id"] != identity.mechanism_id or value["mechanism_version"] != identity.version:
+    if (
+        value["mechanism_id"] != identity.mechanism_id
+        or value["contract_sha256"] != identity.address
+    ):
         raise ValueError(f"Recall runtime {name} component identity is inconsistent")
     if value["config_fingerprint"] != _sha256_json(value["config"]):
         raise ValueError(f"Recall runtime {name} config fingerprint is invalid")
@@ -159,7 +178,8 @@ def _validate_component_descriptor(name: str, value: Mapping[str, Any]) -> None:
             "api",
             "ref",
             "mechanism_id",
-            "mechanism_version",
+            "contract_sha256",
+            "contract",
             "variant",
             "lifecycle",
             "config_schema_version",
@@ -167,6 +187,7 @@ def _validate_component_descriptor(name: str, value: Mapping[str, Any]) -> None:
             "config",
             "config_fingerprint",
             "parameter_schema_fingerprint",
+            "instance_sha256",
             "dependencies",
             "capabilities",
         )
@@ -182,8 +203,24 @@ def _validate_formula_descriptor(value: Mapping[str, Any]) -> None:
     required = {"reference", "manifest", "lock", "module", "fingerprint"}
     if not isinstance(value, Mapping) or set(value) != required:
         raise ValueError("Recall runtime Formula descriptor has missing or unknown fields")
-    if value["reference"] is not None and not isinstance(value["reference"], str):
+    reference = value["reference"]
+    if reference is not None and not isinstance(reference, str):
         raise ValueError("Recall runtime Formula reference is invalid")
+    manifest_reference = None
+    if value["manifest"] is not None:
+        manifest = RecallFormulaManifest.from_dict(value["manifest"])
+        manifest_reference = manifest.formula_ref
+    lock_reference = None
+    if value["lock"] is not None:
+        lock = RecallFormulaLock.from_dict(value["lock"])
+        identity = lock.contract.identity
+        lock_reference = None if identity is None else identity.reference
+    known_references = {item for item in (manifest_reference, lock_reference) if item is not None}
+    if reference is None:
+        if known_references:
+            raise ValueError("Recall runtime Formula reference is missing from its contract")
+    elif known_references != {reference}:
+        raise ValueError("Recall runtime Formula reference disagrees with its contract")
     if value["fingerprint"] != _sha256_json(
         {key: value[key] for key in required if key != "fingerprint"}
     ):
@@ -250,7 +287,10 @@ class RecallRuntimeContract:
         )
         if self.bank_layout["slots"] != self.slots or self.bank_layout["hidden_dim"] != self.hidden_dim:
             raise ValueError("Recall runtime bank layout does not match its dimensions")
-        if self.state["ref"] != RECALL_STATE_COMPONENT_REF or self.state["schema_version"] != self.state_schema_version:
+        if (
+            self.state["ref"] != recall_state_contract_ref()
+            or self.state["schema_version"] != self.state_schema_version
+        ):
             raise ValueError("Recall runtime state descriptor does not match its schema")
 
     def _content(self) -> dict[str, Any]:

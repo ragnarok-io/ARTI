@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import pytest
 
 import arti
 import arti.nn as arti_nn
@@ -122,8 +123,8 @@ def test_learned_pulse_q_topk_uses_explicit_q_not_padding_mask() -> None:
     assert int(touched.sum().item()) > 1
 
 
-def test_learned_pulse_refinement_block() -> None:
-    pulse = arti_nn.LearnedPulse(k=4, dim=6, hidden_dim=8, refine=True)
+def test_learned_pulse_correction_block() -> None:
+    pulse = arti_nn.LearnedPulse(k=4, dim=6, hidden_dim=8, correction=True)
     x = torch.randn(2, 11, 6, requires_grad=True)
 
     z = pulse(x)
@@ -133,8 +134,13 @@ def test_learned_pulse_refinement_block() -> None:
     assert x.grad is not None
 
 
-def test_learned_pulse_gated_refine_and_topk_options() -> None:
-    pulse = arti_nn.LearnedPulse(k=3, dim=6, hidden_dim=8, refine=True, refine_mode="gated", fold_topk=2, q_topk=5)
+def test_learned_pulse_rejects_retired_refine_keyword() -> None:
+    with pytest.raises(TypeError, match="refine"):
+        arti_nn.LearnedPulse(k=4, dim=6, refine=True)  # type: ignore[call-arg]
+
+
+def test_learned_pulse_gated_correction_and_topk_options() -> None:
+    pulse = arti_nn.LearnedPulse(k=3, dim=6, hidden_dim=8, correction=True, correction_mode="gated", fold_topk=2, q_topk=5)
     x = torch.randn(2, 11, 6, requires_grad=True)
     q = torch.rand(2, 11)
 

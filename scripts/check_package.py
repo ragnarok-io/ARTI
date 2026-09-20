@@ -70,35 +70,19 @@ def main() -> None:
             "arti/serialization.py",
             "arti/alpha/__init__.py",
             "arti/mechanisms/__init__.py",
+            "arti/execution.py",
             "arti/legacy/__init__.py",
             "arti/legacy/layered_recall.py",
+            "arti/legacy/refine.py",
+            "arti/legacy/refine_contracts.py",
             "arti/legacy/stateful_recall.py",
             "arti/arti_layer.py",
             "arti/attachment_layer.py",
             "arti/formula_v2.py",
             "arti/formula_learning.py",
-            "arti/formula_program_query.py",
-            "arti/formula_program_query_v3.py",
-            "arti/formula_program_query_v4.py",
-            "arti/_formula_candidate_batch.py",
-            "arti/_formula_grouped_training.py",
-            "arti/_formula_device_dispatch.py",
-            "arti/_formula_device_group_compile.py",
-            "arti/formula_program_query_v5.py",
-            "arti/formula_program_query_v6.py",
-            "arti/formula_program_query_v7.py",
-            "arti/formula_v3.py",
-            "arti/tensor_view.py",
-            "arti/shape_query.py",
-            "arti/federal_tensor_view.py",
-            "arti/federal_compiler.py",
-            "arti/rcc_host.py",
-            "arti/recursive_context.py",
-            "arti/recursive_context_compiler.py",
-            "arti/recursive_language.py",
-            "arti/batched_refine.py",
+            "arti/branch_search.py",
             "arti/branch_formula.py",
-            "arti/branch_refine.py",
+            "arti/branch_search_runtime.py",
             "arti/gpu_resident.py",
             "arti/runtime_checkpoint.py",
             "arti/tensor_binding.py",
@@ -178,7 +162,7 @@ def main() -> None:
                     "assert callable(arti.ARTIHostBridge); "
                     "assert arti.torch.ARTIHostBridge is arti.ARTIHostBridge; "
                     "assert callable(arti.Half); "
-                    "assert arti.component_ref(arti.Half()) == 'arti/half@1'; "
+                    "assert arti.component_ref(arti.Half()).startswith('arti/half@sha256:'); "
                     "assert callable(arti.component_provenance); "
                     "assert callable(arti.component_catalog); "
                     "assert callable(arti.component_state_contract); "
@@ -192,9 +176,9 @@ def main() -> None:
                     "assert callable(arti.EmissionRouter); "
                     "assert arti.nn.EmissionRouter is arti.EmissionRouter; "
                     "assert arti.torch.EmissionRouter is arti.EmissionRouter; "
-                    "assert callable(arti.Recall); "
-                    "assert arti.nn.Recall is arti.Recall; "
-                    "assert arti.torch.Recall is arti.Recall; "
+                    "assert callable(arti.Retrieve); "
+                    "assert arti.nn.Retrieve is arti.Retrieve; "
+                    "assert arti.torch.Retrieve is arti.Retrieve; "
                     "assert callable(arti.module_behavior_fingerprint); "
                     "assert callable(arti.validate_formula); "
                     "assert callable(arti.RecallFormulaId); "
@@ -209,8 +193,10 @@ def main() -> None:
                     "assert arti.torch.Pulse is arti.Pulse; "
                     "assert callable(arti.LearnedPulse); "
                     "assert arti.torch.LearnedPulse is arti.LearnedPulse; "
-                    "assert callable(arti.RecallRefiner); "
-                    "assert arti.torch.RecallRefiner is arti.RecallRefiner; "
+                    "assert callable(arti.RecallExecutor); "
+                    "assert arti.torch.RecallExecutor is arti.RecallExecutor; "
+                    "assert callable(arti.RetrieveExecutor); "
+                    "assert arti.torch.RetrieveExecutor is arti.RetrieveExecutor; "
                     "assert callable(arti.RecallCapacityPlan); "
                     "assert callable(arti.RecallCapacityDecision); "
                     "assert callable(arti.RecallBankAssembly); "
@@ -220,18 +206,17 @@ def main() -> None:
                     "assert callable(arti.migrate_recall_bank); "
                     "assert arti.RECALL_BANK_PROVENANCE_VERSION == 1; "
                     "assert arti.alpha is arti.mechanisms; "
-                    "assert callable(arti.mechanisms.AdaptivePulse); "
                     "default_layer = arti.ARTILayer(); "
-                    "assert isinstance(default_layer.pulse, arti.mechanisms.AdaptivePulse); "
-                    "assert arti.component_ref(default_layer) == 'arti/layer@2'; "
-                    "assert arti.component_spec(default_layer).lifecycle == 'stable'; "
+                    "assert default_layer.program is None and default_layer.graph is None; "
+                    "assert arti.component_ref(default_layer).startswith('arti/layer@sha256:'); "
+                    "assert arti.component_spec(default_layer).lifecycle == 'alpha'; "
                     "assert arti.torch.ARTILayer is arti.ARTILayer; "
                     "assert callable(arti.legacy.LayerRecall); "
                     "assert callable(arti.legacy.StatefulRecall); "
                     "assert callable(arti.legacy.ARTILayer); "
                     "assert callable(arti.alpha.RecallValueUpdater); "
                     "assert callable(arti.alpha.query_recall_branches); "
-                    "assert callable(arti.alpha.run_batched_refine); "
+                    "assert callable(arti.alpha.run_branch_search); "
                     "assert callable(arti.alpha.RefineStepTraining); "
                     "assert callable(arti.alpha.RefineRollout); "
                     "assert callable(arti.alpha.FormulaRefineExit); "
@@ -251,16 +236,18 @@ def main() -> None:
                     "assert callable(arti.alpha.TensorInvocation); "
                     "port_spec = arti.alpha.PortSpec(canvas_tokens=2, tensor_shape=(1,), dim=2, tensor_to_canvas=(0,)); "
                     "operable_port = arti.alpha.OperableTensorPort(port_spec, batch_size=1); "
-                    "assert arti.component_ref(port_spec) == 'arti/operable-tensor-port-spec@3'; "
-                    "assert arti.component_ref(operable_port) == 'arti/operable-tensor-port@2'; "
-                    "assert callable(arti.RecallTraceV3); "
-                    "assert arti.torch.RecallTraceV3 is arti.RecallTraceV3; "
-                    "assert arti.RECALL_TRACE_V3_SCHEMA_REF == 'arti/recall-trace@3'; "
+                    "assert arti.component_ref(port_spec).startswith('arti/operable-tensor-port-spec@sha256:'); "
+                    "assert arti.component_ref(operable_port).startswith('arti/operable-tensor-port@sha256:'); "
+                    "assert callable(arti.ExecutionTraceV3); "
+                    "assert arti.torch.ExecutionTraceV3 is arti.ExecutionTraceV3; "
+                    "assert arti.EXECUTION_TRACE_V3_SCHEMA_REF == 'arti/execution-trace@3'; "
+                    "assert not hasattr(arti, 'RefinePolicy'); "
+                    "assert callable(arti.legacy.RefinePolicy); "
                     "exit_atom = arti.alpha.FormulaRefineExit(input_kind='logit'); "
-                    "assert arti.component_ref(exit_atom) == 'arti/formula-atom-refine-exit@1'; "
+                    "assert arti.component_ref(exit_atom).startswith('arti/formula-atom-refine-exit@sha256:'); "
                     "exit_request = exit_atom(torch.ones(1, 1), mask=torch.ones(1, 1, dtype=torch.bool)); "
-                    "assert arti.component_ref(exit_request) == 'arti/refine-exit-request@1'; "
-                    "assert callable(arti.alpha.BatchedRefinePlan); "
+                    "assert arti.component_ref(exit_request).startswith('arti/refine-exit-request@sha256:'); "
+                    "assert callable(arti.alpha.BranchSearchPlan); "
                     "assert callable(arti.alpha.BranchBatchHarness); "
                     "assert callable(arti.alpha.HotPagePool); "
                     "assert callable(arti.alpha.bind_hot_page_pool); "
@@ -280,28 +267,6 @@ def main() -> None:
                     "assert callable(arti.alpha.FormulaProgramCandidate); "
                     "assert callable(arti.alpha.FormulaProgramQuery); "
                     "assert callable(arti.alpha.ExactFormulaProgramQueryTraining); "
-                    "assert callable(arti.alpha.FormulaProgramTensorCandidateV2); "
-                    "assert callable(arti.alpha.FormulaProgramEffectCandidateV2); "
-                    "assert callable(arti.alpha.FormulaProgramQueryV3); "
-                    "assert callable(arti.alpha.ExactFormulaProgramQueryTrainingV3); "
-                    "assert callable(arti.alpha.FormulaProgramQueryV4); "
-                    "assert callable(arti.alpha.FormulaProgramQueryV4.execute_many); "
-                    "assert callable(arti.alpha.FormulaProgramTensorCandidateV3); "
-                    "assert callable(arti.alpha.FormulaProgramEffectCandidateV3); "
-                    "assert callable(arti.alpha.FormulaProgramQueryTensorEncoderV1); "
-                    "assert not hasattr(arti.alpha, 'FormulaProgramQueryV2'); "
-                    "assert importlib.util.find_spec('arti.formula_program_query_v2') is None; "
-                    "assert callable(arti.alpha.TensorView); "
-                    "assert callable(arti.alpha.TensorViewBankQuery); "
-                    "assert callable(arti.alpha.FederalRecallV3); "
-                    "alpha = __import__('importlib').import_module('arti.alpha'); "
-                    "assert callable(alpha.FederalPathCompiler); "
-                    "assert callable(alpha.FederalTensorQueryCompiler); "
-                    "assert callable(alpha.FederalTensorFederationCompiler); "
-                    "assert callable(alpha.FederalStatefulGraphCompiler); "
-                    "assert callable(alpha.FederalRaggedShapeCompiler); "
-                    "assert callable(alpha.RecursiveContextCompiler); "
-                    "assert callable(alpha.RCCHostAdapter); "
                     "assert callable(arti.alpha.build_lora_program); "
                     "assert callable(arti.alpha.build_routed_lora_program); "
                     "assert callable(arti.alpha.hard_formula_route); "
@@ -313,7 +278,7 @@ def main() -> None:
                     "route = formula_bank.route(torch.tensor([[1.0, 0.0]]), estimator='hard').route; "
                     "formula_result = arti.alpha.FormulaFabricV2(routed_program)(inputs={'x': torch.ones(1, 1, 2), 'base': torch.zeros(1, 1, 2), 'formula.route': route}, banks=formula_bank.bind(routed_program), return_trace=True); "
                     "assert formula_result.values[0].shape == (1, 1, 2); "
-                    "assert formula_result.trace.to_dict()['schema_ref'] == 'arti/formula-trace@1'; "
+"assert formula_result.trace.to_dict()['schema_ref'].startswith('arti/formula-trace@sha256:'); "
                     "formula_state_contract = arti.component_state_contract(formula_bank, formula_bank.state_dict(), scope='trainable'); "
                     "assert arti.validate_component_state_contract(formula_state_contract, state_dict=formula_bank.state_dict(), model=formula_bank) == formula_state_contract; "
                     "assert not hasattr(arti, 'StatefulRecall'); "

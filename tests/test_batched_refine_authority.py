@@ -6,6 +6,7 @@ import torch
 from pathlib import Path
 
 from arti import Recall, RefinePolicy, alpha, component_ref, component_spec
+from arti.component_registry import canonical_contract_reference
 from arti.tensor_transaction import TensorTransactionContractError
 
 
@@ -214,7 +215,7 @@ def test_k3_batched_refine_scores_and_publishes_only_the_frozen_winner() -> None
     assert executor.execution_context.mode == "deterministic"
     assert executor.execution_context.algorithm == "none"
     assert spec.rng_fingerprint == executor.execution_context.fingerprint
-    assert component_ref(executor.execution_context) == (
+    assert component_ref(executor.execution_context) == canonical_contract_reference(
         "arti/execution-context-receipt@3"
     )
 
@@ -303,10 +304,13 @@ def test_topology_result_enters_the_complete_authority_commit_path() -> None:
     snapshot = store.snapshot()
     executor, binding, spec = _authority(result, store, snapshot, future)
 
-    assert result.topology_refs == (
-        "arti/fold@2",
-        "arti/reversible-topology@1",
-        "arti/unfold@2",
+    assert result.topology_refs == tuple(
+        canonical_contract_reference(reference)
+        for reference in (
+            "arti/fold@2",
+            "arti/reversible-topology@1",
+            "arti/unfold@2",
+        )
     )
     assert len(result.topology_contract_fingerprints) == 2
     proposals = alpha.stage_batched_refine_result(
@@ -776,6 +780,7 @@ def test_result_forgery_and_post_execution_mutation_fail_closed() -> None:
             delta=result.delta,
             branch_diagnostics=result.branch_diagnostics,
             global_diagnostics=result.global_diagnostics,
+            plan_ref=result.plan_ref,
             _factory_token=object(),
         )
 

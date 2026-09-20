@@ -16,6 +16,7 @@ from torch import Tensor
 from ..._version import __version__
 from ...component_registry import component_provenance, component_state_contract
 from ...nn import Fold, FusionPulse, Half, LearnedPulse
+from ...survival import describe_survival
 from .contract import (
     ARTI_WEB_FORMAT,
     ARTI_WEB_FORMAT_VERSION,
@@ -232,7 +233,7 @@ def _validate_supported_mode(module: nn.Module) -> None:
             raise ValueError("stochastic Half is not supported by Web export")
         if module.context_mode != "none":
             raise ValueError("contextual Half is not supported by Web export")
-        if module.survival_reference != "arti/survival@1":
+        if module.survival_reference != describe_survival("arti/survival@1").reference:
             raise ValueError("custom survival is not supported by Web export")
         return
     if isinstance(module, Fold):
@@ -500,8 +501,8 @@ def _module_config(module: nn.Module):
             "k": module.k,
             "dim": module.dim,
             "hidden_dim": module.hidden_dim,
-            "refine": module.refine_enabled,
-            "refine_mode": module.refine_mode,
+            "correction": module.correction_enabled,
+            "correction_mode": module.correction_mode,
             "fold_mode": module.fold_mode,
             "use_half": module.use_half,
             "half_stochastic": module.half_stochastic,

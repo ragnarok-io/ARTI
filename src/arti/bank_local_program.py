@@ -14,7 +14,7 @@ from torch import Tensor, nn
 
 from .bank_query import BankQuery, BankQueryResult, SealedBankQuery
 from .federal_recall import (
-    BankLocalRefinePolicy,
+    LocalIterationPolicy,
     BankOwnedQueryProgram,
     FederalBankStep,
     FederalCandidate,
@@ -535,7 +535,7 @@ class ValueTerminalAdapter(nn.Module):
 
 
 class BankLocalTerminalAction(nn.Module):
-    """A neural Refine exit action with an explicit terminal adapter."""
+    """A neural local-iteration exit action with an explicit terminal adapter."""
 
     _component_reference: ClassVar[str] = "arti/bank-local-terminal-action@1"
 
@@ -621,13 +621,13 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
         query: SealedBankQuery,
         actions: Sequence[BankLocalFormulaAction],
         terminal_action: BankLocalTerminalAction,
-        local_refine: BankLocalRefinePolicy,
+        local_iteration: LocalIterationPolicy,
         output_schema: TensorSchema,
         terminal_abi: TerminalOutputABI,
     ) -> None:
-        if not isinstance(local_refine, BankLocalRefinePolicy):
-            raise TypeError("local_refine must be BankLocalRefinePolicy")
-        super().__init__(bank_id=bank_id, query=query, local_refine=local_refine)
+        if not isinstance(local_iteration, LocalIterationPolicy):
+            raise TypeError("local_iteration must be LocalIterationPolicy")
+        super().__init__(bank_id=bank_id, query=query, local_iteration=local_iteration)
         normalized = tuple(actions)
         if not normalized or any(
             not isinstance(action, BankLocalFormulaAction) for action in normalized
@@ -666,7 +666,7 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
             query_signature=query.signature,
             local_normalization_contract=query.signature.normalization_contract,
             local_formula_ref="arti/formula-fabric@2",
-            local_refine_ref=component_ref(local_refine),
+            local_iteration_ref=component_ref(local_iteration),
             terminal_adapter_ref=component_ref(terminal_action.adapter),
             terminal_abi_ref="arti/terminal-output-abi@1",
             terminal_abi_fingerprint=terminal_abi.fingerprint,
@@ -687,7 +687,7 @@ class BankLocalFormulaProgram(BankOwnedQueryProgram):
             "bank_id": self.bank_id,
             "actions": [action.contract_config() for action in self.actions],
             "terminal_action": self.terminal_action.contract_config(),
-            "local_refine": self.local_refine.contract_config(),
+            "local_iteration": self.local_iteration.contract_config(),
             "output_schema": self.output_schema.to_dict(),
             "terminal_abi_fingerprint": self.terminal_abi.fingerprint,
         }
@@ -859,7 +859,7 @@ class ExactBankLocalProgramTraining:
             or not isinstance(max_steps, int)
             or max_steps < min_steps
         ):
-            raise ValueError("training refine bounds are invalid")
+            raise ValueError("training iteration bounds are invalid")
         action_ids = tuple(action.action_id for action in normalized) + (
             terminal_action.action_id,
         )
@@ -961,7 +961,7 @@ class DetachedBankLocalRollout:
             or not isinstance(self.max_steps, int)
             or self.max_steps < self.min_steps
         ):
-            raise ValueError("rollout refine bounds are invalid")
+            raise ValueError("rollout iteration bounds are invalid")
         if len(self.states) > self.max_steps:
             raise ValueError("rollout contains more states than max_steps")
         for state in self.states:
@@ -977,7 +977,7 @@ class DetachedBankLocalRollout:
 
 
 class DetachedBankLocalProgramTraining:
-    """Flatten deep local Refine into fresh one-step final-loss decisions."""
+    """Flatten deep local iteration into fresh one-step final-loss decisions."""
 
     _component_reference: ClassVar[str] = "arti/detached-bank-local-program-training@1"
 
@@ -1046,7 +1046,7 @@ class DetachedBankLocalProgramTraining:
             or not isinstance(max_steps, int)
             or max_steps < min_steps
         ):
-            raise ValueError("capture refine bounds are invalid")
+            raise ValueError("capture iteration bounds are invalid")
         states: list[Tensor] = []
         current = initial.detach()
         terminated = False
@@ -1141,6 +1141,11 @@ class DetachedBankLocalProgramTraining:
             raise TypeError("task_loss must return one finite floating value on the state device")
 
 
+ProgramAction = BankLocalFormulaAction
+ProgramEffectAction = BankLocalFormulaEffectAction
+ProgramTerminalAction = BankLocalTerminalAction
+
+
 __all__ = [
     "BankLocalActionKind",
     "BankLocalDescendLoss",
@@ -1156,4 +1161,7 @@ __all__ = [
     "DetachedBankLocalRollout",
     "ExactBankLocalProgramTraining",
     "ValueTerminalAdapter",
+    "ProgramAction",
+    "ProgramEffectAction",
+    "ProgramTerminalAction",
 ]

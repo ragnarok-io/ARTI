@@ -138,13 +138,19 @@ def test_observation_component_config_binds_policy_and_operator() -> None:
     second = AdaptiveObservation(FixedObservationPolicy(torch.ones(3, 2)))
     first_spec = component_spec(first)
     second_spec = component_spec(second)
-    assert first_spec.reference == "arti/adaptive-observation@1"
+    assert first_spec.reference.startswith("arti/adaptive-observation@sha256:")
     assert first_spec.config_fingerprint != second_spec.config_fingerprint
-    assert set(first_spec.dependencies) == {
-        "arti/fixed-observation-policy@1",
-        "arti/identity-observation-operator@1",
-    }
-    assert arti.component_ref(first.policy) == "arti/fixed-observation-policy@1"
+    assert any(
+        ref.startswith("arti/fixed-observation-policy@sha256:")
+        for ref in first_spec.dependencies
+    )
+    assert any(
+        ref.startswith("arti/identity-observation-operator@sha256:")
+        for ref in first_spec.dependencies
+    )
+    assert arti.component_ref(first.policy).startswith(
+        "arti/fixed-observation-policy@sha256:"
+    )
 
 
 def test_support_lift_repeats_world_support_and_intersects_observation_mask() -> None:
@@ -257,7 +263,9 @@ def test_state_affine_operator_is_identity_at_zero_and_state_conditioned() -> No
     assert not torch.equal(changed, substrate)
     changed.square().mean().backward()
     assert state.grad is not None and state.grad.abs().sum() > 0
-    assert arti.component_ref(operator) == "arti/state-affine-observation-operator@1"
+    assert arti.component_ref(operator).startswith(
+        "arti/state-affine-observation-operator@sha256:"
+    )
 
 
 def test_downstream_loss_reaches_learned_continuation_controller() -> None:
@@ -323,7 +331,9 @@ def test_learned_policy_arti_st_round_trip_and_component_identity(
     expected = source(value, mask)
     actual = target(value, mask)
 
-    assert arti.component_ref(source) == "arti/learned-observation-policy@1"
+    assert arti.component_ref(source).startswith(
+        "arti/learned-observation-policy@sha256:"
+    )
     assert torch.equal(expected.mask, actual.mask)
     torch.testing.assert_close(expected.states, actual.states, rtol=0, atol=0)
     assert expected.weights is not None and actual.weights is not None
