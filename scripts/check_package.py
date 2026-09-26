@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import io
+import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
-import os
-import re
-import hashlib
-import json
-import tarfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -53,6 +56,7 @@ SECRET_PATTERNS = {
         rb"\b\s*[:=]\s*[\"']?[A-Za-z0-9/+_.=-]{24,}"
     ),
 }
+RECORD_HASH_LENGTHS = {"sha256": 43, "sha384": 64, "sha512": 86}
 
 
 def content_findings(label: str, content: bytes) -> list[str]:
@@ -64,6 +68,52 @@ def content_findings(label: str, content: bytes) -> list[str]:
         for name, pattern in SECRET_PATTERNS.items()
         if pattern.search(content)
     )
+    return findings
+
+
+def wheel_record_findings(label: str, content: bytes, members: dict[str, bytes]) -> list[str]:
+    """Scan RECORD paths and verify digest fields against their wheel members."""
+    findings = []
+    if LOCAL_USER_PATH.search(content):
+        findings.append(f"{label}: contains an absolute user-directory path")
+
+    try:
+        rows = csv.reader(io.StringIO(content.decode("utf-8"), newline=""))
+        recorded_paths = set()
+        for row in rows:
+            if len(row) != 3:
+                return [f"{label}: malformed wheel RECORD"]
+            path, digest, size = row
+            if path in recorded_paths:
+                return [f"{label}: malformed wheel RECORD"]
+            recorded_paths.add(path)
+            findings.extend(content_findings(f"{label} path", path.encode("utf-8")))
+            if path == label:
+                if digest or size:
+                    return [f"{label}: malformed wheel RECORD"]
+                continue
+
+            match = re.fullmatch(r"(sha256|sha384|sha512)=([A-Za-z0-9_-]+)", digest)
+            member = members.get(path)
+            if (
+                match is None
+                or len(match.group(2)) != RECORD_HASH_LENGTHS[match.group(1)]
+                or member is None
+                or not size.isdecimal()
+                or int(size) != len(member)
+            ):
+                return [f"{label}: malformed wheel RECORD"]
+            expected_digest = (
+                base64.urlsafe_b64encode(hashlib.new(match.group(1), member).digest())
+                .decode("ascii")
+                .rstrip("=")
+            )
+            if match.group(2) != expected_digest:
+                return [f"{label}: malformed wheel RECORD"]
+    except (csv.Error, UnicodeDecodeError):
+        return [f"{label}: malformed wheel RECORD"]
+    if recorded_paths != members.keys():
+        return [f"{label}: malformed wheel RECORD"]
     return findings
 
 
@@ -118,8 +168,13 @@ def audit_archive_contents(sdist: Path, wheel: Path, manifest: dict) -> list[str
 
     with zipfile.ZipFile(wheel) as archive:
         names = [name for name in archive.namelist() if not name.endswith("/")]
+        members = {name: archive.read(name) for name in names}
         for name in names:
-            findings.extend(content_findings(name, archive.read(name)))
+            content = members[name]
+            if name.endswith(".dist-info/RECORD"):
+                findings.extend(wheel_record_findings(name, content, members))
+            else:
+                findings.extend(content_findings(name, content))
         findings.extend(archive_member_findings("wheel", names, manifest["wheel"]))
     return findings
 

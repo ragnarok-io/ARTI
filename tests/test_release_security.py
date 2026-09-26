@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
+
 import pytest
 import torch
-from scripts.check_package import archive_inventory, archive_member_findings, content_findings
+from scripts.check_package import (
+    archive_inventory,
+    archive_member_findings,
+    content_findings,
+    wheel_record_findings,
+)
 
 import arti.cli as cli
 from arti.providers import ARTIProviderError, _reject_remote_code
@@ -149,6 +158,35 @@ def test_package_content_audit_rejects_additional_provider_credentials(
             b"AIza": "Google API key",
             b"Bearer ": "Bearer token",
         }[prefix]
+    ]
+
+
+def test_wheel_record_accepts_credential_shaped_digest_but_scans_paths() -> None:
+    record_name = "arti_fit-3.1.0a2.dist-info/RECORD"
+    payload = b"payload-61220"
+    checksum = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).decode().rstrip("=")
+    assert re.search(rb"hf_[A-Za-z0-9]{30,}", checksum.encode())
+    entry = f"arti/module.py,sha256={checksum},{len(payload)}\n"
+    content = f"{entry}{record_name},,\n".encode("utf-8")
+    members = {"arti/module.py": payload, record_name: content}
+
+    assert wheel_record_findings(record_name, content, members) == []
+
+    leaked_path = "arti/hf_" + "A" * 32 + ".py"
+    entry = f"{leaked_path},sha256={checksum},{len(payload)}\n"
+    content = f"{entry}{record_name},,\n".encode("utf-8")
+    members = {leaked_path: payload, record_name: content}
+    assert wheel_record_findings(record_name, content, members) == [
+        f"{record_name} path: contains a possible Hugging Face token"
+    ]
+
+
+def test_wheel_record_rejects_malformed_digest_instead_of_ignoring_it() -> None:
+    record_name = "arti_fit-3.1.0a2.dist-info/RECORD"
+    content = f"arti/module.py,hf_{'A' * 40},123\n{record_name},,\n".encode("utf-8")
+
+    assert wheel_record_findings(record_name, content, {record_name: content}) == [
+        f"{record_name}: malformed wheel RECORD"
     ]
 
 
