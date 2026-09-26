@@ -9,14 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
       - run: uv sync --locked --extra dev
       - name: Verify tag matches package version
         run: test "v$(uv run python -c 'import arti; print(arti.__version__)')" = "$GITHUB_REF_NAME"
+      - name: Verify public release readiness
+        run: uv run --extra dev python scripts/check_release_readiness.py
       - run: uv run --extra dev python scripts/check_package.py
       - uses: actions/upload-artifact@v4
         with:

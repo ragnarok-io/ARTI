@@ -8,13 +8,120 @@ import sys
 import tempfile
 import tomllib
 import os
+import re
+import hashlib
+import json
 import tarfile
 import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
+RELEASE_MANIFEST = ROOT / "release-artifact-manifest.json"
+LOCAL_USER_PATH = re.compile(
+    rb"(?:[A-Za-z]:[\\/]+(?:Users|Documents and Settings)[\\/]+[^\\/\r\n\t \"']+|/(?:home|Users|root)/[^/\r\n\t \"']+)",
+    re.IGNORECASE,
+)
+FORBIDDEN_ARCHIVE_PARTS = {
+    ".artifacts",
+    ".cache",
+    ".git",
+    ".ruff_cache",
+    ".tmp",
+    ".venv",
+    "artifacts",
+    "benchmarks",
+    "checkpoints",
+    "__pycache__",
+}
+SECRET_PATTERNS = {
+    "GitHub token": re.compile(rb"(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,})"),
+    "PyPI token": re.compile(rb"pypi-[A-Za-z0-9_-]{50,}"),
+    "Hugging Face token": re.compile(rb"hf_[A-Za-z0-9]{30,}"),
+    "GitLab token": re.compile(rb"glpat-[A-Za-z0-9_-]{20,}"),
+    "Slack token": re.compile(rb"xox[baprs]-[A-Za-z0-9-]{20,}"),
+    "Google API key": re.compile(rb"AIza[0-9A-Za-z_-]{35}"),
+    "AWS access key": re.compile(rb"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    "API token": re.compile(rb"sk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
+    "Bearer token": re.compile(rb"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{24,}"),
+    "private key": re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    "JWT": re.compile(rb"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    "credential assignment": re.compile(
+        rb"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd|secret)"
+        rb"\b\s*[:=]\s*[\"']?[A-Za-z0-9/+_.=-]{24,}"
+    ),
+}
+
+
+def content_findings(label: str, content: bytes) -> list[str]:
+    findings = []
+    if LOCAL_USER_PATH.search(content):
+        findings.append(f"{label}: contains an absolute user-directory path")
+    findings.extend(
+        f"{label}: contains a possible {name}"
+        for name, pattern in SECRET_PATTERNS.items()
+        if pattern.search(content)
+    )
+    return findings
+
+
+def archive_inventory(names: list[str]) -> tuple[int, str]:
+    normalized = sorted(name.replace("\\", "/") for name in names)
+    inventory = "".join(f"{name}\n" for name in normalized).encode("utf-8")
+    return len(normalized), hashlib.sha256(inventory).hexdigest()
+
+
+def archive_member_findings(label: str, names: list[str], expected: dict) -> list[str]:
+    findings = []
+    normalized = sorted(name.replace("\\", "/") for name in names)
+    for name in normalized:
+        path = PurePosixPath(name)
+        if (
+            LOCAL_USER_PATH.search(name.encode("utf-8"))
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(part.lower() in FORBIDDEN_ARCHIVE_PARTS for part in path.parts)
+        ):
+            findings.append(f"{label}: contains a disallowed archive path")
+            break
+
+    file_count, digest = archive_inventory(normalized)
+    if file_count != expected["file_count"] or digest != expected["paths_sha256"]:
+        findings.append(f"{label}: file inventory differs from the reviewed release manifest")
+    return findings
+
+
+def audit_archive_contents(sdist: Path, wheel: Path, manifest: dict) -> list[str]:
+    findings = []
+    with tarfile.open(sdist, mode="r:gz") as archive:
+        members = archive.getmembers()
+        files = [member for member in members if member.isfile()]
+        expected_root = f"{manifest['distribution'].replace('-', '_')}-{manifest['version']}"
+        names = []
+        for member in members:
+            normalized_name = member.name.replace("\\", "/")
+            parts = PurePosixPath(normalized_name).parts
+            if not parts or parts[0] != expected_root:
+                findings.append("sdist: contains an unexpected archive root")
+                break
+            if not member.isdir() and not member.isfile():
+                findings.append("sdist: contains an unexpected non-file member")
+        for member in files:
+            relative_name = "/".join(PurePosixPath(member.name.replace("\\", "/")).parts[1:])
+            names.append(relative_name)
+            stream = archive.extractfile(member)
+            if stream is not None:
+                findings.extend(content_findings(relative_name, stream.read()))
+        findings.extend(archive_member_findings("sdist", names, manifest["sdist"]))
+
+    with zipfile.ZipFile(wheel) as archive:
+        names = [name for name in archive.namelist() if not name.endswith("/")]
+        for name in names:
+            findings.extend(content_findings(name, archive.read(name)))
+        findings.extend(archive_member_findings("wheel", names, manifest["wheel"]))
+    return findings
 
 
 def run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
@@ -26,10 +133,27 @@ def main() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     expected_version = project["version"]
     distribution_stem = project["name"].replace("-", "_")
+    manifest = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+    if (
+        manifest.get("distribution") != project["name"]
+        or manifest.get("version") != expected_version
+    ):
+        raise SystemExit("release archive manifest does not match the package identity")
     if DIST.exists():
         shutil.rmtree(DIST)
 
-    run([sys.executable, "-m", "build", "--no-isolation", "--sdist", "--wheel", "--outdir", str(DIST)])
+    run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--no-isolation",
+            "--sdist",
+            "--wheel",
+            "--outdir",
+            str(DIST),
+        ]
+    )
 
     wheels = sorted(DIST.glob(f"{distribution_stem}-*.whl"))
     sdists = sorted(DIST.glob(f"{distribution_stem}-*.tar.gz"))
@@ -110,6 +234,10 @@ def main() -> None:
         if missing:
             raise SystemExit(f"wheel is missing expected files: {missing}")
 
+    content_leaks = audit_archive_contents(sdists[0], wheels[0], manifest)
+    if content_leaks:
+        raise SystemExit(f"distribution contains sensitive content markers: {content_leaks[:10]}")
+
     with tempfile.TemporaryDirectory(prefix="arti-wheel-smoke-") as tmp:
         target = Path(tmp) / "target"
         target.mkdir()
@@ -127,7 +255,7 @@ def main() -> None:
             [
                 sys.executable,
                 "-c",
-                    (
+                (
                     "import arti, arti.functional, arti.torch, arti.jax, arti.experimental.web, arti.mechanisms, arti.legacy, importlib.util, json, torch; "
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
@@ -278,7 +406,7 @@ def main() -> None:
                     "route = formula_bank.route(torch.tensor([[1.0, 0.0]]), estimator='hard').route; "
                     "formula_result = arti.alpha.FormulaFabricV2(routed_program)(inputs={'x': torch.ones(1, 1, 2), 'base': torch.zeros(1, 1, 2), 'formula.route': route}, banks=formula_bank.bind(routed_program), return_trace=True); "
                     "assert formula_result.values[0].shape == (1, 1, 2); "
-"assert formula_result.trace.to_dict()['schema_ref'].startswith('arti/formula-trace@sha256:'); "
+                    "assert formula_result.trace.to_dict()['schema_ref'].startswith('arti/formula-trace@sha256:'); "
                     "formula_state_contract = arti.component_state_contract(formula_bank, formula_bank.state_dict(), scope='trainable'); "
                     "assert arti.validate_component_state_contract(formula_state_contract, state_dict=formula_bank.state_dict(), model=formula_bank) == formula_state_contract; "
                     "assert not hasattr(arti, 'StatefulRecall'); "
@@ -461,7 +589,7 @@ def main() -> None:
                     "assert arti.torch.experiential_recall_alignment_loss is arti.experiential_recall_alignment_loss; "
                     "assert arti.torch.recall_route_exterior_penalty is arti.recall_route_exterior_penalty; "
                     "print(arti.ARTILayer.__name__)"
-                    ),
+                ),
             ],
             cwd=Path(tmp),
             env=env,

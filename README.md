@@ -17,7 +17,7 @@ runtime around them.
 The PyPI distribution is `arti-fit`; the Python package is `arti`.
 
 ```bash
-uv add "arti-fit==3.1.0a1"
+uv add "arti-fit==3.1.0a2"
 ```
 
 ARTI requires Python 3.10+ and PyTorch 2.2+. Install the PyTorch build
@@ -26,9 +26,9 @@ appropriate for your CPU or CUDA environment first.
 Optional integrations are opt-in:
 
 ```bash
-uv add "arti-fit[qwen]==3.1.0a1"
-uv add "arti-fit[sd]==3.1.0a1"
-uv add "arti-fit[web]==3.1.0a1"
+uv add "arti-fit[qwen]==3.1.0a2"
+uv add "arti-fit[sd]==3.1.0a2"
+uv add "arti-fit[web]==3.1.0a2"
 ```
 
 ## Start With A Program Host
@@ -101,7 +101,7 @@ than hidden Python side effects.
 
 ## Status
 
-ARTI 3.1.0a1 is an alpha release. `ARTILayer`, component identity, artifact
+ARTI 3.1.0a2 is an alpha release. `ARTILayer`, component identity, artifact
 contracts, Formula Fabric, program graphs, Federal execution, and resource
 operations are available for structured experimentation and integration.
 

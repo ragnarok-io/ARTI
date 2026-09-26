@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
+from scripts.check_package import archive_inventory, archive_member_findings, content_findings
 
 import arti.cli as cli
 from arti.providers import ARTIProviderError, _reject_remote_code
@@ -79,15 +78,99 @@ def test_cli_rejects_tensor_dimension_bombs_before_allocation() -> None:
         sample_tensor_from_spec({"shape": [1, 1073741824, 1073741824], "kind": "zeros"})
 
 
-def test_trained_asset_benchmark_does_not_embed_private_local_paths() -> None:
-    source = (
-        Path(__file__).parents[1]
-        / "scripts"
-        / "benchmark_batched_refine_trained_asset.py"
-    ).read_text(encoding="utf-8")
-    lowered = source.lower()
+def test_package_content_audit_rejects_absolute_user_paths_without_echoing_them() -> None:
+    separator = bytes([92])
+    path = (
+        b"C:"
+        + separator
+        + b"Users"
+        + separator
+        + b"alice"
+        + separator
+        + b".cache"
+        + separator
+        + b"run.json"
+    )
+    findings = content_findings("sample.py", path)
 
-    assert "c:\\users\\" not in lowered
-    assert "documents\\arti-scripts" not in lowered
-    assert ".artifacts" not in lowered
-    assert 'required=true' in lowered
+    assert findings == ["sample.py: contains an absolute user-directory path"]
+    assert "alice" not in findings[0]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        b"C:"
+        + bytes([92])
+        + b"Users"
+        + bytes([92])
+        + b"alice"
+        + bytes([92])
+        + b".cache"
+        + bytes([92])
+        + b"model.bin",
+        b"/home/" + b"alice" + b"/.cache/model.bin",
+        b"/Users/" + b"alice" + b"/Library/Caches/model.bin",
+    ],
+)
+def test_package_content_audit_rejects_home_paths_regardless_of_subdirectory(path: bytes) -> None:
+    findings = content_findings("metadata.json", path)
+
+    assert findings == ["metadata.json: contains an absolute user-directory path"]
+    assert "alice" not in findings[0]
+
+
+def test_package_content_audit_rejects_common_secret_token_shapes_without_echoing_them() -> None:
+    findings = content_findings("metadata.txt", b"ghp_" + b"A" * 36)
+
+    assert findings == ["metadata.txt: contains a possible GitHub token"]
+    assert "A" * 20 not in findings[0]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        (b"glpat-", b"A" * 24),
+        (b"xoxb-", b"A" * 24),
+        (b"AIza", b"A" * 35),
+        (b"Bearer ", b"A" * 28),
+    ],
+)
+def test_package_content_audit_rejects_additional_provider_credentials(
+    prefix: bytes, suffix: bytes
+) -> None:
+    findings = content_findings("config.txt", prefix + suffix)
+
+    assert findings == [
+        "config.txt: contains a possible "
+        + {
+            b"glpat-": "GitLab token",
+            b"xoxb-": "Slack token",
+            b"AIza": "Google API key",
+            b"Bearer ": "Bearer token",
+        }[prefix]
+    ]
+
+
+def test_archive_inventory_rejects_unreviewed_members() -> None:
+    expected_names = ["arti/__init__.py", "arti/_version.py"]
+    count, digest = archive_inventory(expected_names)
+    expected = {"file_count": count, "paths_sha256": digest}
+
+    assert archive_member_findings("wheel", expected_names, expected) == []
+    findings = archive_member_findings(
+        "wheel", expected_names + ["arti/private_notes.md"], expected
+    )
+    assert findings == ["wheel: file inventory differs from the reviewed release manifest"]
+
+
+def test_archive_inventory_rejects_workspace_paths_without_echoing_them() -> None:
+    count, digest = archive_inventory(["arti/__init__.py"])
+    expected = {"file_count": count, "paths_sha256": digest}
+
+    findings = archive_member_findings("wheel", ["arti/.cache/private.bin"], expected)
+
+    assert findings == [
+        "wheel: contains a disallowed archive path",
+        "wheel: file inventory differs from the reviewed release manifest",
+    ]
