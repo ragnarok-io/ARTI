@@ -14,10 +14,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
