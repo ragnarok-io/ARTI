@@ -19,8 +19,8 @@ def core_layer() -> ARTILayer:
     return ARTILayer().eval()
 
 
-def test_arti_st_identity_federal_layer_requires_attached_state(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="cannot persist non-portable components"):
+def test_arti_st_identity_layer_requires_stateful_program(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="state_dict selected no model tensors"):
         arti.save(core_layer(), tmp_path / "arti.st")
 
 
