@@ -58,6 +58,7 @@ nav:
       - Activation And Workspace APIs: guides/activation-workspace.md
       - Reversible Topology: guides/reversible-topology.md
       - Formula Fabric: guides/formula-fabric.md
+      - Learning Boundaries: guides/learning-boundaries.md
       - Federal Bank Contracts: guides/federal-contracts.md
       - Federal Path Compilation: guides/federal-compilation.md
       - Adaptive Observation: guides/adaptive-observation.md

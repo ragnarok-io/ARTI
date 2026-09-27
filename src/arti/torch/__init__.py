@@ -86,20 +86,9 @@ from ..membrane import (
     membrane_public_emit_mask,
 )
 from ..models import ARTIClassifier
-from ..nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallExecutor, Retrieve, RetrieveExecutor, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
+from ..nn import Fold, FusionPulse, Half, Layer, LearnedPulse, PixelShiftObservation, Pulse, RecallExecutor, Retrieve, RetrieveExecutor, RetrieveRefiner, UnFold, VisualField, VisualFieldOutput, VisualScan, VisualScanConfig, VisualScanOutput, concat_visual_fields
 from ..usage import FeatureConfig, features, layer_profiles, profile
 from ..inspection import InspectionReport, inspect
-from ..recall_topology import (
-    LayeredRecallBudget,
-    LayeredRecallCandidate,
-    LayeredRecallCost,
-    LayeredRecallScore,
-    LayeredExecutionTraceCache,
-    candidates_within_budget,
-    estimate_layered_recall_cost,
-    pareto_layered_recall,
-    screen_layered_recall_candidate,
-)
 from ..visual_scan import DEFAULT_PIXEL_SHIFTS, pixel_shift_observe, shift_and_add
 from ..execution import (
     EXECUTION_TRACE_SCHEMA_VERSION,
@@ -266,21 +255,13 @@ __all__ = [
     "layer_profiles",
     "InspectionReport",
     "inspect",
-    "LayeredRecallBudget",
-    "LayeredRecallCandidate",
-    "LayeredRecallCost",
-    "LayeredRecallScore",
-    "LayeredExecutionTraceCache",
-    "candidates_within_budget",
-    "estimate_layered_recall_cost",
-    "pareto_layered_recall",
-    "screen_layered_recall_candidate",
     "Fold",
     "Pulse",
     "LearnedPulse",
     "FusionPulse",
     "RecallExecutor",
     "RetrieveExecutor",
+    "RetrieveRefiner",
     "Retrieve",
     "VisualField",
     "VisualFieldOutput",

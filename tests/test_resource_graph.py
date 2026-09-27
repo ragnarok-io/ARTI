@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import torch
 import pytest
 from torch import Tensor, nn
@@ -97,6 +99,30 @@ def test_direct_connection_copies_a_whole_resource_without_a_query() -> None:
     assert receipt[0].destination.resource_id == "workspace"
     assert not connection.is_conditional
     torch.testing.assert_close(target.resolve().view.value, source.resolve().view.value)
+
+
+def test_graph_execution_replays_a_declared_bernoulli_credit_mask() -> None:
+    source_view = view([[2, 7]])
+    source_view.value.requires_grad_()
+    source = mechanisms.TensorResource(
+        spec("source", lifetime=mechanisms.ResourceLifetime.CALL), source_view
+    )
+    target = mechanisms.TensorResource(
+        spec("target", lifetime=mechanisms.ResourceLifetime.CALL), view([[0, 0]])
+    )
+    connection = mechanisms.Connection(
+        "copy",
+        mechanisms.ResourcePort("source"),
+        mechanisms.ResourcePort("target"),
+        credit_boundary=arti.CreditBoundary(mode=arti.CreditBoundaryMode.BERNOULLI),
+    )
+    graph = mechanisms.ProgramGraph((source, target), (connection,))
+    mask = torch.tensor([[[True], [False]]])
+
+    graph.execute(("copy",), credit_masks={"copy": mask})
+    target.resolve().view.value.sum().backward()
+
+    assert torch.equal(source_view.value.grad, mask.to(dtype=source_view.value.dtype))
 
 
 def test_named_resource_program_preserves_serial_visibility_and_can_repeat() -> None:
@@ -431,11 +457,112 @@ def test_compiled_region_connection_executes_on_cuda() -> None:
     )
 
     plan = mechanisms.ResourceGraphCompiler.compile(graph, ("copy_region",))
-    compiled = torch.compile(plan, backend="eager", fullgraph=True)
+    compiled = torch.compile(plan, backend="inductor", fullgraph=True)
     output = compiled(source.resolve().view.value, target.resolve().view.value)[1]
 
     assert output.device.type == "cuda"
     torch.testing.assert_close(output.cpu(), view([[0, 0, 2, 3, 0]]).value)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compiled_resource_connection_keeps_static_batch_buckets_and_gradients() -> None:
+    device = torch.device("cuda")
+
+    def make_bucket(batch: int) -> nn.Module:
+        source = mechanisms.TensorResource(
+            spec("source", lifetime=mechanisms.ResourceLifetime.CALL),
+            device_view([[0, 0, 0, 0]] * batch, device),
+        )
+        target = mechanisms.TensorResource(
+            spec("target", lifetime=mechanisms.ResourceLifetime.STATE),
+            device_view([[0, 0, 0, 0]] * batch, device),
+        )
+        transfer = mechanisms.LearnableAffineTransfer(gain=0.7, bias=0.1).to(device)
+        graph = mechanisms.ProgramGraph(
+            (source, target),
+            (
+                mechanisms.Connection(
+                    "learned_direct",
+                    mechanisms.ResourcePort("source"),
+                    mechanisms.ResourcePort("target"),
+                    transfer=transfer,
+                ),
+            ),
+        )
+        return mechanisms.ResourceGraphCompiler.compile(graph, ("learned_direct",)).to(device)
+
+    automatic_dynamic_shapes = torch._dynamo.config.automatic_dynamic_shapes
+    torch._dynamo.config.automatic_dynamic_shapes = False
+    try:
+        for batch in (1, 4):
+            torch._dynamo.reset()
+            prototype = make_bucket(batch)
+            eager_plan = deepcopy(prototype).to(device)
+            compiled_plan = deepcopy(prototype).to(device)
+            eager_source = torch.randn(batch, 4, 1, device=device, requires_grad=True)
+            compiled_source = eager_source.detach().clone().requires_grad_(True)
+            eager_target = torch.zeros_like(eager_source)
+            compiled_target = torch.zeros_like(compiled_source)
+
+            eager_output = eager_plan(eager_source, eager_target)[1]
+            eager_loss = eager_output.square().mean()
+            eager_gradients = torch.autograd.grad(
+                eager_loss,
+                (eager_source, *eager_plan.parameters()),
+            )
+            compiled = torch.compile(compiled_plan, backend="inductor", fullgraph=True)
+            compiled_output = compiled(compiled_source, compiled_target)[1]
+            compiled_loss = compiled_output.square().mean()
+            compiled_gradients = torch.autograd.grad(
+                compiled_loss,
+                (compiled_source, *compiled_plan.parameters()),
+            )
+
+            torch.testing.assert_close(compiled_output, eager_output)
+            for actual, expected in zip(compiled_gradients, eager_gradients, strict=True):
+                torch.testing.assert_close(actual, expected)
+    finally:
+        torch._dynamo.config.automatic_dynamic_shapes = automatic_dynamic_shapes
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_resource_connection_cuda_graph_replays_fixed_resource_bucket() -> None:
+    device = torch.device("cuda")
+    source = mechanisms.TensorResource(
+        spec("source", lifetime=mechanisms.ResourceLifetime.CALL),
+        device_view([[0, 0, 0, 0]], device),
+    )
+    target = mechanisms.TensorResource(
+        spec("target", lifetime=mechanisms.ResourceLifetime.STATE),
+        device_view([[0, 0, 0, 0]], device),
+    )
+    transfer = mechanisms.LearnableAffineTransfer(gain=0.75, bias=0.25).to(device)
+    graph = mechanisms.ProgramGraph(
+        (source, target),
+        (
+            mechanisms.Connection(
+                "learned_direct",
+                mechanisms.ResourcePort("source"),
+                mechanisms.ResourcePort("target"),
+                transfer=transfer,
+            ),
+        ),
+    )
+    plan = mechanisms.ResourceGraphCompiler.compile(graph, ("learned_direct",)).to(device)
+    prototype_source = torch.zeros(1, 4, 1, device=device)
+    prototype_target = torch.zeros_like(prototype_source)
+    captured = plan.capture(prototype_source, prototype_target)
+
+    for source_value in (
+        torch.tensor([[[1.0], [2.0], [3.0], [4.0]]], device=device),
+        torch.tensor([[[4.0], [3.0], [2.0], [1.0]]], device=device),
+    ):
+        expected = plan(source_value, prototype_target)[1]
+        actual = captured.replay(source_value, prototype_target)[1]
+        torch.testing.assert_close(actual, expected)
+
+    with pytest.raises(mechanisms.ResourceGraphCompileError, match="captured resource bucket"):
+        captured.replay(torch.zeros(2, 4, 1, device=device), prototype_target)
 
 
 class _IdentityView(nn.Module):
@@ -782,7 +909,13 @@ def test_formula_connection_binds_multiple_resource_inputs_through_one_relation(
         ),
     )
 
-    graph.execute(("sum_resources",))
+    target_before = target.resolve().binding
+    execution = graph.execute(("sum_resources",))[0]
+    assert execution.source == source.resolve().binding
+    assert execution.destination_before == target_before
+    assert execution.destination == target.resolve().binding
+    assert execution.operands == (("other", other.resolve().binding),)
+    assert execution.context is None
     plan = mechanisms.ResourceGraphCompiler.compile(graph, ("sum_resources",))
     compiled = torch.compile(plan, backend="eager", fullgraph=True)
     outputs = compiled(
@@ -823,6 +956,107 @@ def test_static_direct_connections_lower_to_a_functional_compilable_plan() -> No
     assert source_value.grad is not None
 
 
+def test_compiled_connection_credit_boundary_keeps_data_identity_and_declared_vjp() -> None:
+    source = mechanisms.TensorResource(spec("source", lifetime=mechanisms.ResourceLifetime.CALL), view([[3, 7]]))
+    target = mechanisms.TensorResource(spec("target", lifetime=mechanisms.ResourceLifetime.STATE), view([[0, 0]]))
+    graph = mechanisms.ProgramGraph(
+        (source, target),
+        (
+            mechanisms.Connection(
+                "closed_copy",
+                mechanisms.ResourcePort("source"),
+                mechanisms.ResourcePort("target"),
+                credit_boundary=arti.CreditBoundary(mode=arti.CreditBoundaryMode.CLOSED),
+            ),
+        ),
+    )
+
+    plan = mechanisms.ResourceGraphCompiler.compile(graph, ("closed_copy",))
+    compiled = torch.compile(plan, backend="eager", fullgraph=True)
+    source_value = source.resolve().view.value.clone().requires_grad_()
+    outputs = compiled(source_value, target.resolve().view.value)
+
+    torch.testing.assert_close(outputs[1], source_value)
+    outputs[1].square().mean().backward()
+    assert source_value.grad is not None
+    torch.testing.assert_close(source_value.grad, torch.zeros_like(source_value))
+
+
+def test_compiled_connection_accepts_replayed_bernoulli_credit_mask_as_tensor_input() -> None:
+    source = mechanisms.TensorResource(spec("source", lifetime=mechanisms.ResourceLifetime.CALL), view([[3, 7]]))
+    target = mechanisms.TensorResource(spec("target", lifetime=mechanisms.ResourceLifetime.STATE), view([[0, 0]]))
+    graph = mechanisms.ProgramGraph(
+        (source, target),
+        (
+            mechanisms.Connection(
+                "masked_copy",
+                mechanisms.ResourcePort("source"),
+                mechanisms.ResourcePort("target"),
+                credit_boundary=arti.CreditBoundary(mode=arti.CreditBoundaryMode.BERNOULLI),
+            ),
+        ),
+    )
+    mask = torch.tensor([[[True], [False]]])
+
+    plan = mechanisms.ResourceGraphCompiler.compile(
+        graph,
+        ("masked_copy",),
+        example_credit_masks={"masked_copy": mask},
+    )
+    assert plan.credit_mask_connection_ids == ("masked_copy",)
+    compiled = torch.compile(plan, backend="eager", fullgraph=True)
+    source_value = source.resolve().view.value.clone().requires_grad_()
+    outputs = compiled(source_value, target.resolve().view.value, mask)
+
+    torch.testing.assert_close(outputs[1], source_value)
+    outputs[1].sum().backward()
+    torch.testing.assert_close(source_value.grad, mask.to(dtype=source_value.dtype))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Inductor mask parity")
+def test_inductor_keeps_bernoulli_credit_mask_on_cuda() -> None:
+    # Keep GPU specializations from consuming Dynamo's process-wide cache used
+    # by the CPU compiler-contract tests below.
+    torch._dynamo.reset()
+    try:
+        device = torch.device("cuda")
+        source = mechanisms.TensorResource(
+            spec("source", lifetime=mechanisms.ResourceLifetime.CALL),
+            device_view([[3, 7]], device),
+        )
+        target = mechanisms.TensorResource(
+            spec("target", lifetime=mechanisms.ResourceLifetime.STATE),
+            device_view([[0, 0]], device),
+        )
+        graph = mechanisms.ProgramGraph(
+            (source, target),
+            (
+                mechanisms.Connection(
+                    "masked_copy",
+                    mechanisms.ResourcePort("source"),
+                    mechanisms.ResourcePort("target"),
+                    credit_boundary=arti.CreditBoundary(mode=arti.CreditBoundaryMode.BERNOULLI),
+                ),
+            ),
+        )
+        mask = torch.tensor([[[False], [True]]], device=device)
+        plan = mechanisms.ResourceGraphCompiler.compile(
+            graph,
+            ("masked_copy",),
+            example_credit_masks={"masked_copy": mask},
+        ).to(device)
+        compiled = torch.compile(plan, backend="inductor", fullgraph=True)
+        source_value = source.resolve().view.value.clone().requires_grad_()
+
+        outputs = compiled(source_value, target.resolve().view.value, mask)
+        outputs[1].sum().backward()
+
+        torch.testing.assert_close(outputs[1], source_value)
+        torch.testing.assert_close(source_value.grad, mask.to(dtype=source_value.dtype))
+    finally:
+        torch._dynamo.reset()
+
+
 def test_compiler_keeps_conditional_connections_dynamic_on_device() -> None:
     source = mechanisms.TensorResource(spec("source", lifetime=mechanisms.ResourceLifetime.CALL), view([[1, 2]]))
     target = mechanisms.TensorResource(spec("target", lifetime=mechanisms.ResourceLifetime.STATE), view([[0, 0]]))
@@ -856,6 +1090,109 @@ def test_compiler_keeps_conditional_connections_dynamic_on_device() -> None:
     second = compiled(source.resolve().view.value, target.resolve().view.value, torch.tensor([[0.5]]))
     torch.testing.assert_close(first[1], view([[0.25, 0.5]]).value)
     torch.testing.assert_close(second[1], view([[0.5, 1.0]]).value)
+
+
+def test_connection_credit_lowering_returns_conditional_context_receipt() -> None:
+    source = mechanisms.TensorResource(
+        spec("source", lifetime=mechanisms.ResourceLifetime.CALL), view([[2.0, 6.0]])
+    )
+    target = mechanisms.TensorResource(
+        spec("target", lifetime=mechanisms.ResourceLifetime.STATE), view([[0.0, 0.0]])
+    )
+    graph = mechanisms.ProgramGraph(
+        (source, target),
+        (
+            mechanisms.Connection(
+                "dynamic",
+                mechanisms.ResourcePort("source"),
+                mechanisms.ResourcePort("target"),
+                activation=_FirstFeatureGate(),
+            ),
+        ),
+    )
+    plan = mechanisms.ResourceGraphCompiler.compile(
+        graph,
+        ("dynamic",),
+        example_contexts={"dynamic": torch.tensor([[0.25]])},
+    )
+    context = torch.tensor([[0.25]])
+    result = plan.credit_gradient(
+        source.resolve().view.value,
+        target.resolve().view.value,
+        context,
+        terminal_cotangents={"target": torch.ones_like(target.resolve().view.value)},
+    )
+
+    torch.testing.assert_close(result.resource_values[1], view([[0.5, 1.5]]).value)
+    torch.testing.assert_close(result.resource_cotangents["source"], view([[0.25, 0.25]]).value)
+    torch.testing.assert_close(result.context_cotangents["dynamic"], torch.tensor([[8.0]]))
+
+
+def test_conditional_credit_receipt_trains_an_upstream_dynamic_gate() -> None:
+    torch.manual_seed(71)
+    batch = 24
+    source_value = torch.linspace(0.25, 1.5, batch).reshape(batch, 1, 1)
+    features = torch.linspace(-1.0, 1.0, batch).reshape(batch, 1)
+    target_value = source_value * (0.35 + 0.45 * torch.sigmoid(features * 2.0)).reshape(batch, 1, 1)
+    tensor_view = mechanisms.TensorView.from_tensor(
+        source_value,
+        axis_names=("batch", "token", "feature"),
+        axis_roles=("batch", "sequence", "feature"),
+    )
+    source = mechanisms.TensorResource(spec("source", lifetime=mechanisms.ResourceLifetime.CALL), tensor_view)
+    target = mechanisms.TensorResource(
+        spec("target", lifetime=mechanisms.ResourceLifetime.STATE),
+        mechanisms.TensorView.from_tensor(
+            torch.zeros_like(source_value),
+            axis_names=("batch", "token", "feature"),
+            axis_roles=("batch", "sequence", "feature"),
+        ),
+    )
+    graph = mechanisms.ProgramGraph(
+        (source, target),
+        (
+            mechanisms.Connection(
+                "dynamic",
+                mechanisms.ResourcePort("source"),
+                mechanisms.ResourcePort("target"),
+                activation=_FirstFeatureGate(),
+            ),
+        ),
+    )
+    plan = mechanisms.ResourceGraphCompiler.compile(
+        graph,
+        ("dynamic",),
+        example_contexts={"dynamic": torch.zeros(batch, 1)},
+    )
+    gate = nn.Sequential(nn.Linear(1, 8), nn.Tanh(), nn.Linear(8, 1), nn.Sigmoid())
+    initial = deepcopy(gate.state_dict())
+
+    def final_loss(module: nn.Module) -> Tensor:
+        with torch.no_grad():
+            return (plan(source_value, torch.zeros_like(source_value), module(features))[1] - target_value).square().mean()
+
+    untouched_loss = final_loss(gate)
+    gate.load_state_dict(initial)
+    for _ in range(80):
+        context = gate(features)
+        predicted = plan(source_value, torch.zeros_like(source_value), context)[1]
+        terminal = 2.0 * (predicted - target_value) / predicted.numel()
+        receipt = plan.credit_gradient(
+            source_value,
+            torch.zeros_like(source_value),
+            context,
+            terminal_cotangents={"target": terminal},
+            create_graph=False,
+        )
+        context_cotangent = receipt.context_cotangents["dynamic"]
+        assert context_cotangent is not None
+        gradients = torch.autograd.grad(context, tuple(gate.parameters()), grad_outputs=context_cotangent)
+        with torch.no_grad():
+            for parameter, gradient in zip(gate.parameters(), gradients, strict=True):
+                parameter.add_(gradient, alpha=-0.4)
+
+    learned_loss = final_loss(gate)
+    assert learned_loss < untouched_loss * 0.1
 
 
 def test_root_namespace_exposes_the_stable_resource_contract() -> None:

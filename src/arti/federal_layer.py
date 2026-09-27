@@ -10,6 +10,7 @@ from typing import Mapping
 import torch
 from torch import Tensor, nn
 
+from .adaptive_pulse import AdaptivePulse, PulseOutput
 from .component_registry import canonical_contract_reference
 from .federal_tensor_view import FederatedProgram, TensorViewFederalTrace
 from .resource_graph import ProgramGraph, ProgramGraphExecution
@@ -42,7 +43,7 @@ class ProgramRuntime(nn.Module):
 
     def __init__(
         self,
-        program: FederatedProgram | None = None,
+        program: FederatedProgram | AdaptivePulse | None = None,
         *,
         graph: ProgramGraph | None = None,
         graph_program_id: str | None = None,
@@ -56,8 +57,8 @@ class ProgramRuntime(nn.Module):
         value_field: str = "value",
     ) -> None:
         super().__init__()
-        if program is not None and not isinstance(program, FederatedProgram):
-            raise TypeError("program must be FederatedProgram or None")
+        if program is not None and not isinstance(program, (FederatedProgram, AdaptivePulse)):
+            raise TypeError("program must be FederatedProgram, AdaptivePulse, or None")
         if graph is not None and not isinstance(graph, ProgramGraph):
             raise TypeError("graph must be ProgramGraph or None")
         if program is not None and graph is not None:
@@ -110,6 +111,16 @@ class ProgramRuntime(nn.Module):
     def configured(self) -> bool:
         return self.program is not None or self.graph is not None
 
+    @staticmethod
+    def _program_contract(program: FederatedProgram | AdaptivePulse) -> dict[str, object]:
+        if isinstance(program, FederatedProgram):
+            return program.contract_config()
+        return {
+            "kind": "adaptive-pulse",
+            "component_ref": canonical_contract_reference(program._component_reference),
+            "component_contract": program.manifest.to_dict(),
+        }
+
     def contract_config(self) -> dict[str, object]:
         program = self.program
         graph = self.graph
@@ -119,7 +130,7 @@ class ProgramRuntime(nn.Module):
                 if program is None
                 else canonical_contract_reference(program._component_reference)
             ),
-            "program_contract": None if program is None else program.contract_config(),
+            "program_contract": None if program is None else self._program_contract(program),
             "graph_ref": (
                 None
                 if graph is None
@@ -244,6 +255,24 @@ class ProgramRuntime(nn.Module):
             )
 
         assert self.program is not None
+        if isinstance(self.program, AdaptivePulse):
+            pulse: PulseOutput = self.program.run_tensor(x, mask=mask)
+            value = pulse.envelope.value
+            if tuple(value.shape) != tuple(x.shape):
+                raise ValueError(
+                    "AdaptivePulse terminal value shape does not match the ARTILayer boundary: "
+                    f"expected {tuple(x.shape)}, got {tuple(value.shape)}"
+                )
+            if value.dtype != x.dtype or value.device != x.device:
+                raise ValueError("AdaptivePulse terminal value must preserve ARTILayer dtype and device")
+            return ProgramLayerResult(
+                value,
+                {self.value_field: value},
+                pulse if return_trace else None,
+                view,
+                torch.equal(value, x),
+            )
+
         raw = self.program(
             view,
             root_program_id=self.root_program_id,

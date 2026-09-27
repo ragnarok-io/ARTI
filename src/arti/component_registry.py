@@ -1686,7 +1686,17 @@ def _build_default_registry() -> ComponentRegistry:
         RestoredRuntimeCheckpoint,
         RuntimeCheckpointReceipt,
     )
-    from .resource_graph import Connection, LearnableAffineTransfer, ProgramGraph, ProgramNode, TensorResource
+    from .resource_graph import (
+        Connection,
+        DifferentiableFabricNode,
+        FormulaProgramNode,
+        LearnableAffineTransfer,
+        MultiPortProgramNode,
+        ProgramGraph,
+        ProgramNode,
+        TensorResource,
+    )
+    from .fabric_decorators import FabricModuleNode
     from .selective_recall import SelectiveRecallKernel
     from .nn import (
         Fold,
@@ -2610,6 +2620,7 @@ def _build_default_registry() -> ComponentRegistry:
         },
     )
     from .formula_observation import OBSERVATION_ATOM_CLASSES
+    from .formula_position import POSITION_ATOM_CLASSES
 
     for reference, atom_class in OBSERVATION_ATOM_CLASSES.items():
         add(
@@ -2618,6 +2629,15 @@ def _build_default_registry() -> ComponentRegistry:
             lifecycle=stable,
             variant="typed-original-substrate-observation",
             capabilities=("formula.fabric.observation", "formula.fabric.typed-atom"),
+            config_builder=lambda component: component.component_config(),
+        )
+    for reference, atom_class in POSITION_ATOM_CLASSES.items():
+        add(
+            reference,
+            atom_class,
+            lifecycle=stable,
+            variant="typed-positional-operand",
+            capabilities=("formula.fabric.position", "formula.fabric.typed-atom"),
             config_builder=lambda component: component.component_config(),
         )
     from .formula_indexing import INDEX_ATOM_CLASSES
@@ -5004,6 +5024,7 @@ def _build_default_registry() -> ComponentRegistry:
         artifact_policy="runtime_only",
         config_builder=lambda component: component.contract_config(),
         capabilities=(
+            "program.connection.credit-boundary",
             "program.connection.direct",
             "program.connection.local-condition",
             "program.connection.resource-binding",
@@ -5042,6 +5063,62 @@ def _build_default_registry() -> ComponentRegistry:
         artifact_policy="runtime_only",
         config_builder=lambda component: component.contract_config(),
         capabilities=("program.node.typed-input", "program.node.typed-output"),
+    )
+    add(
+        "arti/multi-port-program-node@1",
+        MultiPortProgramNode,
+        lifecycle="alpha",
+        variant="named-multi-input-multi-output-program-region",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=("program.node.named-inputs", "program.node.named-outputs"),
+    )
+    add(
+        "arti/formula-program-node@1",
+        FormulaProgramNode,
+        lifecycle="alpha",
+        variant="typed-formula-fabric-program-region",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: (component_ref(component.fabric),),
+        capabilities=(
+            "program.node.formula-fabric",
+            "program.node.named-inputs",
+            "program.node.named-outputs",
+        ),
+    )
+    add(
+        "arti/fabric-module-node@1",
+        FabricModuleNode,
+        lifecycle="alpha",
+        variant="decorated-pytorch-fabric-region",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        capabilities=(
+            "program.node.custom-module",
+            "program.node.named-inputs",
+            "program.node.named-outputs",
+        ),
+    )
+    add(
+        "arti/differentiable-fabric-node@1",
+        DifferentiableFabricNode,
+        lifecycle="alpha",
+        variant="gradient-specializable-compatible-fabric-region",
+        constructible=False,
+        artifact_policy="runtime_only",
+        config_builder=lambda component: component.contract_config(),
+        dependency_builder=lambda component: tuple(
+            sorted(component_ref(component.candidate(candidate_id)) for candidate_id in component.candidate_ids)
+        ),
+        capabilities=(
+            "program.node.differentiable-specialization",
+            "program.node.fabric-candidates",
+            "program.node.static-pruning",
+        ),
     )
     add(
         "arti/affine-resource-transfer@1",
@@ -5103,7 +5180,6 @@ def _build_default_registry() -> ComponentRegistry:
         ProgramRuntime,
         lifecycle=stable,
         variant="tensor-boundary-program-host",
-        artifact_policy="runtime_only",
         config_builder=lambda component: component.contract_config(),
         dependency_builder=lambda component: (
             *(()
@@ -5575,7 +5651,6 @@ def _validate_tensor_operation_dependency_closure(
             raise ComponentCompatibilityError("TensorEditSurrogate config is invalid")
         expected = {spec_ref, "arti/tensor-edit-formula@3"}
     elif reference == "arti/tensor-operation-query@4":
-        query_ref = canonical_contract_reference(reference)
         required = {
             "ref",
             "key_dim",
@@ -5591,7 +5666,7 @@ def _validate_tensor_operation_dependency_closure(
         }
         if (
             set(config) != required
-            or config["ref"] != query_ref
+            or config["ref"] != canonical_contract_reference(reference)
             or not _is_positive_int(config["key_dim"])
             or type(config["seed"]) is not int
             or not _is_sha256(config["basis_hash"])
@@ -5606,8 +5681,6 @@ def _validate_tensor_operation_dependency_closure(
             raise ComponentCompatibilityError("TensorOperationQuery config is invalid")
         expected = {spec_ref}
     elif reference == "arti/tensor-operation-bank@3":
-        bank_ref = canonical_contract_reference(reference)
-        field_ref = canonical_contract_reference("arti/tensor-operation-field-spec@2")
         required = {
             "ref",
             "schema_version",
@@ -5632,7 +5705,7 @@ def _validate_tensor_operation_dependency_closure(
         candidate_count = config.get("candidate_count")
         if (
             set(config) != required
-            or config["ref"] != bank_ref
+            or config["ref"] != canonical_contract_reference(reference)
             or config["schema_version"] != 3
             or not _is_positive_int(candidate_count)
             or not _is_positive_int(config["key_dim"])
@@ -5647,7 +5720,7 @@ def _validate_tensor_operation_dependency_closure(
                 "index_dtype",
                 "value_dtype",
             }
-            or field["ref"] != field_ref
+            or field["ref"] != canonical_contract_reference("arti/tensor-operation-field-spec@2")
             or not _is_positive_int(field["support_size"])
             or not _is_positive_int(field["source_capacity"])
             or field["collision_policy"] != "last_element"
@@ -5741,10 +5814,9 @@ def _validate_tensor_operation_dependency_closure(
             "arti/tensor-operation-bank@3",
         }
     elif reference == "arti/tensor-operation@3":
-        surrogate_ref = canonical_contract_reference("arti/tensor-edit-surrogate@3")
         if set(config) != {"surrogate"} or config["surrogate"] not in {
             None,
-            surrogate_ref,
+            canonical_contract_reference("arti/tensor-edit-surrogate@3"),
         }:
             raise ComponentCompatibilityError("TensorOperation config is invalid")
         expected = {
@@ -6387,6 +6459,7 @@ def _validate_pulse_dependency_closure(
         return
 
     from .formula_observation import OBSERVATION_ATOM_CLASSES
+    from .formula_position import POSITION_ATOM_CLASSES
 
     from .formula_indexing import INDEX_ATOM_CLASSES
 
@@ -6394,6 +6467,7 @@ def _validate_pulse_dependency_closure(
         "arti/formula-atom-window@1",
         *INDEX_ATOM_CLASSES,
         *OBSERVATION_ATOM_CLASSES,
+        *POSITION_ATOM_CLASSES,
         "arti/formula-atom-contract@1",
         "arti/formula-atom-scale@1",
         "arti/formula-atom-add@1",
@@ -6585,6 +6659,15 @@ def _validate_pulse_dependency_closure(
                 )
                 if atom.output_type.to_dict() != config["output_type"]:
                     raise ValueError("observation output type")
+            elif reference in POSITION_ATOM_CLASSES:
+                if set(config) != {"operand_types", "output_type", "attributes"}:
+                    raise ValueError("position config fields")
+                atom = POSITION_ATOM_CLASSES[reference](
+                    tuple(TensorType.from_dict(t) for t in config["operand_types"]),
+                    **config["attributes"],
+                )
+                if atom.output_type.to_dict() != config["output_type"]:
+                    raise ValueError("position output type")
             elif reference == "arti/formula-atom-contract@1":
                 required = {
                     "left_type",

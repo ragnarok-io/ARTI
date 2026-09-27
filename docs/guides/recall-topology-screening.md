@@ -8,10 +8,10 @@ executing a pretrained backbone.
 ## Candidate and budget
 
 ```python
-import arti
+from arti import legacy
 from arti.legacy import LayerRecallSpec, LayeredRecallConfig
 
-candidate = arti.LayeredRecallCandidate(
+candidate = legacy.LayeredRecallCandidate(
     "early-heavy-five-layer",
     LayeredRecallConfig(
         layers=(
@@ -26,14 +26,14 @@ candidate = arti.LayeredRecallCandidate(
     tags=("nonuniform", "early-heavy"),
 )
 
-budget = arti.LayeredRecallBudget(
+budget = legacy.LayeredRecallBudget(
     max_parameters=30_000,
     max_steps=40,
     max_runtime_seconds=120,
     max_candidates=32,
 )
 
-cost = arti.estimate_layered_recall_cost(candidate, tokens=512)
+cost = legacy.estimate_layered_recall_cost(candidate, tokens=512)
 ```
 
 The static estimate uses each branch's actual dimension, rank, slot count, and
@@ -42,14 +42,14 @@ particular early/middle/late convention.
 
 ## Frozen trace cache
 
-`LayeredRecallTraceCache` stores clean, single-corruption,
+`legacy.LayeredExecutionTraceCache` stores clean, single-corruption,
 combined-corruption, and unseen hidden tensors for each selected path. The
 cache uses safetensors plus a JSON manifest and source fingerprint. Screening
 loads this cache and never executes Qwen or another source model.
 
 ```python
-cache = arti.LayeredRecallTraceCache.load("hidden-traces.safetensors")
-score = arti.screen_layered_recall_candidate(candidate, cache, budget)
+cache = legacy.LayeredExecutionTraceCache.load("hidden-traces.safetensors")
+score = legacy.screen_layered_recall_candidate(candidate, cache, budget)
 ```
 
 The score reports normalized repair MSE, normalized unseen delta MSE, parameter
@@ -61,7 +61,7 @@ full-model confirmation.
 ## Pareto selection
 
 ```python
-frontier = arti.pareto_layered_recall(scores)
+frontier = legacy.pareto_layered_recall(scores)
 ```
 
 A score is removed only when another candidate is no worse in repair,

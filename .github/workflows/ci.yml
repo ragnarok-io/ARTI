@@ -24,6 +24,10 @@ jobs:
           tests/test_component_registry.py tests/test_lifecycle_contract.py
           tests/test_federal_recall.py tests/test_federal_contracts.py
           tests/test_resource_graph.py tests/test_formula_fabric.py
+          tests/test_program_graph_nodes.py
+          tests/test_branch_search_compilation.py
+          tests/test_credit_boundary.py tests/test_learning_regions.py
+          tests/test_formula_position.py tests/test_federal_compiler.py
           tests/test_formula_program_query_v7.py tests/test_tensor_operation.py
           tests/test_tensor_binding.py tests/test_tensor_transaction.py
           tests/test_reversible_topology.py tests/test_fold_module.py

@@ -69,8 +69,16 @@ _OBSERVATION_ATOM_SIGNATURES = {
         4, frozenset({"spatial_shape", "state_mode", "direction_epsilon", "compile_policy"})
     ),
 }
+_POSITION_ATOM_SIGNATURES = {
+    "arti/formula-atom-position-sinusoidal@1": (
+        1, frozenset({"feature_axis", "feature_size", "dtype", "base"})
+    ),
+    "arti/formula-atom-position-relative@1": (2, frozenset()),
+    "arti/formula-atom-position-rotary@1": (2, frozenset({"feature_axis", "base"})),
+}
 _ATOM_SIGNATURES: dict[str, tuple[int, frozenset[str]]] = {
     **_OBSERVATION_ATOM_SIGNATURES,
+    **_POSITION_ATOM_SIGNATURES,
     **_INDEX_ATOM_SIGNATURES,
     "arti/formula-atom-window@1": (1, frozenset({
         "axis", "output_axis", "window_axis", "kernel_size", "stride", "dilation", "padding", "output_size",
@@ -3215,6 +3223,10 @@ def _infer_instruction_output_type(
         from .formula_observation import observation_output_type
 
         return observation_output_type(instruction.atom_ref, operand_types, attributes)
+    if instruction.atom_ref in _POSITION_ATOM_SIGNATURES:
+        from .formula_position import position_output_type
+
+        return position_output_type(instruction.atom_ref, operand_types, attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1" and len(operand_types) == 2:
         try:
             reduce_axes = tuple(tuple(pair) for pair in attributes["reduce_axes"])
@@ -3484,6 +3496,10 @@ def _execute_instruction(
         from .formula_observation import execute_observation
 
         return execute_observation(instruction.atom_ref, operands, attributes)
+    if instruction.atom_ref in _POSITION_ATOM_SIGNATURES:
+        from .formula_position import execute_position
+
+        return execute_position(instruction.atom_ref, operands, operand_types, attributes)
     if instruction.atom_ref == "arti/formula-atom-contract@1":
         return _named_contract(
             operands[0],
@@ -4190,6 +4206,8 @@ def _instruction_output_dtype(
         return torch.bool
     if output_type.dtype != "floating":
         return getattr(torch, output_type.dtype)
+    if instruction.atom_ref == "arti/formula-atom-position-sinusoidal@1" and not dtypes[0].is_floating_point:
+        return torch.float32
     return dtypes[1] if instruction.atom_ref == "arti/formula-atom-select@1" else dtypes[0]
 
 
@@ -4215,6 +4233,11 @@ def _validate_instruction_dtype_contract(
         from .formula_observation import validate_observation_dtypes
 
         validate_observation_dtypes(atom_ref, dtypes)
+        return
+    if atom_ref in _POSITION_ATOM_SIGNATURES:
+        from .formula_position import validate_position_dtypes
+
+        validate_position_dtypes(atom_ref, dtypes)
         return
     if atom_ref in {
         "arti/formula-atom-contract@1",
@@ -4747,6 +4770,12 @@ def _preflight_program_shape_metadata(
 
             working_bytes += observation_scratch_bytes(
                 instruction.atom_ref, input_shapes, input_dtypes[0]
+            )
+        if instruction.atom_ref in _POSITION_ATOM_SIGNATURES:
+            from .formula_position import position_scratch_bytes
+
+            working_bytes += position_scratch_bytes(
+                instruction.atom_ref, output_shape, output_dtype
             )
         if instruction.atom_ref in _INDEX_ATOM_SIGNATURES:
             from .formula_indexing import indexing_scratch_bytes

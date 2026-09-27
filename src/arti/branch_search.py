@@ -51,6 +51,226 @@ class BranchSearchContractError(ValueError):
     """Raised when a candidate batch cannot represent independent branches."""
 
 
+class StaticBranchSearchKernel(nn.Module):
+    """Tensor-only K-wide Recall executor for compiled fixed-capacity paths.
+
+    The eager :func:`run_branch_search` entrypoint owns candidate receipts,
+    lineage validation, and runtime diagnostics.  Those are deliberately kept
+    outside this module.  This module keeps the computational part on device:
+    one Top-K seed query produces ``K`` independent trajectories, and the
+    underlying Recall state re-queries after every iteration.
+
+    It accepts only the static, deterministic subset needed by ``torch.compile``
+    and CUDA Graph capture.  In particular, it never compacts ragged branches
+    on the host or selects a winner on the CPU.
+    """
+
+    def __init__(
+        self,
+        recall: nn.Module,
+        *,
+        branches: int,
+        iteration_steps: int,
+    ) -> None:
+        super().__init__()
+        from .execution import ExecutionPolicy
+        from .nn import Recall
+
+        if not isinstance(recall, Recall):
+            raise TypeError("recall must be arti.nn.Recall")
+        if isinstance(branches, bool) or not isinstance(branches, int) or branches <= 0:
+            raise ValueError("branches must be a positive integer")
+        if (
+            isinstance(iteration_steps, bool)
+            or not isinstance(iteration_steps, int)
+            or iteration_steps <= 0
+        ):
+            raise ValueError("iteration_steps must be a positive integer")
+        field = recall.state.recall
+        if field.routing != "grouped" or field.value_composition != "single":
+            raise BranchSearchContractError(
+                "StaticBranchSearchKernel requires grouped single-value Recall"
+            )
+        if branches > field.group_topk:
+            raise BranchSearchContractError(
+                "branches must not exceed the configured grouped Top-K width"
+            )
+        if field.route_exploration != 0.0:
+            raise BranchSearchContractError(
+                "StaticBranchSearchKernel requires route_exploration=0"
+            )
+        activation = recall.state.recall_activation
+        if bool(getattr(activation, "stochastic", False)) or recall.state.dropout.p:
+            raise BranchSearchContractError(
+                "StaticBranchSearchKernel requires deterministic Recall activation and dropout"
+            )
+        # Retain only the numerical state.  Keeping the host Recall module
+        # here would create a recursive module ownership graph when callers
+        # mount the kernel beside that Recall layer for compilation.
+        self.state = recall.state
+        self.dim = recall.dim
+        self.branches = branches
+        self.iteration_steps = iteration_steps
+        self._execution_policy = ExecutionPolicy.fixed(iteration_steps)
+
+    def forward(self, value: Tensor, mask: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Return states, writes, and initial branch scores without host work."""
+
+        if value.ndim != 3:
+            raise ValueError("value must have shape [B,N,D]")
+        if mask.dtype != torch.bool or mask.shape != value.shape[:2]:
+            raise ValueError("mask must be bool [B,N]")
+        if value.shape[-1] != self.dim:
+            raise ValueError("value feature dimension does not match Recall")
+
+        field = self.state.recall
+        # This is the one candidate query.  Each branch receives one distinct
+        # top-ranked group as its first step, then state() returns to dynamic
+        # Recall routing on every later iteration.
+        seed_read = field(value, mask)
+        slot_index = seed_read.indices[..., : self.branches, 0]
+        branch_groups = torch.div(
+            slot_index,
+            field.group_size,
+            rounding_mode="floor",
+        )
+        seed_route_mass = seed_read.route.gather(-1, branch_groups)
+        seed_log_score = torch.log(
+            seed_route_mass.clamp_min(torch.finfo(seed_route_mass.dtype).tiny)
+        )
+        branch_score = (
+            torch.where(
+                mask.unsqueeze(-1),
+                seed_log_score,
+                torch.zeros_like(seed_log_score),
+            ).sum(dim=1)
+            / mask.sum(dim=1, keepdim=True).clamp_min(1)
+        )
+        batch, tokens, _ = branch_groups.shape
+        selected_groups = (
+            branch_groups.permute(0, 2, 1)
+            .reshape(batch * self.branches, tokens, 1)
+            .expand(-1, -1, field.group_topk)
+        )
+        branch_value = (
+            value.unsqueeze(1)
+            .expand(-1, self.branches, -1, -1)
+            .reshape(batch * self.branches, tokens, value.shape[-1])
+        )
+        branch_mask = (
+            mask.unsqueeze(1)
+            .expand(-1, self.branches, -1)
+            .reshape(batch * self.branches, tokens)
+        )
+        refined, delta, _diagnostics = self.state(
+            branch_value,
+            branch_mask,
+            execution_policy=self._execution_policy,
+            selected_groups=selected_groups,
+            selected_groups_first_step_only=True,
+        )
+        return (
+            refined.reshape(batch, self.branches, tokens, value.shape[-1]),
+            delta.reshape(batch, self.branches, tokens, value.shape[-1]),
+            branch_score,
+        )
+
+    def capture(self, value: Tensor, mask: Tensor) -> "CapturedStaticBranchSearch":
+        """Capture a fixed-shape inference bucket for CUDA Graph replay.
+
+        Capture is intentionally separate from :meth:`forward`: the caller
+        supplies the bucket shape once, while :meth:`CapturedStaticBranchSearch.replay`
+        copies later inputs into stable CUDA addresses before replaying the
+        fully device-side K-wide search. Backward and ragged shape changes
+        remain outside this inference-only contract.
+        """
+
+        if not value.is_cuda or not mask.is_cuda:
+            raise BranchSearchContractError("CUDA Graph capture requires CUDA value and mask tensors")
+        if value.requires_grad:
+            raise BranchSearchContractError("CUDA Graph capture is inference-only")
+        if mask.dtype != torch.bool or mask.shape != value.shape[:2]:
+            raise BranchSearchContractError("mask must be bool [B,N] for CUDA Graph capture")
+        if value.ndim != 3 or value.shape[-1] != self.dim:
+            raise BranchSearchContractError("value must be [B,N,D] with the configured Recall dimension")
+
+        static_value = value.detach().clone()
+        static_mask = mask.detach().clone()
+        device = value.device
+        warmup_stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(warmup_stream), torch.no_grad():
+            self(static_value, static_mask)
+        torch.cuda.current_stream(device).wait_stream(warmup_stream)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph), torch.no_grad():
+            refined, delta, branch_score = self(static_value, static_mask)
+        return CapturedStaticBranchSearch(
+            self,
+            graph,
+            static_value,
+            static_mask,
+            refined,
+            delta,
+            branch_score,
+        )
+
+
+class CapturedStaticBranchSearch:
+    """Fixed-address replay handle created by :meth:`StaticBranchSearchKernel.capture`."""
+
+    _component_reference: ClassVar[str] = "arti/captured-static-branch-search@1"
+
+    def __init__(
+        self,
+        kernel: StaticBranchSearchKernel,
+        graph: torch.cuda.CUDAGraph,
+        static_value: Tensor,
+        static_mask: Tensor,
+        refined: Tensor,
+        delta: Tensor,
+        branch_score: Tensor,
+    ) -> None:
+        self.kernel = kernel
+        self.graph = graph
+        self._static_value = static_value
+        self._static_mask = static_mask
+        self._refined = refined
+        self._delta = delta
+        self._branch_score = branch_score
+
+    def replay(
+        self,
+        value: Tensor,
+        mask: Tensor,
+        *,
+        copy_output: bool = True,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Replay on new values having the captured device, dtype and shape."""
+
+        if value.requires_grad:
+            raise BranchSearchContractError("CUDA Graph replay is inference-only")
+        if (
+            value.device != self._static_value.device
+            or value.dtype != self._static_value.dtype
+            or value.shape != self._static_value.shape
+        ):
+            raise BranchSearchContractError("value must match the captured CUDA Graph bucket")
+        if (
+            mask.device != self._static_mask.device
+            or mask.dtype != torch.bool
+            or mask.shape != self._static_mask.shape
+        ):
+            raise BranchSearchContractError("mask must match the captured CUDA Graph bucket")
+        with torch.no_grad():
+            self._static_value.copy_(value)
+            self._static_mask.copy_(mask)
+            self.graph.replay()
+        if copy_output:
+            return self._refined.clone(), self._delta.clone(), self._branch_score.clone()
+        return self._refined, self._delta, self._branch_score
+
+
 _RNG_IDENTIFIER_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 )
@@ -4152,6 +4372,8 @@ def run_branch_search(
 
 __all__ = [
     "BranchSearchContractError",
+    "CapturedStaticBranchSearch",
+    "StaticBranchSearchKernel",
     "BranchSearchPolicy",
     "ExecutionRNGPlan",
     "BranchSearchOperation",

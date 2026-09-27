@@ -472,7 +472,7 @@ class TopologyPriorityFormula(nn.Module):
     @property
     def formula_lock(self) -> TopologyFormulaLock:
         return TopologyFormulaLock(
-            formula_ref=self._component_reference,
+            formula_ref=canonical_contract_reference(self._component_reference),
             contract_fingerprint=self.contract.fingerprint,
             factor_dim=self.contract.factor_dim,
             weight_hash=_tensor_hash(self.weight),
@@ -596,8 +596,9 @@ class BankFormulaTopologyPolicy(nn.Module):
         if not callable(query_contract):
             raise TypeError("topology Query must expose topology_contract()")
         declared_query = query_contract()
-        if declared_query.get("ref") != getattr(
-            self.query, "_component_reference", None
+        query_ref = getattr(self.query, "_component_reference", None)
+        if not isinstance(query_ref, str) or declared_query.get("ref") != canonical_contract_reference(
+            query_ref
         ):
             raise ValueError("topology Query contract identity does not match its component")
         if (
@@ -630,8 +631,9 @@ class BankFormulaTopologyPolicy(nn.Module):
         formula_lock = getattr(self.formula, "formula_lock", None)
         if not isinstance(formula_lock, TopologyFormulaLock):
             raise TypeError("topology Formula must expose TopologyFormulaLock@1")
-        if formula_lock.formula_ref != getattr(
-            self.formula, "_component_reference", None
+        formula_ref = getattr(self.formula, "_component_reference", None)
+        if not isinstance(formula_ref, str) or formula_lock.formula_ref != canonical_contract_reference(
+            formula_ref
         ):
             raise ValueError("topology Formula lock identity does not match its component")
         if (

@@ -2564,6 +2564,13 @@ class ARTIRecallWriteState(nn.Module):
             torch.tensor(initial_retention, dtype=torch.float32),
             persistent=persistent_retention,
         )
+        # A registered device scalar avoids CPU scalar construction during
+        # fixed-address CUDA Graph capture of the Recall diagnostics.
+        self.register_buffer(
+            "_recall_trace_schema",
+            torch.ones((), dtype=torch.int64),
+            persistent=False,
+        )
         self._state_bank_needs_calibration = bool(
             identity_init_bank and config.recall_value_composition == "state"
         )
@@ -3307,7 +3314,7 @@ class ARTIRecallWriteState(nn.Module):
             route_change=route_change_tensor,
             effective_read_change=read_change_tensor,
             active_fraction=active_fraction,
-            kernel_steps=torch.tensor(kernel_steps, device=z.device, dtype=torch.int64),
+            kernel_steps=z.new_tensor(kernel_steps, dtype=torch.int64),
             logical_token_steps=logical_token_steps,
             route=route_tensor,
             indices=index_tensor,
@@ -3714,9 +3721,7 @@ class ARTIRecallWriteState(nn.Module):
             )
             empty_active = torch.empty(z.shape[0], 0, device=z.device, dtype=torch.bool)
             diagnostics = {
-                "recall_trace_schema": torch.tensor(
-                    1, device=z.device, dtype=torch.int64
-                ),
+                "recall_trace_schema": self._recall_trace_schema,
                 "recall_steps_attempted": steps_attempted,
                 "recall_steps_committed": steps_committed,
                 "recall_step_attempted": empty_active,
@@ -3786,7 +3791,7 @@ class ARTIRecallWriteState(nn.Module):
             "recall_context": last_committed_context,
             "recall_effect_norm": (z - initial).norm(dim=-1),
             "recall_write_norm": cumulative_write.norm(dim=-1),
-            "recall_trace_schema": torch.tensor(1, device=z.device, dtype=torch.int64),
+            "recall_trace_schema": self._recall_trace_schema,
             "recall_steps_attempted": steps_attempted,
             "recall_steps_committed": steps_committed,
             "recall_step_attempted": torch.stack(step_attempted, dim=1),

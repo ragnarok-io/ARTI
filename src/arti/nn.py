@@ -2259,6 +2259,15 @@ class Recall(nn.Module):
             if contract_identity is not None and contract_identity.is_canonical
             else None
         )
+        object.__setattr__(self, "_static_branch_kernel", None)
+        if (
+            self.breadth_mode == "independent"
+            and self.breadth > 1
+            and self.state.recall.route_exploration == 0.0
+            and not bool(getattr(self.state.recall_activation, "stochastic", False))
+            and self.state.dropout.p == 0.0
+        ):
+            self.prepare_static_branch_kernel(iteration_steps=1)
 
     @property
     def routing_normalizer(self) -> str:
@@ -2280,6 +2289,25 @@ class Recall(nn.Module):
             stream_key="recall.forward",
             sample_keys=tuple(f"sample-{index}" for index in range(value.shape[0])),
         )
+
+    def prepare_static_branch_kernel(self, *, iteration_steps: int = 1):
+        """Prepare the tensor-only K-wide path for ``torch.compile``.
+
+        The returned module has fixed K and iteration depth, so callers can
+        compile or CUDA-graph it as a batch bucket. Calling this method again
+        replaces the runtime-only prepared kernel; it does not alter model
+        parameters or serialized ARTI assets.
+        """
+
+        from .branch_search import StaticBranchSearchKernel
+
+        kernel = StaticBranchSearchKernel(
+            self,
+            branches=self.breadth,
+            iteration_steps=iteration_steps,
+        )
+        object.__setattr__(self, "_static_branch_kernel", kernel)
+        return kernel
 
     def _merge_breadth_result(
         self,
@@ -2506,7 +2534,7 @@ class Recall(nn.Module):
             sequence.shape[1],
             sequence.device,
         )
-        use_breadth = (
+        breadth_eligible = (
             self.breadth_mode == "independent"
             and self.breadth > 1
             and recall is None
@@ -2517,11 +2545,57 @@ class Recall(nn.Module):
                 isinstance(execution_policy, AdaptiveExecutionPolicy)
                 and execution_policy.executor != "static_masked"
             )
-            and not (
-                hasattr(torch, "compiler")
-                and torch.compiler.is_compiling()
-            )
         )
+        compiling = hasattr(torch, "compiler") and torch.compiler.is_compiling()
+        if compiling and breadth_eligible:
+            kernel = self._static_branch_kernel
+            if (
+                kernel is None
+                or active_k is not None
+                or return_trace
+                or return_branches
+                or refine_exit is not None
+                or model_exit
+                or not isinstance(execution_policy, ExecutionPolicy)
+                or kernel.iteration_steps != 1
+                or execution_policy.max_steps != kernel.iteration_steps
+                or execution_policy.min_steps != kernel.iteration_steps
+            ):
+                raise RuntimeError(
+                    "compiled K-wide Recall requires a prepared static branch kernel "
+                    "with one fixed iteration; compile deeper prepared kernels directly"
+                )
+            branch_value, _branch_delta, branch_score = kernel(sequence, token_mask)
+            branch_valid = token_mask.any(dim=1, keepdim=True)
+            score_floor = torch.finfo(branch_score.dtype).min
+            winner = branch_score.masked_fill(~branch_valid, score_floor).argmax(dim=-1)
+            soft_weights = torch.softmax(
+                branch_score.masked_fill(~branch_valid, score_floor),
+                dim=-1,
+            )
+            soft_weights = torch.where(
+                branch_valid, soft_weights, torch.zeros_like(soft_weights)
+            )
+            if self.breadth_aggregation == "winner":
+                hard_weights = torch.nn.functional.one_hot(
+                    winner, num_classes=self.breadth
+                ).to(dtype=sequence.dtype)
+                weights = _HardLayoutSoftGradient.apply(hard_weights, soft_weights)
+            else:
+                weights = soft_weights
+            merged = (branch_value * weights[:, :, None, None]).sum(dim=1)
+            merged = torch.where(token_mask.unsqueeze(-1), merged, sequence)
+            output = merged.squeeze(1) if was_vector else merged
+            if return_info:
+                return output, {
+                    "recall_breadth": torch.tensor(
+                        self.breadth, dtype=torch.int64, device=sequence.device
+                    ),
+                    "recall_branch_weight": weights,
+                    "recall_winner": winner,
+                }
+            return output
+        use_breadth = breadth_eligible
         if use_breadth:
             from .branch_search import ExecutionRNGPlan, run_branch_search
 
@@ -2704,6 +2778,9 @@ class RetrieveExecutor(RecallExecutor):
         super().__init__(retrieve)
 
 
+RetrieveRefiner = RetrieveExecutor
+
+
 Pulse = LearnedPulse
 
 from .visual_scan import PixelShiftObservation, VisualScan, VisualScanConfig, VisualScanOutput
@@ -2718,6 +2795,7 @@ __all__ = [
     "Retrieve",
     "RecallExecutor",
     "RetrieveExecutor",
+    "RetrieveRefiner",
     "EmissionRouter",
     "EmissionRouterConfig",
     "EmissionRouterOutput",

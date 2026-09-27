@@ -166,7 +166,10 @@ def backend_capabilities() -> BackendCapabilities:
     smi_available, driver_version, smi_cuda_version, smi_devices = nvidia_smi_report()
     if torch_cuda_available:
         gpu_readiness_level = "torch_cuda_runtime_available"
-        interpretation = "PyTorch CUDA runtime is available. Run an application-specific CUDA profile before making scaling claims."
+        interpretation = (
+            "PyTorch CUDA runtime is available. Profile the application workload "
+            "on CUDA before making scaling claims."
+        )
     elif smi_devices:
         gpu_readiness_level = "nvidia_hardware_detected_torch_cpu"
         interpretation = (

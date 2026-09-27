@@ -301,15 +301,25 @@ class TensorView:
 
         if type(index) is not int or not 0 <= index < self.value.shape[self.batch_axis]:
             raise IndexError("TensorView batch index is out of range")
+        return self.slice_batch_range(index, index + 1)
+
+    def slice_batch_range(self, start: int, stop: int) -> TensorView:
+        """Return a contiguous batch region with its declared metadata."""
+
+        if (
+            type(start) is not int or type(stop) is not int
+            or not 0 <= start < stop <= self.value.shape[self.batch_axis]
+        ):
+            raise IndexError("TensorView batch range is out of bounds")
         slices = [slice(None)] * self.value.ndim
-        slices[self.batch_axis] = slice(index, index + 1)
+        slices[self.batch_axis] = slice(start, stop)
         value = self.value[tuple(slices)]
         mask = None if self.mask is None else self.mask[tuple(slices)]
         axes = tuple(
             AxisDescriptor(
                 axis.name,
                 axis.role,
-                1 if axis_index == self.batch_axis else axis.extent,
+                stop - start if axis_index == self.batch_axis else axis.extent,
                 axis.origin,
                 axis.scale,
             )
@@ -323,7 +333,7 @@ class TensorView:
                     index_map.source_axes,
                     index_map.source_shape,
                     index_map.target_shape,
-                    coordinates[index : index + 1],
+                    coordinates[start:stop],
                 )
         return TensorView(value, axes, index_map=index_map, mask=mask)
 

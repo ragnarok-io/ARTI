@@ -17,6 +17,7 @@ from arti.alpha import (
     FederalTensorQueryCompiler,
     FederalTensorBank,
     FederalTensorFederationCompiler,
+    FederalTensorFederationCall,
     FederalTopologyBlock,
 )
 from arti import mechanisms
@@ -59,6 +60,18 @@ class _ChildFederationQuery(nn.Module):
         return value.new_ones((value.shape[0], 1))
 
 
+class _SequenceFederationQuery(nn.Module):
+    def __init__(self, actions: int) -> None:
+        super().__init__()
+        self.actions = actions
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        score = value.mean(dim=(-2, -1))
+        if self.actions == 1:
+            return score.unsqueeze(-1)
+        return torch.stack((score, -score), dim=-1)
+
+
 def _path(*, route_mode="frozen", **flags):
     torch.manual_seed(41)
     parallel = FederalParallel(
@@ -71,7 +84,7 @@ def _path(*, route_mode="frozen", **flags):
         source_snapshot_fingerprint="snapshot-41",
         path_ids=("root", "root/transform", "root/terminal"),
         terminal_abi_ref="arti/terminal-output-abi@1",
-        refine_steps=2,
+        iteration_steps=2,
         input_shape=(None, 4),
         output_shape=(None, 4),
         route_mode=route_mode,
@@ -100,7 +113,7 @@ def test_frozen_federal_path_compiles_to_independent_layerwise_network(tmp_path)
     actual.square().mean().backward()
     assert value.grad is not None
     assert compiled.manifest.source_ref.startswith("arti/federal-recall@sha256:")
-    assert compiled.manifest.refine_steps == 2
+    assert compiled.manifest.iteration_steps == 2
     assert compiled.manifest.input_shape == (None, 4)
     assert compiled.manifest.output_shape == (None, 4)
     assert compiled.manifest.action_sha256.startswith("sha256:")
@@ -140,7 +153,7 @@ def test_compile_action_identity_tracks_the_complete_compile_request():
         ({"data_dependent_shape": True}, "uncompilable"),
         ({"mutable_state": True}, "uncompilable"),
         ({"runtime_callback": True}, "uncompilable"),
-        ({"unbounded_refine": True}, "uncompilable"),
+        ({"unbounded_iteration": True}, "uncompilable"),
     ],
 )
 def test_federal_assessment_keeps_dynamic_boundaries_explicit(kwargs, classification):
@@ -199,7 +212,7 @@ def test_fixed_topology_refine_and_residual_compile_as_ordinary_modules():
         source_snapshot_fingerprint="snapshot-topology-1",
         path_ids=("root", "root/fold", "root/refine", "root/residual"),
         terminal_abi_ref="arti/terminal-output-abi@1",
-        refine_steps=3,
+        iteration_steps=3,
         input_shape=(None, 4, 4),
         output_shape=(None, 4, 4),
     )
@@ -445,6 +458,323 @@ def test_tensorized_federation_compiles_dynamic_bank_dispatch_and_k_wide_routes(
     torch.testing.assert_close(exported.module()(value), actual)
     compiled = torch.compile(federation, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled(value), actual)
+
+
+def test_tensorized_federation_preserves_sequence_tensor_abi() -> None:
+    value = torch.tensor(
+        [[[-2.0], [1.0]], [[2.0], [-1.0]]],
+        dtype=torch.float32,
+    )
+    federation = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "root",
+                _SequenceFederationQuery(2),
+                (_AddThree(), _Double()),
+                ("child", None),
+            ),
+            FederalTensorBank(
+                "child",
+                _SequenceFederationQuery(1),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="root",
+        example_input=value,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-sequence-tensor-federation",
+        max_levels=2,
+        beam_width=2,
+        input_shape=(None, 2, 1),
+        output_shape=(None, 2, 1),
+    )
+    eager = federation(value)
+    assert eager.shape == value.shape
+    exported = FederalTensorFederationCompiler.export(federation, value)
+    torch.testing.assert_close(exported.module()(value), eager)
+    compiled = torch.compile(federation, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(value), eager)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_tensorized_federation_inductor_preserves_sequence_gradients() -> None:
+    device = torch.device("cuda")
+    example = torch.randn(2, 3, 2, device=device)
+    federation = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "root",
+                _SequenceFederationQuery(2),
+                (_AddThree(), _Double()),
+                ("child", None),
+            ),
+            FederalTensorBank(
+                "child",
+                _SequenceFederationQuery(1),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-sequence-tensor-federation-cuda",
+        max_levels=2,
+        beam_width=2,
+    ).to(device)
+    compiled = torch.compile(federation, backend="inductor", fullgraph=True)
+    value = torch.randn(2, 3, 2, device=device, requires_grad=True)
+    eager = federation(value)
+    actual = compiled(value)
+    torch.testing.assert_close(actual, eager)
+    actual.square().mean().backward()
+    assert value.grad is not None
+    assert torch.isfinite(value.grad).all()
+
+
+def test_tensorized_federation_compiles_declared_nested_federation_call():
+    value = torch.tensor([[-2.0], [2.0]])
+    child = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "child-root",
+                _RootFederationQuery(),
+                (_AddThree(), _Double()),
+                ("child-terminal", None),
+            ),
+            FederalTensorBank(
+                "child-terminal",
+                _ChildFederationQuery(),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="child-root",
+        example_input=value,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-child",
+        max_levels=2,
+        beam_width=2,
+        input_shape=(None, 1),
+        output_shape=(None, 1),
+    )
+    parent = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "parent-root",
+                _ChildFederationQuery(),
+                (FederalTensorFederationCall(child),),
+                (None,),
+            ),
+        ),
+        root_bank_id="parent-root",
+        example_input=value,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-parent",
+        max_levels=1,
+        beam_width=1,
+        input_shape=(None, 1),
+        output_shape=(None, 1),
+    )
+
+    expected = torch.tensor([[1.0], [4.0]])
+    eager = parent(value)
+    torch.testing.assert_close(eager, expected)
+    assert parent.manifest.nested_action_addresses == (
+        ("parent-root", 0, child.manifest.action_sha256),
+    )
+    exported = FederalTensorFederationCompiler.export(parent, value)
+    torch.testing.assert_close(exported.module()(value), eager)
+    compiled = torch.compile(parent, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(value), eager)
+
+
+def test_tensorized_federation_rejects_undeclared_nested_federation_call():
+    value = torch.randn(2, 1)
+    child = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "child",
+                _ChildFederationQuery(),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="child",
+        example_input=value,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-undeclared-child",
+        max_levels=1,
+    )
+    with pytest.raises(FederalCompileError, match="FederalTensorFederationCall"):
+        FederalTensorFederationCompiler.compile(
+            (
+                FederalTensorBank(
+                    "parent",
+                    _ChildFederationQuery(),
+                    (child,),
+                    (None,),
+                ),
+            ),
+            root_bank_id="parent",
+            example_input=value,
+            source_ref="arti/federal-recall@3",
+            source_snapshot_fingerprint="snapshot-undeclared-parent",
+            max_levels=1,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_tensorized_nested_federation_inductor_preserves_output_and_gradients():
+    device = torch.device("cuda")
+    example = torch.randn(2, 1, device=device)
+    child = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "child-root",
+                _RootFederationQuery(),
+                (_AddThree(), _Double()),
+                ("child-terminal", None),
+            ),
+            FederalTensorBank(
+                "child-terminal",
+                _ChildFederationQuery(),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="child-root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-child-inductor",
+        max_levels=2,
+        beam_width=2,
+    )
+    parent = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "parent-root",
+                _ChildFederationQuery(),
+                (FederalTensorFederationCall(child),),
+                (None,),
+            ),
+        ),
+        root_bank_id="parent-root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-parent-inductor",
+        max_levels=1,
+        beam_width=1,
+    ).to(device)
+    compiled = torch.compile(parent, backend="inductor", fullgraph=True)
+
+    value = torch.randn(2, 1, device=device, requires_grad=True)
+    actual = compiled(value)
+    expected = parent(value)
+    torch.testing.assert_close(actual, expected)
+    actual.square().mean().backward()
+    assert value.grad is not None
+    assert torch.isfinite(value.grad).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_tensorized_nested_federation_cuda_graph_replays_fixed_bucket():
+    device = torch.device("cuda")
+    example = torch.randn(2, 1, device=device)
+    child = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "child-root",
+                _RootFederationQuery(),
+                (_AddThree(), _Double()),
+                ("child-terminal", None),
+            ),
+            FederalTensorBank(
+                "child-terminal",
+                _ChildFederationQuery(),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="child-root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-child-cuda-graph",
+        max_levels=2,
+        beam_width=2,
+    )
+    parent = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "parent-root",
+                _ChildFederationQuery(),
+                (FederalTensorFederationCall(child),),
+                (None,),
+            ),
+        ),
+        root_bank_id="parent-root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-nested-parent-cuda-graph",
+        max_levels=1,
+        beam_width=1,
+    ).to(device)
+    captured = parent.capture(example)
+
+    for value in (
+        torch.tensor([[-2.0], [2.0]], device=device),
+        torch.tensor([[3.0], [-3.0]], device=device),
+    ):
+        torch.testing.assert_close(captured.replay(value), parent(value))
+
+    with pytest.raises(FederalCompileError, match="captured federation bucket"):
+        captured.replay(torch.zeros(3, 1, device=device))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_tensorized_federation_inductor_supports_dynamic_batches_and_k_wide_gradients():
+    device = torch.device("cuda")
+    example = torch.randn(2, 1, device=device)
+    federation = FederalTensorFederationCompiler.compile(
+        (
+            FederalTensorBank(
+                "root",
+                _RootFederationQuery(),
+                (_AddThree(), _Double()),
+                ("child", None),
+            ),
+            FederalTensorBank(
+                "child",
+                _ChildFederationQuery(),
+                (nn.Identity(),),
+                (None,),
+            ),
+        ),
+        root_bank_id="root",
+        example_input=example,
+        source_ref="arti/federal-recall@3",
+        source_snapshot_fingerprint="snapshot-tensor-federation-inductor",
+        max_levels=2,
+        beam_width=2,
+        input_shape=(None, 1),
+        output_shape=(None, 1),
+    ).to(device)
+    compiled = torch.compile(
+        federation,
+        backend="inductor",
+        fullgraph=True,
+        dynamic=True,
+    )
+
+    for batch_size in (2, 7):
+        value = torch.randn(batch_size, 1, device=device, requires_grad=True)
+        actual = compiled(value)
+        expected = federation(value)
+        torch.testing.assert_close(actual, expected)
+        actual.square().mean().backward()
+        assert value.grad is not None
+        assert torch.isfinite(value.grad).all()
 
 
 @pytest.mark.parametrize("boundary", ("mutable_state", "data_dependent_shape", "runtime_callback"))

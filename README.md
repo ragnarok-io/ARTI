@@ -17,7 +17,7 @@ runtime around them.
 The PyPI distribution is `arti-fit`; the Python package is `arti`.
 
 ```bash
-uv add "arti-fit==3.1.0a2"
+uv add "arti-fit==3.1.0a3"
 ```
 
 ARTI requires Python 3.10+ and PyTorch 2.2+. Install the PyTorch build
@@ -26,9 +26,9 @@ appropriate for your CPU or CUDA environment first.
 Optional integrations are opt-in:
 
 ```bash
-uv add "arti-fit[qwen]==3.1.0a2"
-uv add "arti-fit[sd]==3.1.0a2"
-uv add "arti-fit[web]==3.1.0a2"
+uv add "arti-fit[qwen]==3.1.0a3"
+uv add "arti-fit[sd]==3.1.0a3"
+uv add "arti-fit[web]==3.1.0a3"
 ```
 
 ## Start With A Program Host
@@ -45,7 +45,7 @@ x = torch.randn(2, 16, 64)
 layer = arti.ARTILayer()
 
 assert torch.equal(layer(x), x)
-assert arti.component_ref(layer) == "arti/layer@3"
+assert arti.component_ref(layer) == arti.canonical_contract_reference("arti/layer@3")
 ```
 
 For configured execution, build a `FederatedProgram` or a `ProgramGraph` from
@@ -62,6 +62,9 @@ host layer preserves the ordinary tensor boundary.
 | `FormulaFabricV2` | Typed, bounded tensor operations and explicit operands. |
 | `ProgramGraph` | Program nodes, resource nodes, connections, and executable graph state. |
 | `TensorResource` | A logical tensor resource with an explicit lifecycle, binding, and views. |
+| `CreditBoundary` | Identity in the forward pass with an explicit rule for gradient flow through a connection. |
+| `OptimizerExecutionPlan` | Learning regions with separate AdamW state and optional region-specific losses. |
+| `fabric_layer` | Register a PyTorch module as a typed Fabric node or a differentiable node candidate. |
 | `Retrieve` / `RecallExecutor` | Retrieval and bounded execution helpers for standalone use. |
 | `ExecutionPolicy` | Limits and traces execution without changing an artifact. |
 | `Half`, `Fold`, `UnFold`, `Pulse` | Independently usable tensor layers and workspace operations. |
@@ -101,7 +104,7 @@ than hidden Python side effects.
 
 ## Status
 
-ARTI 3.1.0a2 is an alpha release. `ARTILayer`, component identity, artifact
+ARTI 3.1.0a3 is an alpha release. `ARTILayer`, component identity, artifact
 contracts, Formula Fabric, program graphs, Federal execution, and resource
 operations are available for structured experimentation and integration.
 

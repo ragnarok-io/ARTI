@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from torch import Tensor, nn
 
+from .adaptive_pulse import AdaptivePulse
 from .component_registry import canonical_contract_reference
 from .federal_layer import ProgramLayerResult, ProgramRuntime
 from .federal_tensor_view import FederatedProgram
@@ -27,7 +28,7 @@ class ARTILayer(nn.Module):
 
     def __init__(
         self,
-        program: FederatedProgram | None = None,
+        program: FederatedProgram | AdaptivePulse | None = None,
         *,
         graph: ProgramGraph | None = None,
         graph_program_id: str | None = None,
@@ -56,10 +57,24 @@ class ARTILayer(nn.Module):
         )
 
     @property
-    def program(self) -> FederatedProgram | None:
+    def program(self) -> FederatedProgram | AdaptivePulse | None:
         """Return the configured program, or ``None`` for the identity shell."""
 
         return self.runtime.program
+
+    @property
+    def federation(self) -> FederatedProgram | None:
+        """Return the configured federated program, when this layer hosts one."""
+
+        program = self.program
+        return program if isinstance(program, FederatedProgram) else None
+
+    @property
+    def pulse(self) -> AdaptivePulse | None:
+        """Return the configured Pulse execution region, when this layer hosts one."""
+
+        program = self.program
+        return program if isinstance(program, AdaptivePulse) else None
 
     @property
     def graph(self) -> ProgramGraph | None:
@@ -118,7 +133,11 @@ class ARTILayer(nn.Module):
         return (
             "program=identity-shell"
             if program is None
-            else f"program={program._component_reference}, roots={program.root_program_ids}"
+            else (
+                f"program={program._component_reference}, roots={program.root_program_ids}"
+                if isinstance(program, FederatedProgram)
+                else f"program={program._component_reference}"
+            )
         )
 
 

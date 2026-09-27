@@ -398,7 +398,7 @@ class AdaptiveRefineSchedule:
 
     ``AdaptiveRefinePolicy`` remains the portable, scalar configuration. This
     runtime-only schedule supplies one value per flattened execution sample,
-    such as the ``B*K`` trajectories used by Batched Refine.
+    such as the ``B*K`` trajectories used by K-wide Branch Search.
     """
 
     _component_reference: ClassVar[str] = "arti/adaptive-refine-schedule@1"

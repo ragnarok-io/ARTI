@@ -444,7 +444,7 @@ class FederalStaticFold(nn.Module):
             raise FederalCompileError(
                 f"fixed Fold expects length {self.input_length}, got {value.shape[-2]}"
             )
-        return value.index_select(-2, self._active_indices.to(device=value.device))
+        return value.index_select(-2, self._active_indices)
 
 
 class FederalStaticUnFold(nn.Module):
@@ -493,6 +493,7 @@ class FederalStaticUnFold(nn.Module):
         self.register_buffer(
             "_source_indices", torch.tensor(indices, dtype=torch.long), persistent=True
         )
+        self._has_insertions = any(index == -1 for index in indices)
         if insert_values is not None:
             self.register_buffer("_insert_values", insert_values.detach().clone(), persistent=True)
         else:
@@ -505,12 +506,12 @@ class FederalStaticUnFold(nn.Module):
             raise FederalCompileError(
                 f"fixed UnFold expects length {self.input_length}, got {value.shape[-2]}"
             )
-        source = self._source_indices.to(device=value.device)
+        source = self._source_indices
         safe_source = source.clamp_min(0)
         gathered = value.index_select(-2, safe_source)
-        inserted = source < 0
-        if not bool(inserted.any()):
+        if not self._has_insertions:
             return gathered
+        inserted = source < 0
         if self._insert_values is None:
             fill = torch.zeros_like(gathered)
         else:
@@ -518,7 +519,7 @@ class FederalStaticUnFold(nn.Module):
                 raise FederalCompileError(
                     "fixed UnFold insert feature dimension does not match input"
                 )
-            fill = self._insert_values.to(device=value.device, dtype=value.dtype)
+            fill = self._insert_values.to(dtype=value.dtype)
             fill = fill.reshape((1,) * (value.ndim - 2) + fill.shape).expand_as(gathered)
         mask = inserted.reshape((1,) * (value.ndim - 2) + (self.output_length, 1))
         return torch.where(mask, fill, gathered)
@@ -1074,6 +1075,34 @@ class FederalTensorBank(nn.Module):
         self.runtime_callback = bool(runtime_callback)
 
 
+class FederalTensorFederationCall(nn.Module):
+    """A declared, statically compiled call edge into a child Federation.
+
+    A child Federation is not an opaque callback: its bounded dispatch graph is
+    retained as a registered submodule, so ``torch.export`` and Inductor can
+    lower the complete parent/child execution graph together.  The child must
+    already have a static Tensor ABI; the enclosing compiler verifies that its
+    result also satisfies the parent action ABI.
+    """
+
+    _component_reference = "arti/federal-tensor-federation-call@1"
+
+    def __init__(self, federation: "FederalTensorFederation") -> None:
+        super().__init__()
+        if not isinstance(federation, FederalTensorFederation):
+            raise TypeError("federation must be a FederalTensorFederation")
+        self.federation = federation
+
+    @property
+    def child_action_sha256(self) -> str:
+        """Immutable address of the child compiler action."""
+
+        return self.federation.manifest.action_sha256
+
+    def forward(self, value: Tensor) -> Tensor:
+        return self.federation(value)
+
+
 @dataclass(frozen=True)
 class FederalTensorFederationManifest:
     """Provenance for a tensorized multi-Bank Federation graph."""
@@ -1089,6 +1118,7 @@ class FederalTensorFederationManifest:
     max_actions: int
     input_shape: tuple[int | None, ...] | None
     output_shape: tuple[int | None, ...] | None
+    nested_action_addresses: tuple[tuple[str, int, str], ...] = ()
     early_stop_semantics: str = "logical-carry-fixed-horizon"
 
     _component_reference: ClassVar[str] = "arti/federal-tensor-federation-manifest@1"
@@ -1110,6 +1140,10 @@ class FederalTensorFederationManifest:
             "max_actions": self.max_actions,
             "input_shape": None if self.input_shape is None else list(self.input_shape),
             "output_shape": None if self.output_shape is None else list(self.output_shape),
+            "nested_action_addresses": [
+                {"bank_id": bank_id, "action_index": action_index, "action_sha256": address}
+                for bank_id, action_index, address in self.nested_action_addresses
+            ],
             "early_stop_semantics": self.early_stop_semantics,
         }
 
@@ -1218,7 +1252,7 @@ class FederalTensorFederation(nn.Module):
                 self.max_actions,
             )
             logits = query_logits.gather(2, bank_index).squeeze(2)
-            values_index = bank_indices[..., None, None, None]
+            values_index = bank_indices[(...,) + (None,) * (len(tail) + 2)]
             values_index = values_index.expand(
                 batch,
                 self.beam_width,
@@ -1270,6 +1304,65 @@ class FederalTensorFederation(nn.Module):
             *tail,
         )
         return state.gather(1, gather_best).squeeze(1)
+
+    def capture(self, value: Tensor) -> "CapturedFederalTensorFederation":
+        """Capture a finite Federal/K-wide input bucket for CUDA replay.
+
+        A captured artifact preserves the federation's fixed Bank graph,
+        max-level horizon and beam width. It is deliberately inference-only:
+        mutable Banks, data-dependent shapes and unbounded execution are
+        rejected by the compiler before a federation exists.
+        """
+
+        if not isinstance(value, Tensor) or not value.is_cuda:
+            raise FederalCompileError("CUDA Graph capture requires a CUDA tensor input")
+        if value.requires_grad:
+            raise FederalCompileError("CUDA Graph capture is inference-only")
+        static_value = value.detach().clone()
+        device = value.device
+        warmup_stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(warmup_stream), torch.no_grad():
+            self(static_value)
+        torch.cuda.current_stream(device).wait_stream(warmup_stream)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph), torch.no_grad():
+            output = self(static_value)
+        return CapturedFederalTensorFederation(self, graph, static_value, output)
+
+
+class CapturedFederalTensorFederation:
+    """Fixed-address CUDA replay handle for a tensorized Federal graph."""
+
+    _component_reference: ClassVar[str] = "arti/captured-federal-tensor-federation@1"
+
+    def __init__(
+        self,
+        federation: FederalTensorFederation,
+        graph: torch.cuda.CUDAGraph,
+        static_value: Tensor,
+        output: Tensor,
+    ) -> None:
+        self.federation = federation
+        self.graph = graph
+        self._static_value = static_value
+        self._output = output
+
+    def replay(self, value: Tensor, *, copy_output: bool = True) -> Tensor:
+        """Replay one value matching the captured CUDA shape/dtype bucket."""
+
+        if (
+            not isinstance(value, Tensor)
+            or value.requires_grad
+            or value.device != self._static_value.device
+            or value.dtype != self._static_value.dtype
+            or value.shape != self._static_value.shape
+        ):
+            raise FederalCompileError("CUDA Graph replay input must match the captured federation bucket")
+        with torch.no_grad():
+            self._static_value.copy_(value)
+            self.graph.replay()
+        return self._output.clone() if copy_output else self._output
 
 
 class FederalTensorFederationCompiler:
@@ -1336,6 +1429,11 @@ class FederalTensorFederationCompiler:
                         f"Bank {bank.bank_id!r} Query must return [B, action] logits"
                     )
                 for operation in bank.operations:
+                    if isinstance(operation, FederalTensorFederation):
+                        raise FederalCompileError(
+                            "nested FederalTensorFederation operations must use "
+                            "FederalTensorFederationCall"
+                        )
                     result = operation(example_input)
                     if not isinstance(result, Tensor) or tuple(result.shape) != tuple(example_input.shape):
                         raise FederalCompileError(
@@ -1376,6 +1474,12 @@ class FederalTensorFederationCompiler:
                 raise FederalCompileError(f"{field} does not match example_input")
             return result
 
+        nested_action_addresses = tuple(
+            (bank.bank_id, action_index, operation.child_action_sha256)
+            for bank in normalized
+            for action_index, operation in enumerate(bank.operations)
+            if isinstance(operation, FederalTensorFederationCall)
+        )
         manifest = FederalTensorFederationManifest(
             schema=FederalTensorFederationManifest._component_reference,
             compiler_ref=cls._component_reference,
@@ -1388,6 +1492,7 @@ class FederalTensorFederationCompiler:
             max_actions=max_actions,
             input_shape=normalize_shape(input_shape, field="input_shape"),
             output_shape=normalize_shape(output_shape, field="output_shape"),
+            nested_action_addresses=nested_action_addresses,
         )
         return FederalTensorFederation(
             deepcopy(normalized),
@@ -1510,7 +1615,7 @@ class FederalStatefulExecutionGraph(nn.Module):
         batch = value.shape[0]
         budget = torch.minimum(
             max_steps.to(dtype=torch.int64),
-            self._max_steps_tensor.to(device=value.device),
+            self._max_steps_tensor,
         )
         step = torch.zeros((), dtype=torch.int64, device=value.device)
         done = torch.zeros((batch,), dtype=torch.bool, device=value.device)
@@ -1564,6 +1669,150 @@ class FederalStatefulExecutionGraph(nn.Module):
             (step, value, bank_state, effect_state, done, steps),
         )
         return value, bank_state, effect_state, done, steps
+
+    def static_kernel(self) -> "StaticFederalStatefulExecutionGraph":
+        """Return the fixed-horizon Tensor kernel used for compiled buckets.
+
+        The canonical graph retains ``torch.while_loop`` for export and its
+        open stop semantics. This companion is equivalent on observable state
+        lanes, but masks work after a sample stops and statically unrolls the
+        host-bounded horizon. It avoids the current Windows Inductor backward
+        fallback through a CPU C++ loop kernel.
+        """
+
+        return StaticFederalStatefulExecutionGraph(
+            self.transition,
+            max_steps=self.max_steps,
+        ).to(device=self._max_steps_tensor.device)
+
+
+class StaticFederalStatefulExecutionGraph(nn.Module):
+    """Static-masked lowering of an explicit state/effect recurrence."""
+
+    _component_reference = "arti/static-federal-stateful-execution-graph@1"
+
+    def __init__(self, transition: nn.Module, *, max_steps: int) -> None:
+        super().__init__()
+        if not isinstance(transition, nn.Module):
+            raise TypeError("transition must be an nn.Module")
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        self.transition = transition
+        self.max_steps = int(max_steps)
+        self.register_buffer(
+            "_max_steps_tensor",
+            torch.tensor(self.max_steps, dtype=torch.int64),
+            persistent=True,
+        )
+
+    def forward(
+        self,
+        value: Tensor,
+        bank_state: Tensor,
+        effect_state: Tensor,
+        max_steps: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        batch = value.shape[0]
+        budget = torch.minimum(
+            max_steps.to(dtype=torch.int64),
+            self._max_steps_tensor,
+        )
+        done = torch.zeros((batch,), dtype=torch.bool, device=value.device)
+        steps = torch.zeros((batch,), dtype=torch.int64, device=value.device)
+        for step in range(self.max_steps):
+            next_value, next_bank, next_effect, stop = self.transition(
+                value,
+                bank_state,
+                effect_state,
+            )
+            active = (~done) & (step < budget)
+            value_active = active.reshape(batch, *([1] * (value.ndim - 1)))
+            bank_active = active.reshape(batch, *([1] * (bank_state.ndim - 1)))
+            effect_active = active.reshape(batch, *([1] * (effect_state.ndim - 1)))
+            value = torch.where(value_active, next_value, value)
+            bank_state = torch.where(bank_active, next_bank, bank_state)
+            effect_state = torch.where(effect_active, next_effect, effect_state)
+            done = done | (active & stop)
+            steps = steps + active.to(dtype=torch.int64)
+        return value, bank_state, effect_state, done, steps
+
+    def capture(
+        self,
+        value: Tensor,
+        bank_state: Tensor,
+        effect_state: Tensor,
+        max_steps: Tensor,
+    ) -> "CapturedStaticFederalStatefulExecutionGraph":
+        """Capture a fixed explicit-state bucket for inference replay."""
+
+        inputs = (value, bank_state, effect_state, max_steps)
+        if any(not isinstance(item, Tensor) for item in inputs) or not value.is_cuda:
+            raise FederalCompileError("CUDA Graph capture requires CUDA tensor state lanes")
+        if any(
+            not item.is_cuda or item.device != value.device or item.requires_grad
+            for item in inputs
+        ):
+            raise FederalCompileError(
+                "CUDA Graph capture requires no-grad state lanes on one CUDA device"
+            )
+        static_inputs = tuple(item.detach().clone() for item in inputs)
+        device = value.device
+        warmup_stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(warmup_stream), torch.no_grad():
+            self(*static_inputs)
+        torch.cuda.current_stream(device).wait_stream(warmup_stream)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph), torch.no_grad():
+            outputs = self(*static_inputs)
+        return CapturedStaticFederalStatefulExecutionGraph(self, graph, static_inputs, outputs)
+
+
+class CapturedStaticFederalStatefulExecutionGraph:
+    """Fixed-address CUDA replay for static explicit Bank/effect state lanes."""
+
+    _component_reference: ClassVar[str] = "arti/captured-static-federal-stateful-execution@1"
+
+    def __init__(
+        self,
+        kernel: StaticFederalStatefulExecutionGraph,
+        graph: torch.cuda.CUDAGraph,
+        static_inputs: tuple[Tensor, ...],
+        outputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor],
+    ) -> None:
+        self.kernel = kernel
+        self.graph = graph
+        self._static_inputs = static_inputs
+        self._outputs = outputs
+
+    def replay(
+        self,
+        value: Tensor,
+        bank_state: Tensor,
+        effect_state: Tensor,
+        max_steps: Tensor,
+        *,
+        copy_output: bool = True,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Replay compatible explicit value/Bank/effect/budget tensors."""
+
+        inputs = (value, bank_state, effect_state, max_steps)
+        if any(
+            not isinstance(item, Tensor)
+            or item.requires_grad
+            or item.device != expected.device
+            or item.dtype != expected.dtype
+            or item.shape != expected.shape
+            for item, expected in zip(inputs, self._static_inputs, strict=True)
+        ):
+            raise FederalCompileError("CUDA Graph replay state lanes must match the captured bucket")
+        with torch.no_grad():
+            for destination, source in zip(self._static_inputs, inputs, strict=True):
+                destination.copy_(source)
+            self.graph.replay()
+        if copy_output:
+            return tuple(item.clone() for item in self._outputs)  # type: ignore[return-value]
+        return self._outputs
 
 
 class FederalStatefulGraphCompiler:
@@ -1864,9 +2113,16 @@ __all__ = [
     "FederalTensorQueryCompiler",
     "FederalTensorQueryManifest",
     "FederalTensorBank",
+    "CapturedFederalTensorFederation",
     "FederalTensorFederation",
+    "FederalTensorFederationCall",
     "FederalTensorFederationCompiler",
     "FederalTensorFederationManifest",
+    "FederalStatefulGraphManifest",
+    "FederalStatefulExecutionGraph",
+    "FederalStatefulGraphCompiler",
+    "CapturedStaticFederalStatefulExecutionGraph",
+    "StaticFederalStatefulExecutionGraph",
     "FederalFormulaBlock",
     "FederalParallel",
     "FederalPath",
