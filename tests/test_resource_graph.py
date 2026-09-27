@@ -1085,11 +1085,15 @@ def test_compiler_keeps_conditional_connections_dynamic_on_device() -> None:
         example_contexts={"dynamic": torch.tensor([[0.25]])},
     )
     assert plan.context_connection_ids == ("dynamic",)
-    compiled = torch.compile(plan, backend="eager", fullgraph=True)
-    first = compiled(source.resolve().view.value, target.resolve().view.value, torch.tensor([[0.25]]))
-    second = compiled(source.resolve().view.value, target.resolve().view.value, torch.tensor([[0.5]]))
-    torch.testing.assert_close(first[1], view([[0.25, 0.5]]).value)
-    torch.testing.assert_close(second[1], view([[0.5, 1.0]]).value)
+    torch._dynamo.reset()
+    try:
+        compiled = torch.compile(plan, backend="eager", fullgraph=True)
+        first = compiled(source.resolve().view.value, target.resolve().view.value, torch.tensor([[0.25]]))
+        second = compiled(source.resolve().view.value, target.resolve().view.value, torch.tensor([[0.5]]))
+        torch.testing.assert_close(first[1], view([[0.25, 0.5]]).value)
+        torch.testing.assert_close(second[1], view([[0.5, 1.0]]).value)
+    finally:
+        torch._dynamo.reset()
 
 
 def test_connection_credit_lowering_returns_conditional_context_receipt() -> None:
