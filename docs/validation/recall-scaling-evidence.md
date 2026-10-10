@@ -19,10 +19,7 @@ The committed screen completed 48 balanced candidates in 77.96 seconds. Pareto
 frontiers minimize normalized repair MSE, unseen delta MSE, and parameter cost.
 This screen is a local proxy and does not model cross-layer propagation.
 
-```bash
-uv run --extra qwen python benchmarks/screen_recall_scaling_matrix.py \
-  --device cpu --steps 30 --max-candidates 48 --max-runtime-seconds 120
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Matched Qwen Training
 
@@ -83,13 +80,7 @@ law over converged training.
 
 Each GPU invocation must be reviewed and remain below 540 seconds:
 
-```bash
-uv run --extra qwen python benchmarks/run_qwen_recall_scaling.py --seeds 503 --resume
-uv run --extra qwen python benchmarks/run_qwen_recall_scaling.py --seeds 509 --resume
-uv run --extra qwen python benchmarks/run_qwen_recall_scaling.py --seeds 521 --resume
-uv run --extra qwen python benchmarks/run_qwen_recall_line_concat.py
-uv run --extra dev python benchmarks/verify_recall_scaling_evidence.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The committed result retains every response string, train/validation alignment,
 NLL, semantic hidden cosine, unseen hidden and logit drift, line utilization,

@@ -32,9 +32,8 @@ def test_component_catalog_is_canonical_and_explicit_about_deprecation() -> None
     assert by_key["arti/recall-branch-batch@3"]["artifact_policy"] == "runtime_only"
     assert by_key["arti/recall@2"]["config_schema_version"] == 2
     assert by_key["arti/recall@3"]["config_schema_version"] == 4
-    executor = by_key["arti/retrieve-executor@1"]
-    assert executor["constructible"] is True
-    assert executor["artifact_policy"] == "portable"
+    assert by_key["arti/execution-policy@2"]["config_schema_version"] == 2
+    assert by_key["arti/execution-policy@2"]["lifecycle"] == "stable"
     layer = by_key["arti/layer@3"]
     assert layer["lifecycle"] == "alpha"
     assert layer["variant"] == "federal-bank-host"

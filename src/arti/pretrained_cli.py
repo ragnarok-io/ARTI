@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from ._toml import loads as load_toml
 from .pretrained import ARTIPlan, pretrained, validate_pretrained_lock
 from .providers import provider_report
+from .training_run import ARTITrainingRunConfig
 
 
 def load_pretrained_config(path: str | Path) -> dict[str, Any]:
@@ -48,6 +49,8 @@ def pretrained_cli_report(action: str, config_path: Path | None, **options: Any)
     if config_path is None:
         raise ValueError(f"pretrained {action} requires a config path")
     config = load_pretrained_config(config_path)
+    if action in {"fit", "apply", "export"} and options.get("weights") is None:
+        raise ValueError(f"pretrained {action} requires --weights")
     workflow, sample, component_samples = _workflow_from_config(config)
     workflow.scan(sample, component_samples=component_samples)
     if action == "scan":
@@ -94,13 +97,16 @@ def pretrained_cli_report(action: str, config_path: Path | None, **options: Any)
         if not isinstance(data_factory, str):
             raise ValueError("pretrained fit requires data.factory in the config")
         train_data = _invoke_factory(data_factory, _mapping(config, "data").get("kwargs", {}))
-        result = workflow.fit(train_data)
+        run_values = _mapping(config, "run")
+        validation_factory = _mapping(config, "data").get("validation_factory")
+        validation = _invoke_factory(validation_factory, _mapping(config, "data").get("validation_kwargs", {})) if isinstance(validation_factory, str) else None
+        result = workflow.fit(train_data, run=ARTITrainingRunConfig(**run_values) if run_values else None, eval_data=validation, resume_from_checkpoint=options.get("resume_from_checkpoint"), steps=options.get("steps"))
         weights = options.get("weights")
         if weights is None:
             raise ValueError("pretrained fit requires --weights")
         exported = result.export(weights, include_base=bool(options.get("include_base", False)))
         summary = _export_summary("pretrained-fit", exported, workflow)
-        summary.update({"engine": result.engine, "steps": result.steps, "final_loss": result.loss_history[-1] if result.loss_history else None})
+        summary.update({"engine": result.engine, "steps": result.steps, "final_loss": result.loss_history[-1] if result.loss_history else None, "run_directory": None if result.run_directory is None else str(result.run_directory), "checkpoint": None if result.checkpoint_path is None else str(result.checkpoint_path), "stop_reason": result.stop_reason})
         return summary
     raise ValueError(f"unsupported pretrained action {action!r}")
 

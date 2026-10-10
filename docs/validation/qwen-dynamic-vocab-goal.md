@@ -23,19 +23,17 @@ Qwen evidence bundle current without repeating every CUDA training probe.
 
 The goal-level verifier is:
 
-```bash
-uv run --extra dev python benchmarks/verify_qwen_dynamic_vocab_goal.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 It aggregates these specialized verifiers:
 
-- `benchmarks/verify_qwen_input_head_replacement.py`
-- `benchmarks/verify_qwen_closed_loop_replacement.py`
-- `benchmarks/verify_qwen_runtime_vocab_pulse_semantic.py`
-- `benchmarks/verify_qwen_runtime_vocab_metadata_bridge.py`
-- `benchmarks/verify_qwen_runtime_vocab_bridge_ablation.py`
-- `benchmarks/verify_qwen_oov_dialogue_preservation.py`
-- `benchmarks/verify_qwen_string_recall_refiner_answering.py`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
+- `research-only validation entrypoint`
 
 The string-first answer verifier is part of the goal-level chain, so dynamic
 vocab/glyph evidence also has to keep the rendered-string input boundary,

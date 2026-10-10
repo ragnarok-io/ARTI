@@ -18,7 +18,16 @@ from .backend import available_backends, planned_backends
 from .attachment import ARTI, ARTIAttachment, ARTIAttachmentSummary, ARTILayerInfo, discover_layers
 from .attachment_layer import AttachedARTILayerConfig, AttachedARTILayerSpec
 from .attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
-from .attachment_training import ARTICheckpointCallback, ARTITrainingResult, ARTITrainingSession, model_loss_objective, resolve_attachment_objective, tensor_alignment_objective
+from .attachment_training import ARTICheckpointCallback, ARTIEvaluationResult, ARTITrainingResult, ARTITrainingSession, model_loss_objective, resolve_attachment_objective, tensor_alignment_objective
+from .training_run import ARTITrainingRunConfig
+from .training_config import ARTITrainingConfig
+from .training_binding import TrainingBinding, trainer
+from .recipes import ClassificationPredictor, ClassificationRecipe, ClassificationRecipeConfig, recipe_from_config, load_recipe_predictor
+from .language_recipe import CausalLMRecipe, CausalLMRecipeConfig, CausalLMPredictor, CausalLMModelConfig, CausalLMGenerationConfig, CausalLMOptimizerConfig
+from .recipe_adapters import FormulaAdapterConfig, formula_adapter_factory
+from .recipe_chat import ChatFields
+from .recipe_serving import create_recipe_app
+from .recipe_data import ClassificationDataset, ClassificationFields
 from .attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from .blocks import ARTIHostBridge, ARTIPooledBlock, ARTIResidualBlock, ARTISequenceBlock
 from .config import ARTIConfig
@@ -283,6 +292,23 @@ from .usage import FeatureConfig, features, layer_profiles, profile
 alpha = mechanisms
 
 __all__ = [
+    "create_recipe_app",
+    "CausalLMRecipe",
+    "CausalLMRecipeConfig",
+    "CausalLMPredictor",
+    "CausalLMModelConfig",
+    "CausalLMGenerationConfig",
+    "CausalLMOptimizerConfig",
+    "FormulaAdapterConfig",
+    "formula_adapter_factory",
+    "ChatFields",
+    "recipe_from_config",
+    "load_recipe_predictor",
+    "ClassificationDataset",
+    "ClassificationFields",
+    "ClassificationPredictor",
+    "ClassificationRecipe",
+    "ClassificationRecipeConfig",
     "ARTI",
     "mechanisms",
     "alpha",
@@ -304,6 +330,11 @@ __all__ = [
     "ARTITrainingSession",
     "ARTICheckpointCallback",
     "ARTITrainingResult",
+    "ARTITrainingRunConfig",
+    "ARTITrainingConfig",
+    "TrainingBinding",
+    "trainer",
+    "ARTIEvaluationResult",
     "ARTIDoctorReport",
     "ARTIHubSaveResult",
     "save_attachment_pretrained",

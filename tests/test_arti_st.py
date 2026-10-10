@@ -19,8 +19,8 @@ def core_layer() -> ARTILayer:
     return ARTILayer().eval()
 
 
-def test_arti_st_identity_layer_requires_stateful_program(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="state_dict selected no model tensors"):
+def test_arti_st_identity_layer_rejects_empty_state_dict(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="selected no model tensors"):
         arti.save(core_layer(), tmp_path / "arti.st")
 
 
@@ -79,7 +79,8 @@ def test_arti_st_sha256_detects_weight_corruption(tmp_path: Path) -> None:
 def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Path) -> None:
     saved = arti.save(nn.Linear(4, 3), tmp_path / "arti.st")
     manifest = json.loads(saved.manifest_path.read_text(encoding="utf-8"))
-    manifest["package_version"] = "0.99.0"
+    major, minor, *_ = arti.__version__.split(".")
+    manifest["package_version"] = f"{major}.{int(minor) + 1}.0"
     saved.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     digest = hashlib.sha256(saved.manifest_path.read_bytes()).hexdigest()
     lock = json.loads(saved.lock_path.read_text(encoding="utf-8"))
@@ -90,7 +91,7 @@ def test_arti_st_manifest_hash_and_future_alpha_version_are_checked(tmp_path: Pa
     try:
         arti.load(saved.weights_path)
     except ValueError as exc:
-        assert "incompatible with ARTI" in str(exc)
+        assert "newer than ARTI" in str(exc)
     else:
         raise AssertionError("future alpha package should fail compatibility validation")
 

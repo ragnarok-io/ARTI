@@ -79,9 +79,12 @@ nav:
       - Layered Recall: guides/layered-recall.md
       - Tensor Context And Emission: guides/tensor-context-and-emission.md
       - Unified Model Attachment: guides/unified-attachment.md
+      - Training Workflow: guides/training-workflow.md
+      - Task Recipes: guides/task-recipes.md
+      - Qwen SFT Workflow: guides/qwen-sft-workflow.md
       - Recall Topology Screening: guides/recall-topology-screening.md
       - GPU Validation: guides/gpu-validation.md
-      - JAX Backend Roadmap: guides/jax-backend.md
+      - Native JAX Backend: guides/jax-backend.md
       - WebGPU Alpha: guides/webgpu-alpha.md
       - Development Workflow: guides/development.md
       - Release Checklist: guides/release.md

@@ -1,139 +1,150 @@
 # ARTI
 
-**A PyTorch runtime for composable tensor programs.**
+ARTI = AI x RT.
 
-ARTI lets a model work with tensors through explicit, versioned components:
-programs, retrieval, Formula Fabric operations, resources, and bounded
-execution. It is useful when a model needs more than a fixed sequence of
-layers, while still keeping tensor contracts, component identity, and artifacts
-inspectable.
+ARTI is a programmable neural runtime for PyTorch and JAX. Compose neural
+programs with Formula Fabric, explicit tensor resources, learned connections,
+local iteration and forward plasticity. Adapt an existing model or build a
+standalone model, then train, resume, evaluate and deploy the same asset.
 
-ARTI does not prescribe a tokenizer, model family, task head, or training loop.
-Applications define the meaning of their tensors; ARTI provides the program
-runtime around them.
+The PyPI distribution is `arti-fit`; the Python import is `arti`.
 
 ## Install
 
-The PyPI distribution is `arti-fit`; the Python package is `arti`.
-
 ```bash
-uv add "arti-fit==3.1.0a3"
+pip install "arti-fit==3.2.0"
+pip install "arti-fit[qwen,serve]==3.2.0"  # language recipes and optional ASGI serving
+pip install "arti-fit[jax,flax]==3.2.0"    # native JAX and optional Flax integration
 ```
 
-ARTI requires Python 3.10+ and PyTorch 2.2+. Install the PyTorch build
-appropriate for your CPU or CUDA environment first.
+Python 3.10+ is supported. PyTorch is a core dependency; model, JAX, Flax,
+documentation and serving integrations are optional extras.
 
-Optional integrations are opt-in:
+## One Training Workflow
 
-```bash
-uv add "arti-fit[qwen]==3.1.0a3"
-uv add "arti-fit[sd]==3.1.0a3"
-uv add "arti-fit[web]==3.1.0a3"
+Native models, attached programs and pretrained workflows use one session:
+
+```python
+import arti
+
+# model is a configured native model or a host with trained ARTI parameters.
+session = arti.trainer(model, objective=task_objective)
+print(session.plan(steps=1000))
+assert session.check(example_batch)["ok"]
+result = session.fit(
+    train_loader,
+    steps=1000,
+    run=arti.ARTITrainingRunConfig(output_dir="outputs/my-task"),
+)
+metrics = session.evaluate(validation_loader)
 ```
 
-## Start With A Program Host
+The local Torch profile saves the first update, periodic checkpoints and a final
+checkpoint. Continuation retains optimizer, scheduler, supported RNG/scaler state
+and the declared data cursor. Evaluation preserves model and ARTI state. The
+host's task loss is the default; tensor alignment is an explicit alternative.
 
-`ARTILayer` is the tensor-in/tensor-out host boundary. With no configured
-program it is an exact identity, making it safe to attach before selecting a
-program graph.
+Use the [training guide](docs/guides/training-workflow.md) for native, attachment
+and pretrained entrances, data-resume guarantees and export.
+
+## Real Task Recipes
+
+The same lifecycle is available from JSON/TOML:
+
+```bash
+arti recipe plan recipe.toml --output plan.json
+arti recipe check recipe.toml
+arti recipe train recipe.toml --run-dir outputs/first
+arti recipe train recipe.toml --resume-from-checkpoint outputs/first/checkpoints/step-00000200/model.arti.st --steps 40 --run-dir outputs/continued
+arti recipe evaluate recipe.toml --model outputs/continued/model --split test --output outputs/test.json
+arti recipe predict outputs/continued/model --data requests.jsonl --output outputs/predictions.jsonl
+arti recipe serve outputs/continued/model --port 8080
+```
+
+- [Classification](docs/guides/task-recipes.md): explicit train/validation/test
+  records, train-only preprocessing, cross-entropy, metrics and portable batched
+  prediction without the original dataset.
+- [Qwen SFT](docs/guides/qwen-sft-workflow.md): complete conversation input,
+  final-assistant/EOS supervision, target-token-weighted accumulation, pinned
+  base revision, checkpoint continuation and tokenizer-bound deployment.
+- Optional FastAPI/Uvicorn serving loads the asset once per worker and exposes
+  `/predict`, `/chat`, `/health` and OpenAPI. It is a local ASGI integration,
+  not an authenticated gateway or a vLLM/TensorRT-LLM export.
+
+Runnable repository examples:
+
+```bash
+uv sync --extra dev --extra qwen --extra serve
+python examples/classification_workflow.py --output .tmp/digits-workflow
+python examples/qwen_sft_workflow.py --prepare-only --output .tmp/qwen-sft
+```
+
+Qwen planning loads native configuration/tokenization and a meta-device model,
+not base weights or CUDA allocations. `check` deliberately performs a real
+gradient preflight. The recipe's fixed Formula adaptation profile is one usable
+composition, not a claim that all ARTI features or architecture search are enabled.
+
+## Compose Neural Programs
+
+`ARTILayer` hosts a configured `FederatedProgram` or `ProgramGraph`. An empty
+layer is an exact identity, not an untrained adapter that pretends to know a task.
 
 ```python
 import torch
 import arti
 
-x = torch.randn(2, 16, 64)
 layer = arti.ARTILayer()
-
+x = torch.randn(2, 8, 64)
 assert torch.equal(layer(x), x)
-assert arti.component_ref(layer) == arti.canonical_contract_reference("arti/layer@3")
-```
 
-For configured execution, build a `FederatedProgram` or a `ProgramGraph` from
-`arti.mechanisms`, then provide it to `ARTILayer`. The program owns its local
-iteration, Formula Fabric operations, resource bindings, and traversal; the
-host layer preserves the ordinary tensor boundary.
-
-## Core Concepts
-
-| Concept | Role |
-| --- | --- |
-| `ARTILayer` | Host boundary for a federated program or resource graph. |
-| `FederatedProgram` | A composable program with sealed Query assets, local iteration, and a terminal tensor ABI. |
-| `FormulaFabricV2` | Typed, bounded tensor operations and explicit operands. |
-| `ProgramGraph` | Program nodes, resource nodes, connections, and executable graph state. |
-| `TensorResource` | A logical tensor resource with an explicit lifecycle, binding, and views. |
-| `CreditBoundary` | Identity in the forward pass with an explicit rule for gradient flow through a connection. |
-| `OptimizerExecutionPlan` | Learning regions with separate AdamW state and optional region-specific losses. |
-| `fabric_layer` | Register a PyTorch module as a typed Fabric node or a differentiable node candidate. |
-| `Retrieve` / `RecallExecutor` | Retrieval and bounded execution helpers for standalone use. |
-| `ExecutionPolicy` | Limits and traces execution without changing an artifact. |
-| `Half`, `Fold`, `UnFold`, `Pulse` | Independently usable tensor layers and workspace operations. |
-
-These components are optional. A program can use only the pieces its tensor
-contract needs.
-
-## Attach To A Host Model
-
-ARTI can attach a configured layer at selected tensor boundaries without
-rewriting the host model class.
-
-```python
-import arti
-
-layer = arti.ARTILayer()
+# Configure the graph or federation before attaching a useful program.
+layer = arti.ARTILayer(graph=graph, graph_program_id="forward",
+                      graph_input_resource_id="input",
+                      graph_output_resource_id="output")
 model = arti.ARTI.attach(model, layer, layers="model.layers.*")
-
-model.arti.save("adapter.arti.st")
-restored = arti.ARTI.load(fresh_model, "adapter.arti.st", layer=layer)
+session = model.arti.trainer(objective="model_loss")
 ```
 
-Attachment preserves the host model type and restores tensor-tree structure,
-dtype, layout, and position at the boundary. See the
-[Unified Attachment guide](docs/unified-attachment.md).
+The [developer guide](docs/guides/new-developer.md) and
+[Formula Fabric guide](docs/guides/formula-fabric.md) cover typed operations,
+named ports, routes, parallel stages, joins, loops, tensor resources and
+compiler boundaries. [Learning boundaries](docs/guides/learning-boundaries.md)
+allow independently owned optimizer domains and region-specific objectives.
 
-## Artifacts And Component Identity
+Reusable operations live in `arti.mechanisms`. Retired layered Recall APIs live
+only in `arti.legacy`. Component contracts use content-addressed provenance;
+package versions and component identities are independent.
 
-`arti.save()` and `arti.load()` use SafeTensors alongside architecture metadata
-and SHA-256 locks. Component identities, component contracts, and package
-versions are separate. This lets a saved program state declare exactly which
-components and tensor contracts it requires.
+## Native JAX
 
-Named compatible Banks and program assets can be composed without silently
-losing source identity. Persistent resources are explicit program state rather
-than hidden Python side effects.
-
-## Status
-
-ARTI 3.1.0a3 is an alpha release. `ARTILayer`, component identity, artifact
-contracts, Formula Fabric, program graphs, Federal execution, and resource
-operations are available for structured experimentation and integration.
-
-Public API is not yet frozen for the alpha program/runtime surfaces. Alpha does
-not claim broad downstream superiority, a production service SLA, full JAX
-parity, or universal acceleration. Dynamic execution only becomes faster when
-the selected program, tensor shapes, and backend can be compiled efficiently.
-
-The `arti.legacy` namespace contains retired compatibility readers for historical
-artifacts. New code should use `arti`, `arti.nn`, and `arti.mechanisms`.
-
-## Documentation
-
-- [Stable Release Surface](docs/stable-release-surface.md)
-- [Unified Attachment](docs/unified-attachment.md)
-- [Formula Fabric](docs/formula-fabric.md)
-- [Federal Contracts](docs/federal-contracts.md)
-- [Program Roles And Resources](docs/reference/program-roles.md)
-- [Operable Tensor Port](docs/operable-tensor-port.md)
-- [Component Provenance](docs/component-provenance.md)
-- [Public API Reference](docs/api/public.md)
-
-## Development
+`arti.jax` binds the same Formula/ProgramGraph declarations to native array
+execution, with explicit parameter and forward-state PyTrees. Use `jit`, `grad`,
+`vmap` and fixed-horizon `scan`; integrate custom native modules or Flax without
+running Torch operations in a compiled JAX invocation.
 
 ```bash
-uv sync --locked --extra dev
-uv run --extra dev pytest
-uv build
+uv sync --extra dev --extra jax --extra flax
+python examples/jax_native_training.py
 ```
 
-ARTI is released under the [MIT License](LICENSE). Citation metadata is in
-[`CITATION.cff`](CITATION.cff).
+Read the [native JAX guide](docs/guides/jax-backend.md) for supported atoms,
+resource state, native overrides and limitations. This is not full parity with
+every Torch dynamic search, custom VJP or optimizer-domain engine.
+
+## Assets And Support
+
+ARTI uses SafeTensors and validated component/graph metadata instead of Python
+pickle for its model assets. Frozen host weights remain separate from adapter
+exports. Custom Python layers still require their reconstruction code.
+
+[Stability](STABILITY.md) distinguishes supported workflow contracts from
+experimental component surfaces. [Release checks](docs/guides/release.md)
+cover software correctness, installation, documentation and privacy. They do
+not imply general task superiority or universal acceleration.
+
+```bash
+uv run --extra dev python scripts/quality_gate.py quick --fail-fast
+uv run --extra dev --extra qwen --extra serve python scripts/quality_gate.py recipes --fail-fast
+```
+
+MIT licensed. Designed and maintained by [Thiocy](https://github.com/Thiocy).

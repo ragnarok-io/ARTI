@@ -9,6 +9,7 @@ lock that binds source, structure, plan, environment, and weights.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -25,6 +26,9 @@ from .fit.project import default_loss, run_model, split_batch
 from .fit.runtime import adapter_context
 from .providers import LoadedPretrained, ProviderInspection, provider_report, resolve_provider
 from .serialization import ARTILoadResult, ARTISaveResult, load as load_st, save as save_st
+from .training_binding import TrainingBinding
+from .training_config import ARTITrainingConfig
+from .training_run import ARTITrainingRunConfig, RunReporter
 
 
 PRETRAINED_PLAN_FORMAT = "arti.pretrained-plan"
@@ -62,18 +66,7 @@ class TrainingSpec:
         ).validate()
 
     def validate(self) -> "TrainingSpec":
-        if self.engine not in {"torch", "transformers", "accelerate"}:
-            raise ValueError("training engine must be 'torch', 'transformers', or 'accelerate'")
-        if self.learning_rate <= 0:
-            raise ValueError("training learning_rate must be positive")
-        if self.steps < 0:
-            raise ValueError("training steps must be non-negative")
-        if self.mixed_precision not in {"no", "fp16", "bf16"}:
-            raise ValueError("training mixed_precision must be 'no', 'fp16', or 'bf16'")
-        if self.gradient_accumulation_steps <= 0:
-            raise ValueError("gradient_accumulation_steps must be positive")
-        if self.device not in {"auto", "cpu", "cuda"}:
-            raise ValueError("training device must be 'auto', 'cpu', or 'cuda'")
+        ARTITrainingConfig(**asdict(self))
         return self
 
 
@@ -162,6 +155,10 @@ class PretrainedFitResult:
     trainer: Any | None = None
     optimizer: torch.optim.Optimizer | None = None
     scheduler: Any | None = None
+    session: Any | None = None
+    checkpoint_path: Path | None = None
+    run_directory: Path | None = None
+    stop_reason: str = "steps_completed"
 
     @property
     def model(self) -> Any:
@@ -184,6 +181,23 @@ class _ComponentBundle(nn.Module):
     def __init__(self, components: Mapping[str, nn.Module]) -> None:
         super().__init__()
         self.components = nn.ModuleDict(dict(components))
+
+
+class _PretrainedAdapterBundle(nn.Module):
+    def __init__(self, workflow: "ARTIPretrained") -> None:
+        super().__init__()
+        self.adapters = nn.ModuleDict()
+        self.gates = nn.ParameterDict()
+        self.paths = []
+        for component in workflow.plan_value.components:
+            modules = dict(workflow.projects[component.name].model.named_modules())
+            for selected in component.selected:
+                wrapper = modules[selected["name"]]
+                key = f"adapter_{len(self.paths)}"
+                self.adapters[key] = wrapper.adapter
+                if wrapper.output_gate is not None:
+                    self.gates[key] = wrapper.output_gate
+                self.paths.append(f"{component.name}:{selected['name']}")
 
 
 class ARTIPretrained:
@@ -211,6 +225,8 @@ class ARTIPretrained:
         self.plan_value: ARTIPlan | None = None
         self.applied = False
         self.fit_result: PretrainedFitResult | None = None
+        self._training_session: Any | None = None
+        self._resume_artifact: Path | None = None
 
     @property
     def model(self) -> Any:
@@ -426,40 +442,78 @@ class ARTIPretrained:
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         trainer_kwargs: Mapping[str, Any] | None = None,
+        steps: int | None = None,
+        run: ARTITrainingRunConfig | None = None,
+        eval_data: Iterable[Any] | None = None,
+        evaluation_weight: Callable[[Any], float] | None = None,
+        reporter: RunReporter | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+        resume_from_checkpoint: str | Path | None = None,
     ) -> PretrainedFitResult:
         if not self.applied:
             self.apply()
         assert self.plan_value is not None
-        spec = self.plan_value.training.validate()
-        if spec.engine == "transformers":
-            result = self._fit_transformers(train_data, spec=spec, trainer_kwargs=trainer_kwargs)
-        elif spec.engine == "accelerate":
-            result = self._fit_accelerate(train_data, spec=spec, loss_fn=loss_fn, step_fn=step_fn, optimizer=optimizer, scheduler=scheduler)
-        else:
-            result = self._fit_torch(train_data, spec=spec, loss_fn=loss_fn, step_fn=step_fn, optimizer=optimizer, scheduler=scheduler)
+        session = self.trainer(loss_fn=loss_fn, step_fn=step_fn, optimizer=optimizer, scheduler=scheduler, resume_from_checkpoint=resume_from_checkpoint)
+        fitted = session.fit(train_data, steps=steps, trainer_kwargs=trainer_kwargs, run=run, eval_data=eval_data, evaluation_weight=evaluation_weight, reporter=reporter, stop_requested=stop_requested)
+        result = PretrainedFitResult(self, fitted.engine, fitted.steps, fitted.loss_history, trainer=session.engine_object, optimizer=session.optimizer, scheduler=session.scheduler, session=session, checkpoint_path=fitted.checkpoint_path, run_directory=fitted.run_directory, stop_reason=fitted.stop_reason)
         self.fit_result = result
         return result
+
+    def trainer(self, *, objective=None, loss_fn=None, step_fn=None, optimizer=None, scheduler=None, resume_from_checkpoint=None, reset=False):
+        from .attachment_training import ARTITrainingSession, _bind_objective, _optimizer_parameter_ids, resolve_attachment_objective
+
+        if not self.applied:
+            self.apply()
+        if objective is not None and (loss_fn is not None or step_fn is not None):
+            raise ValueError("choose objective or the loss_fn/step_fn adaptation")
+        if self._training_session is not None and not reset:
+            session = self._training_session
+            if optimizer is not None:
+                if _optimizer_parameter_ids(optimizer) != {id(p) for p in session.binding.parameters()}:
+                    raise ValueError("optimizer parameters must match the pretrained trainable role")
+                session.optimizer = optimizer
+            if scheduler is not None:
+                session.scheduler = scheduler
+            if objective is not None or loss_fn is not None or step_fn is not None:
+                session.objective = resolve_attachment_objective(objective) if objective is not None else _pretrained_objective(self._state_model(), loss_fn, step_fn)
+                session._objective = _bind_objective(session.objective)
+            if resume_from_checkpoint is not None:
+                if session.config.engine == "transformers":
+                    session.resume_from_checkpoint = resume_from_checkpoint
+                else:
+                    session.load_checkpoint(resume_from_checkpoint)
+            return session
+        spec = self.plan_value.training.validate()
+        config = ARTITrainingConfig(engine=spec.engine, learning_rate=spec.learning_rate, steps=spec.steps, mixed_precision=spec.mixed_precision, gradient_accumulation_steps=spec.gradient_accumulation_steps, device=spec.device, distributed=spec.distributed)
+        model = self._state_model()
+        binding = TrainingBinding(
+            model,
+            owner=self,
+            kind="pretrained",
+            state_module=self._training_state_model,
+            save_checkpoint=self._save_training_checkpoint,
+            load_checkpoint=self._load_training_checkpoint,
+            checkpoint_metadata={"plan_fingerprint": self.plan_value.fingerprint},
+        )
+        self._training_session = ARTITrainingSession(binding, config=config, objective=objective or _pretrained_objective(model, loss_fn, step_fn), optimizer=optimizer, scheduler=scheduler, resume_from_checkpoint=resume_from_checkpoint or (None if reset else self._resume_artifact))
+        return self._training_session
 
     def export(self, path: str | Path = "arti.st", *, include_base: bool = False) -> PretrainedExportResult:
         if not self.applied or self.plan_value is None:
             raise ValueError("call apply() before export()")
         target = Path(path)
-        state_model = self._state_model()
+        state_model = self._state_model() if include_base else self._training_state_model()
+        session = self._training_session
         saved = save_st(
             state_model,
             target,
-            config={"pretrained_plan_fingerprint": self.plan_value.fingerprint},
-            scope="all" if include_base else "trainable",
-            optimizer=None if self.fit_result is None else self.fit_result.optimizer,
-            scheduler=None if self.fit_result is None else self.fit_result.scheduler,
+            config={"pretrained_plan_fingerprint": self.plan_value.fingerprint, "pretrained_state_scope": "model" if include_base or not self.plan_value.insertion["freeze_base"] else "adapters"},
+            scope="all",
+            optimizer=None if session is None else session.optimizer,
+            scheduler=None if session is None else session.scheduler,
             training_state=None
-            if self.fit_result is None
-            else {
-                "engine": self.fit_result.engine,
-                "steps": self.fit_result.steps,
-                "loss_history": list(self.fit_result.loss_history),
-                "plan_fingerprint": self.plan_value.fingerprint,
-            },
+            if session is None
+            else session._checkpoint_state(),
         )
         stem = target.with_suffix("")
         plan_path = stem.with_name(f"{stem.name}.plan.json")
@@ -491,6 +545,8 @@ class ARTIPretrained:
             builder.detach()
         self.applied = False
         self.fit_result = None
+        self._training_session = None
+        self._resume_artifact = None
         return self.model
 
     def load_weights(
@@ -503,10 +559,14 @@ class ARTIPretrained:
     ) -> ARTILoadResult:
         if not self.applied:
             raise ValueError("apply the matching ARTIPlan before loading pretrained ARTI weights")
-        result = load_st(path, model=self._state_model(), optimizer=optimizer, scheduler=scheduler, map_location=map_location)
+        result = self._load_training_checkpoint(path, optimizer=optimizer, scheduler=scheduler, map_location=map_location)
         state = result.training_state
         if isinstance(state, Mapping) and state.get("plan_fingerprint") != self.plan_value.fingerprint:
             raise ValueError("arti.st training checkpoint belongs to a different ARTIPlan")
+        if state is not None:
+            self._resume_artifact = Path(path)
+            if self._training_session is not None:
+                self._training_session.load_checkpoint(path, map_location=map_location)
         return result
 
     def doctor(self) -> dict[str, Any]:
@@ -538,137 +598,20 @@ class ARTIPretrained:
             return self.model
         return _ComponentBundle(self.inspection.components)
 
-    def _fit_torch(
-        self,
-        train_data: Iterable[Any],
-        *,
-        spec: TrainingSpec,
-        loss_fn: Callable[[Any, Any], torch.Tensor] | None,
-        step_fn: Callable[[Any, Any], torch.Tensor] | None,
-        optimizer: torch.optim.Optimizer | None,
-        scheduler: Any | None,
-    ) -> PretrainedFitResult:
-        return self._manual_train(train_data, spec=spec, loss_fn=loss_fn, step_fn=step_fn, optimizer=optimizer, scheduler=scheduler)
+    def _training_state_model(self) -> nn.Module:
+        return _PretrainedAdapterBundle(self) if self.plan_value.insertion["freeze_base"] else self._state_model()
 
-    def _fit_accelerate(
-        self,
-        train_data: Iterable[Any],
-        *,
-        spec: TrainingSpec,
-        loss_fn: Callable[[Any, Any], torch.Tensor] | None,
-        step_fn: Callable[[Any, Any], torch.Tensor] | None,
-        optimizer: torch.optim.Optimizer | None,
-        scheduler: Any | None,
-    ) -> PretrainedFitResult:
-        try:
-            from accelerate import Accelerator, DistributedDataParallelKwargs
-        except ImportError as exc:
-            raise RuntimeError("accelerate training requires `uv sync --extra qwen` or `uv sync --extra sd`") from exc
-        state_model = self._state_model()
-        params = [parameter for parameter in state_model.parameters() if parameter.requires_grad]
-        opt = optimizer or torch.optim.AdamW(params, lr=spec.learning_rate)
-        accelerator = Accelerator(
-            mixed_precision=spec.mixed_precision,
-            gradient_accumulation_steps=spec.gradient_accumulation_steps,
-            cpu=spec.device == "cpu",
-            kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)] if spec.distributed else None,
-        )
-        if spec.distributed and accelerator.num_processes < 2:
-            raise RuntimeError("distributed=True requires launching with `torchrun` or a multi-process `accelerate launch`")
-        if scheduler is None:
-            prepared_model, opt, prepared_loader = accelerator.prepare(state_model, opt, train_data)
-            prepared_scheduler = None
-        else:
-            prepared_model, opt, prepared_loader, prepared_scheduler = accelerator.prepare(state_model, opt, train_data, scheduler)
-        history = _training_loop(
-            prepared_model,
-            prepared_loader,
-            steps=spec.steps,
-            optimizer=opt,
-            loss_fn=loss_fn,
-            step_fn=step_fn,
-            backward=accelerator.backward,
-            accumulation_context=lambda: accelerator.accumulate(prepared_model),
-            scheduler=prepared_scheduler,
-        )
-        return PretrainedFitResult(
-            self,
-            "accelerate",
-            spec.steps,
-            tuple(history),
-            trainer=accelerator,
-            optimizer=opt,
-            scheduler=prepared_scheduler,
-        )
+    def _save_training_checkpoint(self, path, *, optimizer=None, scheduler=None, training_state=None):
+        return save_st(self._training_state_model(), path, config={"pretrained_plan_fingerprint": self.plan_value.fingerprint, "pretrained_state_scope": "adapters" if self.plan_value.insertion["freeze_base"] else "model"}, optimizer=optimizer, scheduler=scheduler, training_state=training_state)
 
-    def _fit_transformers(self, train_data: Any, *, spec: TrainingSpec, trainer_kwargs: Mapping[str, Any] | None) -> PretrainedFitResult:
-        if not isinstance(self.model, nn.Module):
-            raise ValueError("the transformers engine requires a single nn.Module model")
-        try:
-            from transformers import Trainer, TrainingArguments
-        except ImportError as exc:
-            raise RuntimeError("transformers training requires `uv sync --extra qwen`") from exc
-        kwargs = dict(trainer_kwargs or {})
-        arguments = kwargs.pop("args", None)
-        if arguments is None:
-            argument_values = dict(kwargs.pop("training_args", {}))
-            fields = getattr(TrainingArguments, "__dataclass_fields__", {})
-            for key in tuple(kwargs):
-                if key in fields:
-                    argument_values[key] = kwargs.pop(key)
-            resolved_arguments = {
-                "output_dir": str(argument_values.pop("output_dir", ".arti-trainer")),
-                "learning_rate": spec.learning_rate,
-                "max_steps": spec.steps,
-                "gradient_accumulation_steps": spec.gradient_accumulation_steps,
-                "fp16": spec.mixed_precision == "fp16",
-                "bf16": spec.mixed_precision == "bf16",
-                "report_to": [],
-            }
-            resolved_arguments.update(argument_values)
-            arguments = TrainingArguments(**resolved_arguments)
-        trainer = Trainer(model=self.model, args=arguments, train_dataset=train_data, **kwargs)
-        if spec.distributed and int(getattr(trainer.args, "world_size", 1)) < 2:
-            raise RuntimeError("distributed=True requires launching Trainer with torchrun or accelerate launch on at least two processes")
-        output = trainer.train()
-        history = tuple(float(row["loss"]) for row in trainer.state.log_history if "loss" in row)
-        steps = int(getattr(output, "global_step", spec.steps))
-        return PretrainedFitResult(
-            self,
-            "transformers",
-            steps,
-            history,
-            trainer=trainer,
-            optimizer=trainer.optimizer,
-            scheduler=trainer.lr_scheduler,
-        )
-
-    def _manual_train(
-        self,
-        train_data: Iterable[Any],
-        *,
-        spec: TrainingSpec,
-        loss_fn: Callable[[Any, Any], torch.Tensor] | None,
-        step_fn: Callable[[Any, Any], torch.Tensor] | None,
-        optimizer: torch.optim.Optimizer | None,
-        scheduler: Any | None,
-    ) -> PretrainedFitResult:
-        state_model = self._state_model()
-        params = [parameter for parameter in state_model.parameters() if parameter.requires_grad]
-        if not params:
-            raise ValueError("no trainable ARTI parameters are available")
-        opt = optimizer or torch.optim.AdamW(params, lr=spec.learning_rate)
-        history = _training_loop(
-            state_model,
-            train_data,
-            steps=spec.steps,
-            optimizer=opt,
-            loss_fn=loss_fn,
-            step_fn=step_fn,
-            scheduler=scheduler,
-        )
-        return PretrainedFitResult(self, "torch", spec.steps, tuple(history), optimizer=opt, scheduler=scheduler)
-
+    def _load_training_checkpoint(self, path, *, optimizer=None, scheduler=None, map_location=None, load_checkpoint=True):
+        inspected = load_st(path, load_resources=False, load_checkpoint=False)
+        config = inspected.manifest["architecture"]["config"]
+        if config.get("pretrained_plan_fingerprint") != self.plan_value.fingerprint:
+            raise ValueError("arti.st training checkpoint belongs to a different ARTIPlan")
+        model = self._training_state_model() if config.get("pretrained_state_scope") == "adapters" else self._state_model()
+        device = next(self._state_model().parameters()).device if map_location is None else map_location
+        return load_st(path, model=model, optimizer=optimizer, scheduler=scheduler, map_location=device, load_checkpoint=load_checkpoint)
 
 def pretrained(
     source: str | Any,
@@ -846,52 +789,27 @@ def _mechanism_kwargs(features: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _training_loop(
-    model: nn.Module,
-    loader: Iterable[Any],
-    *,
-    steps: int,
-    optimizer: torch.optim.Optimizer,
-    loss_fn: Callable[[Any, Any], torch.Tensor] | None,
-    step_fn: Callable[[Any, Any], torch.Tensor] | None,
-    backward: Callable[[torch.Tensor], None] | None = None,
-    accumulation_context: Callable[[], Any] | None = None,
-    scheduler: Any | None = None,
-) -> list[float]:
-    if steps == 0:
-        return []
-    iterator = iter(loader)
-    history = []
-    model.train()
-    for _ in range(steps):
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            iterator = iter(loader)
-            batch = next(iterator)
-        context = accumulation_context() if accumulation_context is not None else _NullContext()
-        with context:
-            if step_fn is not None:
-                loss = step_fn(model, batch)
-            else:
-                inputs, target = split_batch(batch)
-                output = run_model(model, inputs)
-                loss = default_loss(output, target) if loss_fn is None else loss_fn(output, target)
-            optimizer.zero_grad(set_to_none=True)
-            (backward or torch.Tensor.backward)(loss)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-        history.append(float(loss.detach().cpu()))
-    return history
+def _pretrained_objective(model: nn.Module, loss_fn=None, step_fn=None):
+    if loss_fn is not None and step_fn is not None:
+        raise ValueError("choose loss_fn or step_fn, not both")
+    if step_fn is not None:
+        return step_fn
+    signature = inspect.signature(model.forward)
+    accepts_labels = "labels" in signature.parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
 
+    def objective(host, batch):
+        inputs, target = split_batch(batch)
+        if isinstance(batch, Mapping) and "labels" in batch and accepts_labels:
+            output = host(**batch)
+        else:
+            output = run_model(host, inputs)
+        native_loss = output.get("loss") if isinstance(output, Mapping) else getattr(output, "loss", None)
+        if loss_fn is None and isinstance(native_loss, torch.Tensor):
+            return native_loss
+        return default_loss(output, target) if loss_fn is None else loss_fn(output, target)
 
-class _NullContext:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        return False
+    objective._arti_native_model_loss = loss_fn is None and accepts_labels
+    return objective
 
 
 def _environment_versions() -> dict[str, str | None]:

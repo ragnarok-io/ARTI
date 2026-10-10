@@ -61,10 +61,7 @@ and stream/phase metadata together.
 
 Run the mechanism check:
 
-```bash
-uv run --extra dev python benchmarks/run_membrane_visibility_routing.py
-uv run --extra dev python benchmarks/verify_membrane_visibility_routing.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Passing this check means the routing and visibility invariants hold locally. It
 does not claim that an LLM has learned when to use inner speech; that requires a

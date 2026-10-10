@@ -186,10 +186,7 @@ dispatch, not evidence that every dynamic Federation is compilable.
 
 The small scheduler-boundary comparison can be replayed with:
 
-```powershell
-uv run python benchmarks/federal_tensor_query_compilation.py `
-  --device cpu --backend eager --output .tmp/federal-tensor-query-cpu.json
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 It compares an object-based Python reference, tensorized eager execution, and
 `torch.compile(fullgraph=True)`.  Use `--backend inductor` only when the local
@@ -269,11 +266,7 @@ consumer cannot mistake padded storage for the logical length.
 
 The state-lane control benchmark can be replayed with:
 
-```powershell
-uv run python benchmarks/federal_stateful_graph_compilation.py `
-  --device cpu --backend eager --max-steps 16 `
-  --output .tmp/federal-stateful-graph-cpu.json
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Its comparison is deliberately narrow: Python reference loop versus the same
 explicit-state graph in eager and `torch.compile(fullgraph=True)`. It reports
@@ -298,12 +291,7 @@ intentional because Python code and a live Federal runtime are not serialized.
 The replay harness records the comparison evidence without becoming a runtime
 dependency:
 
-```powershell
-uv run python benchmarks/federal_compiler_replay.py --device cpu `
-  --output-dir .tmp/federal-replay-cpu
-uv run python benchmarks/federal_compiler_replay.py --device cuda `
-  --output-dir .tmp/federal-replay-cuda
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The report contains Federal-to-path and Federal-to-compiled errors, every
 intermediate node error, validated terminal ABI fields, a held-out task MSE,

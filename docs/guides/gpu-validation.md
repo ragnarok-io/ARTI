@@ -12,21 +12,14 @@ GPU-readiness has three distinct levels:
 
 Run the backend capability report first:
 
-```bash
-uv run --extra dev arti doctor --allow-cpu-torch --output benchmarks/results/doctor.md
-uv run --extra dev python benchmarks/report_backend_capabilities.py
-uv run --extra dev python benchmarks/verify_backend_capabilities.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 `arti doctor` is the installed-package entrypoint for the same backend readiness model used by the benchmark reports. It writes JSON when `--output` ends in `.json` and Markdown when it ends in `.md`. Omit `--allow-cpu-torch` on machines where visible NVIDIA hardware must be backed by a CUDA-enabled PyTorch runtime.
 The doctor payload includes `torch_cuda_smoke_status` and `torch_cuda_smoke`, so CI can distinguish a CUDA-enabled PyTorch runtime that actually passed a tiny allocation/compute smoke check from a CPU-only or failed runtime.
 
 On a machine with NVIDIA hardware, require PyTorch CUDA runtime before claiming GPU-ready execution:
 
-```bash
-uv run --extra dev python benchmarks/verify_torch_cuda_runtime.py
-uv run --extra dev arti doctor --require-cuda-smoke
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 For an installed-package runtime smoke check, call:
 
@@ -41,9 +34,7 @@ print(report["smoke_status"])
 
 CI or CPU-only environments may run the same verifier in reporting mode:
 
-```bash
-uv run --extra dev python benchmarks/verify_torch_cuda_runtime.py --allow-cpu-torch
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 If `nvidia-smi` shows a GPU but the report says `nvidia_hardware_detected_torch_cpu`, install a CUDA-enabled PyTorch build for your platform. Use the official PyTorch install selector and verify with:
 
@@ -83,17 +74,10 @@ uv run --extra dev pytest tests/test_device.py tests/test_serialization.py tests
 
 Run the scaling profile:
 
-```bash
-uv run --extra dev python benchmarks/profile_scaling.py --device cuda
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Run CUDA evidence packet generation and verification when a CUDA device is available:
 
-```bash
-uv run --extra dev python benchmarks/verify_torch_cuda_runtime.py
-uv run --extra dev python benchmarks/profile_scaling.py --device cuda
-uv run --extra dev python benchmarks/build_cuda_evidence_packet.py
-uv run --extra dev python benchmarks/verify_cuda_evidence_packet.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 CPU-only runs are useful for correctness but do not prove GPU memory scaling.

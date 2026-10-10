@@ -1,14 +1,14 @@
 [project]
 name = "arti-fit"
-version = "3.1.0a3"
-description = "AI x RT: dynamic latent tensor representation layers for PyTorch."
+version = "3.2.0"
+description = "Neural program graphs, tensor resources and task training workflows for PyTorch and JAX."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Thiocy" }]
 keywords = ["pytorch", "neural-networks", "latent-tensor", "representation-learning"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -35,12 +35,21 @@ torch = [
 jax = [
     "jax>=0.4.30",
 ]
+flax = [
+    "jax>=0.4.30",
+    "flax>=0.10",
+]
 web = [
     "onnx>=1.16",
     "onnxscript>=0.3",
 ]
+serve = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 dev = [
     "build>=1.2",
+    "httpx>=0.27",
     "hatchling>=1.25",
     "jsonschema>=4.23,<5",
     "numpy>=2.0",
@@ -93,6 +102,7 @@ all = [
     "torch>=2.2",
     "torchvision>=0.26",
     "jax>=0.4.30",
+    "flax>=0.10",
     "numpy>=2.0",
     "onnx>=1.16",
     "onnxruntime>=1.22,<1.24; python_version < '3.11'",
@@ -206,5 +216,6 @@ line-ending = "auto"
 
 [dependency-groups]
 dev = [
+    "scikit-learn>=1.7.2",
     "triton-windows>=3.7.1.post27 ; sys_platform == 'win32'",
 ]

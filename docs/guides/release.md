@@ -11,6 +11,13 @@ requests. It waits for that workflow before building or publishing. The CI
 workflow runs the package test suite, builds the documentation with strict link
 checks, and validates the wheel and source distribution.
 
+The public matrix covers Windows and Ubuntu with Python 3.10/3.11/3.12.
+The `quick`, `mainline` and `recipes` software gates cover public contracts,
+native graphs, compilation, task continuation, evaluation and ASGI serving.
+The separate native JAX job installs JAX/Flax and runs the Formula/ProgramGraph
+gate and native training example. Tests do not download a pretrained model or
+launch research GPU training. Optional backend/hardware limits remain explicit.
+
 The release build then runs:
 
 ```bash
@@ -28,6 +35,12 @@ version-bound inventory only after reviewing both built archives; it is a
 release-check input and is not included in either distribution.
 
 ## Releasing
+
+Before copying a new development snapshot, compare public source-owned fixes
+against the private source and backport missing repairs. Preserve release-owned
+distribution identity, version, citation, archive audits and publishing workflows.
+Review only tracked approved source and examples, not the working directory's
+training outputs, data, notes or caches. The website is a separate deployment.
 
 1. Update the package version in `pyproject.toml` and `src/arti/_version.py`.
 2. Add an exact `## <version>` heading to `CHANGELOG.md`, update `CITATION.cff`

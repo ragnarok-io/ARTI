@@ -125,7 +125,7 @@ graph-risk estimator for a mixed-version hierarchy.
 
 ## Cross-path completed products (reference search)
 
-The repository experiment entry in `benchmarks/_federated_recursive_search.py`
+The repository experiment entry in `research-only validation entrypoint`
 uses the same `advance_frontier` implementation as native V7 execution:
 
 ```python

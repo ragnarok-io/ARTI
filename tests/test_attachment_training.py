@@ -56,6 +56,9 @@ def test_toml_attach_config_roundtrip_and_reproducible_lock(tmp_path) -> None:
     assert attached.arti.validate_lock(first)["format"] == "arti.attach.lock"
     artifact = tmp_path / "configured.arti.st"
     attached.arti.save(artifact)
+    portable = arti.load(artifact, load_resources=False).manifest["architecture"]["config"]["unified_attachment"]["declaration"]
+    assert "source_path" not in portable
+    assert portable["source_sha256"] == loaded.source_sha256
     restored = arti.ARTI.load(model(), artifact, layer=trainable_layer())
     restored_session = restored.arti.trainer()
     assert restored_session.config.mixed_precision == "bf16"

@@ -13,7 +13,7 @@ from arti.component_graph import ComponentGraphError, component_graph, validate_
 class Composite(nn.Module):
     def __init__(self, *, shared: bool = False) -> None:
         super().__init__()
-        self.recall = arti.Recall(dim=4, slots=2)
+        self.retrieve = arti.Retrieve(dim=4, slots=2)
         self.half = arti.Half()
         projection = nn.Linear(4, 4)
         self.left = projection
@@ -21,7 +21,7 @@ class Composite(nn.Module):
         self.scale = nn.Parameter(torch.ones(()))
 
     def component_bindings(self):
-        return [("recall.output", "half.input")]
+        return [("retrieve.output", "half.input")]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.right(self.left(x)) * self.scale
@@ -33,7 +33,7 @@ def test_component_graph_describes_nested_components_and_bindings() -> None:
     assert graph["format"] == "arti.component.graph"
     assert graph["schema_version"] == 2
     assert graph["root"] == "node-0000"
-    assert any(node["ref"] == arti.component_ref(Composite().recall) for node in graph["nodes"])
+    assert any(node["ref"] == arti.component_ref(Composite().retrieve) for node in graph["nodes"])
     assert any(
         node["ref"] == arti.component_ref(Composite()._modules["half"])
         for node in graph["nodes"]
@@ -43,7 +43,7 @@ def test_component_graph_describes_nested_components_and_bindings() -> None:
         assert node["contract"]["mechanism_id"] == node["mechanism_id"]
         assert node["instance_sha256"].startswith("sha256:")
     assert graph["bindings"] == [
-        {"kind": "data", "from": "recall.output", "to": "half.input"}
+        {"kind": "data", "from": "retrieve.output", "to": "half.input"}
     ]
     assert graph["closure_fingerprint"] == arti.component_closure_fingerprint(graph)
     assert validate_component_graph(graph) == graph
@@ -90,16 +90,16 @@ def test_component_graph_rejects_cycles() -> None:
 
 def test_component_graph_rejects_noncanonical_or_drifting_dependencies() -> None:
     graph = component_graph(Composite())
-    recall = next(node for node in graph["nodes"] if node["ref"] is not None)
+    retrieve = next(node for node in graph["nodes"] if node["ref"] is not None)
 
-    recall["dependencies"] = ["arti/recall@1"]
+    retrieve["dependencies"] = ["arti/retrieve@1"]
     graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
     with pytest.raises(ComponentGraphError, match="canonical contract references"):
         validate_component_graph(graph)
 
     graph = component_graph(Composite())
-    recall = next(node for node in graph["nodes"] if node["ref"] is not None)
-    recall["dependencies"] = [arti.component_ref(Composite().recall)]
+    retrieve = next(node for node in graph["nodes"] if node["ref"] is not None)
+    retrieve["dependencies"] = [arti.component_ref(Composite().retrieve)]
     graph["closure_fingerprint"] = arti.component_closure_fingerprint(graph)
     with pytest.raises(ComponentGraphError, match="disagree with requires edges"):
         validate_component_graph(graph)

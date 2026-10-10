@@ -576,9 +576,7 @@ def test_tensor_plane_component_identities_are_versioned() -> None:
     assert arti.component_ref(port).startswith("arti/operable-tensor-port@sha256:")
     assert arti.component_ref(snapshot).startswith("arti/operable-tensor-snapshot@sha256:")
     assert arti.component_ref(canvas).startswith("arti/shared-canvas@sha256:")
-    assert arti.component_ref(mechanisms.SharedCanvasFold(spec)).startswith(
-        "arti/shared-canvas-fold@sha256:"
-    )
+    assert arti.component_ref(mechanisms.SharedCanvasFold(spec)).startswith("arti/shared-canvas-fold@sha256:")
     assert arti.component_ref(instruction).startswith("arti/tensor-edit-instruction@sha256:")
     assert arti.component_ref(result).startswith("arti/tensor-edit-result@sha256:")
 

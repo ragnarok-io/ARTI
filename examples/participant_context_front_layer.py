@@ -1,4 +1,4 @@
-"""Recommended front-layer participant phase placement.
+"""Classic front-layer participant phase placement.
 
 External participant/source phase should be applied while hidden states still
 align one-to-one with the original tokens.
@@ -9,7 +9,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from arti import ARTILayer, build_participant_context
+from arti import build_participant_context
+from arti.legacy import ARTILayer
 
 
 class FrontARTIEncoder(nn.Module):

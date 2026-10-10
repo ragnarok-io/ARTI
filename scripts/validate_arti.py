@@ -33,10 +33,10 @@ def validate_default_layer() -> None:
     x = torch.randn(2, 5, 8)
     y, result = layer(x, return_info=True)
 
-    _assert(arti.component_ref(layer) == "arti/layer@2", "default layer identity mismatch")
-    _assert(isinstance(layer.pulse, arti.mechanisms.AdaptivePulse), "default layer is not AdaptivePulse-backed")
-    _assert(torch.equal(y, x), "empty AdaptivePulse graph is not identity")
-    _assert(result.value_identity, "identity Pulse did not retain value identity")
+    _assert(arti.component_ref(layer).startswith("arti/layer@sha256:"), "default layer identity mismatch")
+    _assert(layer.program is None, "default layer is not an explicit identity shell")
+    _assert(torch.equal(y, x), "identity shell is not value-preserving")
+    _assert(result.value_identity, "identity shell did not retain value identity")
 
 
 def validate_shapes() -> None:

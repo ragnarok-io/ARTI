@@ -310,7 +310,7 @@ class ARTIAdapterWrapper(nn.Module):
         return blended
 
     def _forward_adapter(self, tensor: Tensor, **kwargs) -> Tensor:
-        use_mixed_precision = tensor.device.type == "cuda" and tensor.dtype in {
+        use_mixed_precision = tensor.device.type in {"cpu", "cuda"} and tensor.dtype in {
             torch.float16,
             torch.bfloat16,
         }

@@ -21,10 +21,7 @@ one field is infinite.
 
 Run on CUDA and verify the recorded artifact:
 
-```bash
-uv run --extra dev python benchmarks/run_recall_scaling_law.py --device cuda
-uv run --extra dev python benchmarks/verify_recall_scaling_law.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The deployment rule is simple: scale slots, stages, or `*.recall.arti.st`
 experts for retained experience; when no compatible bounded field can accept

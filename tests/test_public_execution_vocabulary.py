@@ -25,3 +25,15 @@ def test_retrieve_and_execution_policy_have_distinct_contracts() -> None:
     assert fixed.max_steps == fixed.min_steps == 3
     assert adaptive.budget.max_steps == 6
     assert adaptive.budget.min_steps == 2
+
+
+def test_integration_and_local_iteration_are_not_generic_refinement() -> None:
+    integration = mechanisms.WriteIntegrationPolicy.fixed(3)
+    local = mechanisms.LocalIterationPolicy(min_steps=2, max_steps=5)
+
+    assert arti.component_ref(integration).startswith("arti/write-integration-policy@sha256:")
+    assert arti.component_ref(local).startswith("arti/local-iteration-policy@sha256:")
+    assert not hasattr(mechanisms, "WriteRefinePolicy")
+    assert not hasattr(mechanisms, "BankLocalRefinePolicy")
+    assert legacy.WriteRefinePolicy is mechanisms.WriteIntegrationPolicy
+    assert legacy.BankLocalRefinePolicy is mechanisms.LocalIterationPolicy

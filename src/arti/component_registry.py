@@ -7153,6 +7153,7 @@ def validate_component_provenance(
     *,
     allow_legacy: bool = False,
     artifact_scope: bool = False,
+    native_graph_components: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Validate an artifact component graph against the local registry."""
 
@@ -7212,7 +7213,8 @@ def validate_component_provenance(
             raise ComponentCompatibilityError(
                 f"component {identity.reference!r} is {registration.lifecycle}; pass allow_legacy=True explicitly"
             )
-        if artifact_scope and registration.artifact_policy != "portable":
+        embedded = registration.artifact_policy == "runtime_only" and path in native_graph_components
+        if artifact_scope and registration.artifact_policy != "portable" and not embedded:
             raise ComponentCompatibilityError(
                 f"component {identity.reference!r} has artifact_policy="
                 f"{registration.artifact_policy!r} and cannot appear in arti.st"

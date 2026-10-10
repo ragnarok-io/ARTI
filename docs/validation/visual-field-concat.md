@@ -21,7 +21,4 @@ Pulse-output mixture, or additional trainable parameter is used. This supports
 Visual Field concat as an input-line expansion mechanism; it does not yet prove
 superiority on natural text corpora or arbitrary font distributions.
 
-```bash
-uv run --extra dev python benchmarks/run_visual_field_concat.py --device cuda
-uv run --extra dev python benchmarks/verify_visual_field_concat.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.

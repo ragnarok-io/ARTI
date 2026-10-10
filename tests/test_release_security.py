@@ -212,3 +212,11 @@ def test_archive_inventory_rejects_workspace_paths_without_echoing_them() -> Non
         "wheel: contains a disallowed archive path",
         "wheel: file inventory differs from the reviewed release manifest",
     ]
+
+
+def test_archive_inventory_never_admits_default_training_outputs() -> None:
+    names = ["arti/.arti-runs/example/run.json"]
+    count, digest = archive_inventory(names)
+    assert archive_member_findings(
+        "wheel", names, {"file_count": count, "paths_sha256": digest}
+    ) == ["wheel: contains a disallowed archive path"]

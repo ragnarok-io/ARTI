@@ -1,99 +1,40 @@
-# Stable Release Surface
+# Release Surface
 
-The private development line makes FederatedProgram execution the default
-``ARTILayer`` runtime. Public 3.0.13a5 remains an earlier released snapshot.
+The public distribution is `arti-fit`; import it as `arti`. Version 3.2.0
+connects neural programs to a complete documented local training workflow.
 
-## Default Layer
+## Runtime And Mechanisms
 
-`ARTILayer` is a host around a FederatedProgram graph:
+`arti.ARTILayer` and `arti.torch.ARTILayer` host a configured `FederatedProgram`
+or `ProgramGraph`. An unconfigured layer is strict identity. Reusable Formula,
+resource, topology, observation and execution operations live in
+`arti.mechanisms`; retired monolithic layers live in `arti.legacy`.
 
-```python
-import torch
-import arti
+Canonical component references are content-addressed. Component lifecycle,
+configuration and artifact policy remain explicit and independent of the
+package version. Advanced host/graph APIs retain their registry-declared alpha
+status; standalone stable mechanisms retain their declared contracts.
 
-layer = arti.ARTILayer()
-x = torch.randn(2, 8, 64)
-y = layer(x)
-```
+## Training And Tasks
 
-The unconfigured Federal shell is an exact identity. Configure a Federation
-when the layer should perform Program-local Execution and Formula Fabric work:
+Use `arti.trainer(model, ...)`, `model.arti.trainer(...)`, or
+`workflow.trainer()` to reach one `ARTITrainingSession`. The local Torch profile
+provides periodic assets, continuation and state-preserving evaluation.
 
-```python
-# ``program`` is a configured FederatedProgram execution region.
-layer = arti.ARTILayer(program)
-y, info = layer(x, return_info=True)
-```
+- [Training Workflow](training-workflow.md)
+- [Classification Recipe](task-recipes.md)
+- [Qwen SFT Workflow](qwen-sft-workflow.md)
 
-The private source declarations are `arti/layer@3` and
-`arti/federal-recall@3`; configured instances persist their resolved full
-contract addresses. The same default layer is exported as
-`arti.ARTILayer` and `arti.torch.ARTILayer`.
-`arti.nn.Layer` remains the explicit profile-based constructor for the classic
-tensor pipeline; it does not define the default `ARTILayer` identity.
+Both recipes retain real data splits, task objectives, preprocessing and raw-ID
+evaluation. Inference assets work without their original training data. Optional
+ASGI serving loads once and processes request batches.
 
-## Stable Mechanisms
+## Other Backends
 
-Versioned mechanism APIs are available from `arti.mechanisms`:
+[Native JAX](jax-backend.md) binds the shared Formula and ProgramGraph contracts
+with explicit array parameters and state. Custom Torch implementations require
+native overrides. Full Torch/JAX parity is not implied.
+[Web inference](webgpu-alpha.md) remains experimental.
 
-```python
-from arti import mechanisms
-
-pulse = mechanisms.AdaptivePulse(...)
-runtime = mechanisms.RecallRuntime(...)
-topology = mechanisms.ReversibleTopology(...)
-fabric = mechanisms.FormulaFabric(...)
-```
-
-Half, Fold, UnFold, Recall, execution iteration, Formula Fabric, adaptive observation,
-operable tensors, K-wide branch search, Target Bank updates, and their typed runtime
-contracts report lifecycle `stable` in the component registry. `ARTILayer@3` and
-FederatedProgram graph construction remain `alpha`: their provenance is strict, but
-their public construction contracts are still evolving.
-
-Stable means their versioned identity and declared contract are release APIs.
-It does not turn a benchmark result into a universal quality or performance
-claim.
-
-## Legacy
-
-The former monolithic `ARTILayer@1`, `LayerRecall`, and `StatefulRecall` are
-available only through `arti.legacy`:
-
-```python
-from arti import legacy
-```
-
-They are retained for explicit historical inspection and do not define the
-default layer or attachment path.
-
-## Attach To A Model
-
-```python
-model = arti.ARTI.attach(
-    model,
-    layer,
-    layers="model.layers.*",
-)
-
-model.arti.save("model.arti.st")
-fresh = arti.ARTI.load(
-    fresh_model,
-    "model.arti.st",
-    layer=layer,
-)
-```
-
-See [Unified Model Attachment](unified-attachment.md) for configuration,
-training, Hub bundles, and strict graph reload behavior.
-
-## Validation
-
-```bash
-uv run --extra dev python scripts/quality_gate.py quick
-uv run --extra dev python scripts/quality_gate.py package
-uv run --extra docs mkdocs build --strict
-```
-
-Mechanism-specific evidence and hardware claim boundaries remain documented in
-the validation and reference sections.
+See [STABILITY.md](https://github.com/ragnarok-io/ARTI/blob/main/STABILITY.md)
+and [Release Checklist](release.md) for compatibility and validation boundaries.

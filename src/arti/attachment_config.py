@@ -10,29 +10,10 @@ from typing import Any, Mapping
 
 from ._version import __version__
 from ._toml import loads as load_toml
+from .training_config import ARTITrainingConfig
 
 
-@dataclass(frozen=True)
-class ARTIAttachTrainingConfig:
-    engine: str = "torch"
-    objective: str = "tensor_alignment"
-    learning_rate: float = 1e-3
-    steps: int = 1
-    gradient_accumulation_steps: int = 1
-    mixed_precision: str = "no"
-    corruption_probability: float = 0.15
-
-    def __post_init__(self) -> None:
-        if self.engine not in {"torch", "transformers", "accelerate"}:
-            raise ValueError("training.engine must be 'torch', 'transformers', or 'accelerate'")
-        if self.objective not in {"tensor_alignment", "model_loss"}:
-            raise ValueError("training.objective must be 'tensor_alignment' or 'model_loss'")
-        if self.learning_rate <= 0 or self.steps <= 0 or self.gradient_accumulation_steps <= 0:
-            raise ValueError("training learning_rate, steps, and gradient_accumulation_steps must be positive")
-        if self.mixed_precision not in {"no", "fp16", "bf16"}:
-            raise ValueError("training.mixed_precision must be 'no', 'fp16', or 'bf16'")
-        if not 0 <= self.corruption_probability < 1:
-            raise ValueError("training.corruption_probability must be in [0, 1)")
+ARTIAttachTrainingConfig = ARTITrainingConfig
 
 
 @dataclass(frozen=True)

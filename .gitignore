@@ -29,6 +29,7 @@ benchmarks/artifacts/
 /data/
 /artifacts/
 .artifacts/
+.arti-runs/
 
 # Local benchmark output is retained on disk but is not a source artifact.
 /benchmarks/results/*.json

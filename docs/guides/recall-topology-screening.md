@@ -75,17 +75,12 @@ The extraction command performs one bounded Qwen pass per trace view. It must
 only be run after the developer has reviewed the layer count, expected time,
 and GPU memory:
 
-```bash
-uv run --extra qwen python benchmarks/cache_qwen_layered_recall_traces.py --max-runtime-seconds 120
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 After extraction, screening is resumable and defaults to CPU with a hard
 two-minute wall-clock limit:
 
-```bash
-uv run --extra qwen python benchmarks/screen_qwen_recall_topologies.py \
-  --device cpu --max-candidates 32 --max-runtime-seconds 120 --resume
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The enumerator includes single layers, uniformly distributed depths,
 early-heavy, late-heavy, alternating capacity profiles, and repeated-key

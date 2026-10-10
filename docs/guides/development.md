@@ -80,10 +80,6 @@ device = arti.require_cuda()
 
 Start with the capability report:
 
-```bash
-uv run python -m arti.cli doctor --allow-cpu-torch --output benchmarks/results/doctor.json
-uv run python benchmarks/report_backend_capabilities.py
-uv run python benchmarks/verify_backend_capabilities.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The report separates NVIDIA hardware visibility from PyTorch CUDA runtime availability. A machine can have an NVIDIA GPU while the current Python environment still uses a CPU-only PyTorch build.

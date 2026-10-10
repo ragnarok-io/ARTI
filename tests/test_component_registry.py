@@ -320,19 +320,19 @@ def test_disabled_optional_paths_are_not_recorded_as_dependencies() -> None:
     assert _contract_ref("arti/half@1") not in recall_root["dependencies"]
 
 
-def test_formula_and_executor_dependencies_are_versioned() -> None:
+def test_formula_and_refiner_dependencies_are_versioned() -> None:
     recall = arti.Retrieve(dim=4, slots=2)
-    executor = arti.RetrieveExecutor(recall)
+    refiner = arti.RetrieveRefiner(recall)
     root = next(item for item in component_provenance(recall)["components"] if item["path"] == "$")
-    executor_root = next(
-        item for item in component_provenance(executor)["components"] if item["path"] == "$"
+    refiner_root = next(
+        item for item in component_provenance(refiner)["components"] if item["path"] == "$"
     )
 
     assert any(
         dependency.startswith("arti/delta@sha256:")
         for dependency in root["dependencies"]
     )
-    assert _contract_ref("arti/retrieve@1") in executor_root["dependencies"]
+    assert _contract_ref("arti/retrieve@1") in refiner_root["dependencies"]
 
 
 def test_per_bank_recall_has_versioned_partition_provenance() -> None:

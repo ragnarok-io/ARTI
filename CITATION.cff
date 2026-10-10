@@ -1,11 +1,11 @@
 cff-version: 1.2.0
 message: "If you use ARTI in research or software, please cite this project."
-title: "ARTI: Composable Latent Tensor Layers for PyTorch"
+title: "ARTI: Composable Neural Programs and Tensor Resources"
 type: software
 authors:
   - name: Thiocy
     website: "https://github.com/Thiocy"
-version: 3.1.0a3
+version: 3.2.0
 repository-code: "https://github.com/ragnarok-io/ARTI"
 url: "https://github.com/ragnarok-io/ARTI"
 license: MIT

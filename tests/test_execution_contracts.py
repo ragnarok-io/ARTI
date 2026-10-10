@@ -76,7 +76,7 @@ def test_execution_adapters_use_executor_vocabulary() -> None:
     assert callable(arti.nn.RecallExecutor)
     assert callable(arti.RetrieveExecutor)
     assert not hasattr(arti.nn, "RecallRefiner")
-    assert not hasattr(arti, "RetrieveRefiner")
+    assert arti.RetrieveRefiner is arti.RetrieveExecutor
 
 
 def test_execution_rng_plan_uses_iteration_index_contract() -> None:

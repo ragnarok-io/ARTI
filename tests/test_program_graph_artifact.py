@@ -73,6 +73,25 @@ def test_program_graph_artifact_rejects_runtime_callable_connections(tmp_path) -
         mechanisms.save_program_graph(graph, tmp_path / "runtime")
 
 
+def test_learned_connection_state_does_not_change_graph_identity(tmp_path) -> None:
+    resource = mechanisms.TensorResource(_spec("source", mechanisms.ResourceLifetime.CALL), _view([[1, 2]]))
+    transfer = mechanisms.LearnableAffineTransfer(gain=2.0, bias=1.0)
+    graph = mechanisms.ProgramGraph(
+        (resource,),
+        (mechanisms.Connection("adapt", mechanisms.ResourcePort("source"), mechanisms.ResourcePort("source"), transfer=transfer),),
+    )
+    before = graph.contract_fingerprint
+    with torch.no_grad():
+        transfer.gain.add_(3.0)
+        transfer.bias.sub_(2.0)
+    assert graph.contract_fingerprint == before
+    assert transfer.contract_config() == {"gain": 2.0, "bias": 1.0, "learnable": True}
+    saved = mechanisms.save_program_graph(graph, tmp_path / "learned")
+    restored = mechanisms.load_program_graph(saved.tensors_path)
+    assert restored.contract_fingerprint == before
+    torch.testing.assert_close(restored.connection("adapt").transfer.gain, transfer.gain)
+
+
 def test_program_graph_rejects_connection_ids_reserved_by_torch_modules() -> None:
     with pytest.raises(mechanisms.ResourceGraphError, match="reserved nn.Module attribute"):
         mechanisms.Connection("double", mechanisms.ResourcePort("source"), mechanisms.ResourcePort("source"))

@@ -53,11 +53,7 @@ compatible artifacts can be concatenated from 8 to 16 slots. The report also
 records the result of independently removing layer 6, 13, or 20 from each
 trained three-layer model.
 
-```bash
-uv run --extra qwen python benchmarks/run_qwen_layered_recall.py
-uv run --extra qwen python benchmarks/render_qwen_layered_recall_report.py
-uv run --extra dev python benchmarks/verify_qwen_layered_recall.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The final verifier command intentionally exits nonzero for the current
 evidence. See `benchmarks/results/qwen_layered_recall.md` for the complete

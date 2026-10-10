@@ -1,6 +1,7 @@
 # API Quick Reference
 
-This page lists the stable symbols most downstream projects should start with.
+This page lists the current entry points and stable mechanisms most downstream
+projects should start with. The default `ARTILayer` host is still alpha.
 Full generated API pages are linked from the navigation.
 
 ## Core Layers
@@ -13,6 +14,7 @@ assert layer.program is None
 ```
 
 `arti.ARTILayer` and `arti.torch.ARTILayer` are the same `arti/layer@3` class.
+Its component lifecycle is `alpha`; the standalone mechanisms below are stable.
 It hosts a configured `FederatedProgram` execution region: root routing, routed-program
 iteration, Formula Fabric and cross-program traversal. Its unconfigured shell is an
 exact identity for host insertion. `arti.nn.Layer` remains the explicit
@@ -193,14 +195,14 @@ For `[B, D]` inputs, ARTI treats the tensor as one token.
 ## Target-Bank Updater
 
 ```python
-from arti.mechanisms import TargetBankUpdater, WriteRefinePolicy
+from arti.mechanisms import TargetBankUpdater, WriteIntegrationPolicy
 
 updater = TargetBankUpdater(
     hidden_dim=64,
     slots=32,
     private_slots=8,
     target_coupling="required_after_bootstrap",
-    policy=WriteRefinePolicy.fixed(steps=4),
+    policy=WriteIntegrationPolicy.fixed(steps=4),
 )
 next_bank, info = updater(
     trace,
@@ -293,34 +295,6 @@ Use this optional integration when ordinary Qwen dialogue should stay on
 the frozen base logits/generate path while a separate ARTI readout scores an
 external glyph runtime vocabulary.
 
-For the string-first Qwen answering probe:
-
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_string_recall_refiner_answering.py --model-id Qwen/Qwen3-0.6B --steps 3000 --batch-size 64 --condition-loss-weight 0.35 --answer-identity-loss-weight 0.5 --max-new-tokens 20 --pulse-count 8 --fragment-dim 128 --matched-mean-dim 640 --max-chars 384 --device cuda
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_string_recall_refiner_answering.py
-```
-
-This probe renders chat strings into ARTI text tensors, trains small ARTI-side
-frontends, and compares generated answer strings, prompt-conditioning accuracy,
-coherence, loop diagnostics, conditional NLL, unique-answer rate, equal training
-examples, trainable parameter budgets, and resource fields. Training uses
-next-token CE plus a lightweight prompt-conditioning auxiliary loss; Qwen token
-ids are used only at the frozen Qwen output/decode boundary. The live probe also
-records a parameter-matched wide mean baseline and a paired no-Half/Half refiner
-ablation. The Half branch is treated as an optimization diagnostic for this
-joint-training setup, not as a Half mechanism verdict.
-
-For the controlled Qwen-side Half check:
-
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_hidden_refiner_half.py
-uv run --extra dev python benchmarks/verify_qwen_hidden_refiner_half.py
-```
-
-This hidden-state probe freezes Qwen, repairs corrupted Qwen-derived hidden
-vectors, and compares paired no-Half/Half RecallExecutors with shared
-initialization, shared train batches, equal parameters, and weak-trace noise.
-
 ## Text Tensor
 
 ```python
@@ -343,10 +317,7 @@ separate public output tokens from inner model-side tokens.
 
 ## Evidence
 
-```bash
-uv run --extra dev python benchmarks/verify_evidence_schema.py
-uv run --extra dev python scripts/quality_gate.py quick
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Evidence schema and gate interpretation are documented in
 `docs/reference/evidence-schema.md`.

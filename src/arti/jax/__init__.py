@@ -1,15 +1,34 @@
-"""Optional functional JAX subset for ARTI.
-
-The JAX namespace implements a deliberately small tensor contract. It is not a
-second implementation of ARTI modules, attachment, fitting, or Recall.
-"""
+"""Optional native JAX execution and model bindings for ARTI."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from importlib import import_module
 
 from ..backend import jax_backend_status
+
+
+_NATIVE_EXPORTS = {
+    "BoundFormula": "formula", "BoundFormulaScan": "formula", "FormulaResult": "formula",
+    "bind_formula": "formula", "bind_formula_scan": "formula",
+    "ARTILayer": "program", "BoundResourceGraph": "program", "NativeModule": "program",
+    "NativeModuleResult": "program",
+    "NativeProgramNode": "program", "ProgramResult": "program", "ProgramState": "program",
+    "as_fabric_node": "program", "bind_resource_graph": "program", "credit_boundary": "program",
+    "fabric_layer": "program", "tensor_resource": "program",
+    "from_flax": "adapters", "as_flax_module": "adapters", "attach": "adapters",
+}
+
+
+def __getattr__(name: str):
+    module_name = _NATIVE_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    require_jax_backend()
+    value = getattr(import_module(f"{__name__}.{module_name}"), name)
+    globals()[name] = value
+    return value
 
 
 class ARTIJAXBackendNotImplementedError(NotImplementedError):
@@ -387,4 +406,4 @@ __all__ = [
     "masked_softmax",
     "require_jax_backend",
     "smoke_report",
-]
+] + list(_NATIVE_EXPORTS)

@@ -66,9 +66,11 @@ def check_workflows(ci_text: str | None = None, release_text: str | None = None)
         "name: CI",
         "workflow_call:",
         "uv sync --locked --extra dev",
-        "tests/test_component_registry.py",
-        "tests/test_release_security.py",
-        "tests/test_release_readiness.py",
+        "scripts/quality_gate.py quick",
+        "scripts/quality_gate.py mainline",
+        "scripts/quality_gate.py recipes",
+        "scripts/quality_gate.py jax",
+        "--extra qwen --extra serve",
         "scripts/check_package.py",
         "mkdocs build --strict",
     ):
@@ -95,6 +97,8 @@ def check_release_documentation() -> list[str]:
         "check_release_readiness.py",
         "check_package.py",
         "PyPI Trusted Publishing",
+        "recipes",
+        "native JAX",
     )
     return [
         f"release guide missing current public release detail: {item}"

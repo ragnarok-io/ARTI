@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -15,6 +16,18 @@ assert SPEC is not None and SPEC.loader is not None
 generate_docs = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = generate_docs
 SPEC.loader.exec_module(generate_docs)
+
+
+def test_documented_python_entrypoints_exist() -> None:
+    pattern = re.compile(r"\b(?:benchmarks|examples|scripts|tests)/[A-Za-z0-9_./-]+\.py\b")
+    sources = [ROOT / "README.md", *(ROOT / "docs").rglob("*.md"), *(ROOT / ".github" / "workflows").glob("*.yml")]
+    missing = {
+        entry
+        for source in sources
+        for entry in pattern.findall(source.read_text(encoding="utf-8"))
+        if not (ROOT / entry).is_file()
+    }
+    assert not missing
 
 
 def test_generated_capabilities_docs_reflect_public_capabilities_api() -> None:

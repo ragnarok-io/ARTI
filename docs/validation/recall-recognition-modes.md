@@ -23,7 +23,4 @@ influence for experienced corrupted traces. In this synthetic setting,
 alignment also rejects difficult near-neighbor negatives more strongly. This
 is mechanism evidence, not yet a universal task-level ranking.
 
-```bash
-uv run --extra dev python benchmarks/run_recall_recognition_modes.py --device cuda
-uv run --extra dev python benchmarks/verify_recall_recognition_modes.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.

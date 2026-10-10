@@ -68,6 +68,7 @@ def save_attachment_pretrained(
     base_model: str | Path | None = None,
     revision: str | None = None,
     training_session: Any | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> ARTIHubSaveResult:
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
@@ -79,7 +80,7 @@ def save_attachment_pretrained(
     resolved_revision = revision or config_revision
     artifact_path = target / DEFAULT_ARTIFACT
     if training_session is None:
-        saved = attachment.save(artifact_path)
+        saved = attachment.save(artifact_path, metadata=metadata)
     else:
         if training_session.attachment is not attachment:
             raise ValueError("training_session belongs to a different ARTI attachment")
@@ -87,11 +88,8 @@ def save_attachment_pretrained(
             artifact_path,
             optimizer=training_session.optimizer,
             scheduler=training_session.scheduler,
-            training_state={
-                "engine": training_session.config.engine,
-                "global_step": training_session.global_step,
-                "loss_history": list(training_session.loss_history),
-            },
+            training_state=training_session._checkpoint_state(),
+            metadata=metadata,
         )
     config_path = target / DEFAULT_CONFIG
     if attachment.declaration is not None:

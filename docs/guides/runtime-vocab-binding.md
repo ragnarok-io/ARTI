@@ -150,10 +150,7 @@ the output range.
 
 The frozen-Qwen controlled comparison for this split interface is:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_literal_output_context.py
-uv run --extra dev python benchmarks/verify_qwen_literal_output_context.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Qwen supplies frozen task-query hidden states while the output range is a
 separate shuffled glyph vocabulary. The held-out tasks replace candidate sets,
@@ -244,10 +241,7 @@ uv run --extra torch python examples/literal_sequence_fit.py
 
 Run the frozen-Qwen segmentation comparison with:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_literal_segmentation_generation.py
-uv run --extra dev python benchmarks/verify_qwen_literal_segmentation_generation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This benchmark keeps Qwen BPE input, independently shuffles a glyph-character
 output vocabulary, and decodes complete answer sentences. It compares a normal
@@ -304,7 +298,7 @@ For this to work, the output head must directly read the same rigid symbol
 source used by the input side. Otherwise the model can drift back toward a
 private codebook and memorize output rows instead of learning the symbol.
 
-The mechanism benchmark `benchmarks/run_runtime_vocab_replacement.py` tests this
+The mechanism benchmark `research-only validation entrypoint` tests this
 with disjoint train and held-out symbol sets. The model must copy by rigid
 symbol into the current runtime softmax range, not by permanent row id.
 
@@ -323,7 +317,7 @@ runtime vocab B token stream -> pulse sequence
 
 Use legacy `PulseCompressor` with `token_weight` when tokens cover different
 amounts of the original stream. The mechanism benchmark
-`benchmarks/run_pulse_vocab_invariance.py` checks this boundary with single
+`research-only validation entrypoint` checks this boundary with single
 symbol tokens versus variable-length chunk tokens.
 
 For compression safety, validate the pulse output itself:
@@ -389,10 +383,7 @@ uv run --extra torch python examples/runtime_vocab_pulse_adapter.py
 
 Run the Qwen adapter-level semantic gate:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_runtime_vocab_pulse_semantic.py
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_runtime_vocab_pulse_semantic.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The Qwen benchmark freezes `Qwen/Qwen3-0.6B`, trains small adapters, and compares
 fixed head, runtime vocab only, pulse only, and runtime vocab + pulse. The
@@ -409,10 +400,7 @@ metadata.
 For micro-glyph sensitive vocabularies, keep the default `14x96` canvas or
 larger, avoid resizing after rendering, and validate the vocabulary with:
 
-```bash
-uv run --extra dev python benchmarks/run_micro_glyph_distinctness.py
-uv run --extra dev python benchmarks/verify_micro_glyph_distinctness.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Visible characters should remain glyph-first. Use codepoint auxiliary channels
 only for control characters, invisible format marks, replacement glyphs, or

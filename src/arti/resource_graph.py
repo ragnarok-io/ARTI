@@ -620,6 +620,8 @@ class LearnableAffineTransfer(nn.Module):
             raise TypeError("gain and bias must be real scalars")
         if type(learnable) is not bool:
             raise TypeError("learnable must be boolean")
+        self.initial_gain = float(gain)
+        self.initial_bias = float(bias)
         gain_value = torch.tensor(float(gain), dtype=torch.float32)
         bias_value = torch.tensor(float(bias), dtype=torch.float32)
         if learnable:
@@ -647,8 +649,8 @@ class LearnableAffineTransfer(nn.Module):
 
     def contract_config(self) -> dict[str, object]:
         return {
-            "gain": float(self.gain.detach().cpu()),
-            "bias": float(self.bias.detach().cpu()),
+            "gain": self.initial_gain,
+            "bias": self.initial_bias,
             "learnable": self.learnable,
         }
 
@@ -2463,6 +2465,11 @@ class ProgramGraph(nn.Module):
         if share_module_state:
             memo.update((id(parameter), parameter) for parameter in self.parameters())
             memo.update((id(buffer), buffer) for buffer in self.buffers())
+            # Formula operands may be owned by the enclosing model rather than
+            # this graph. Preserve their zero-copy binding in a shared lowering.
+            for module in self.modules():
+                if isinstance(module, FormulaProgramNode):
+                    memo.update((id(operand.value), operand.value) for operand in module.banks.values())
         specialized = ProgramGraph(
             tuple(TensorResource.restore(state, fresh_history=True) for state in resource_states),
             tuple(
@@ -8653,6 +8660,7 @@ def _transfer_to_artifact(
     if isinstance(transfer, LearnableAffineTransfer):
         return {
             "kind": "learnable-affine",
+            "config": transfer.contract_config(),
             "learnable": transfer.learnable,
             "gain": _store_artifact_tensor(tensors, transfer.gain, name=f"{name}.gain"),
             "bias": _store_artifact_tensor(tensors, transfer.bias, name=f"{name}.bias"),
@@ -8699,11 +8707,14 @@ def _transfer_from_artifact(
             raise ResourceGraphError("identity transfer has unexpected fields")
         return None
     if kind == "learnable-affine":
-        if set(value) != {"kind", "learnable", "gain", "bias"}:
+        if set(value) not in ({"kind", "learnable", "gain", "bias"}, {"kind", "config", "learnable", "gain", "bias"}):
             raise ResourceGraphError("learnable-affine transfer has unexpected fields")
-        transfer = LearnableAffineTransfer(learnable=value["learnable"])
-        transfer.gain.data.copy_(_load_artifact_tensor(tensors, value["gain"], name=f"{name}.gain").to(device))
-        transfer.bias.data.copy_(_load_artifact_tensor(tensors, value["bias"], name=f"{name}.bias").to(device))
+        gain = _load_artifact_tensor(tensors, value["gain"], name=f"{name}.gain")
+        bias = _load_artifact_tensor(tensors, value["bias"], name=f"{name}.bias")
+        config = value.get("config", {"gain": float(gain), "bias": float(bias), "learnable": value["learnable"]})
+        transfer = LearnableAffineTransfer(**config)
+        transfer.gain.data.copy_(gain.to(device))
+        transfer.bias.data.copy_(bias.to(device))
         return transfer.to(device)
     if kind != "formula-v2":
         raise ResourceGraphError(f"program graph artifact does not support transfer kind {kind!r}")

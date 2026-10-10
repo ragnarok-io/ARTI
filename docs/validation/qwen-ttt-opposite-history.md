@@ -24,10 +24,7 @@ also compares whole-exchange writing with token-by-token writing.
 
 Run the non-model preflight first:
 
-```bash
-uv run --extra qwen python benchmarks/evaluate_qwen_ttt_opposite_history.py --plan-only
-uv run --extra dev pytest -q tests/test_qwen_ttt_opposite_history_gate.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The first model-backed run is limited to the locked 24 held-out pairs and does
 not train or change any model, Updater, Query, Bank, or threshold. A passing

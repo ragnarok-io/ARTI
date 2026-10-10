@@ -16,6 +16,7 @@ import torch.nn as nn
 from .fit import MechanismOverrides, MechanismSummary, apply_adapter, capabilities, check_fit_config_schema, check_generated_docs, check_task_graph_schema, create_build_lock, create_deployment_manifest, doctor_report, fit, generate_capabilities_markdown, generate_fit_config_schema_json, generate_task_graph_schema_json, list_plugins, list_profiles, list_scales, load_fit_config, plan_provenance_fingerprint, resolve_fit_config_mechanism, validate_artifact, validate_build_lock, validate_deployment_manifest, validate_plan, validate_task_graph, write_doctor_report, write_fit_config_schema, write_fit_config_template, write_generated_docs, write_task_graph_artifact, write_task_graph_schema
 from .fit.artifacts import hash_tensor_state_dict
 from .pretrained_cli import pretrained_cli_report
+from .recipes import recipe_cli_report
 
 
 MECHANISM_FIELDS = {
@@ -81,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gates",
         nargs="*",
         default=["quick"],
-        choices=("quick", "docs", "package", "mainline", "mechanism", "cuda", "qwen", "pretrained", "sd", "all"),
+        choices=("quick", "docs", "package", "mainline", "mechanism", "cuda", "qwen", "pretrained", "recipes", "sd", "all"),
         help="Quality gate names to run.",
     )
     gate_parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed gate command.")
@@ -123,6 +124,44 @@ def build_parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--output", type=Path, default=None, help="Scan report or plan output path.")
         action_parser.add_argument("--weights", type=Path, default=None, help="Destination arti.st path.")
         action_parser.add_argument("--include-base", action="store_true", help="Include frozen base weights in arti.st.")
+        if action == "fit":
+            action_parser.add_argument("--resume-from-checkpoint", type=Path, default=None)
+            action_parser.add_argument("--steps", type=int, default=None, help="Additional optimizer steps for this run.")
+
+    recipe_parser = subparsers.add_parser("recipe", help="Train, evaluate and deploy a supervised task recipe.")
+    recipe_actions = recipe_parser.add_subparsers(dest="recipe_action", required=True)
+    for action in ("plan", "check", "train", "evaluate", "export"):
+        recipe_action = recipe_actions.add_parser(action)
+        recipe_action.add_argument("config", type=Path)
+        if action == "train":
+            recipe_action.add_argument("--run-dir", type=Path)
+            recipe_action.add_argument("--resume-from-checkpoint", type=Path)
+            recipe_action.add_argument("--steps", type=int, help="Additional optimizer updates.")
+        elif action == "evaluate":
+            evaluation_source = recipe_action.add_mutually_exclusive_group(required=True)
+            evaluation_source.add_argument("--model", type=Path, help="Inference asset for the configured data split.")
+            evaluation_source.add_argument("--data", type=Path, help="New labeled JSONL; positional path names the model asset.")
+            recipe_action.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+            recipe_action.add_argument("--generate-samples", type=int, default=0, help="Causal-LM generation evaluation sample count.")
+            recipe_action.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+            recipe_action.add_argument("--output", type=Path)
+        elif action == "export":
+            recipe_action.add_argument("--checkpoint", type=Path, required=True)
+            recipe_action.add_argument("--output", type=Path, required=True)
+        else:
+            recipe_action.add_argument("--output", type=Path)
+    predict = recipe_actions.add_parser("predict")
+    predict.add_argument("model", type=Path)
+    predict.add_argument("--data", type=Path, required=True, help="Unlabeled JSONL records.")
+    predict.add_argument("--output", type=Path, required=True, help="Prediction JSONL.")
+    predict.add_argument("--batch-size", type=int, default=None, help="Override the task's deployment batch size.")
+    predict.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    predict.add_argument("--max-new-tokens", type=int, default=None, help="Causal-LM generation budget.")
+    serve = recipe_actions.add_parser("serve", help="Load one inference asset once in a FastAPI/Uvicorn worker.")
+    serve.add_argument("model", type=Path)
+    serve.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8080)
 
     plan_build_parser = subparsers.add_parser("plan", help="Create a dry-run ARTI fit plan from an importable model factory.")
     plan_build_parser.add_argument("model", help="Import path for an nn.Module or factory, such as package.module:make_model.")
@@ -1471,6 +1510,20 @@ def main(argv: list[str] | None = None) -> int:
                 output=getattr(args, "output", None),
                 weights=getattr(args, "weights", None),
                 include_base=getattr(args, "include_base", False),
+                resume_from_checkpoint=getattr(args, "resume_from_checkpoint", None),
+                steps=getattr(args, "steps", None),
+            )
+            if not summary.get("ok", False):
+                print(json.dumps(summary, indent=2, sort_keys=True))
+                return 1
+        elif args.command == "recipe":
+            if args.recipe_action == "serve":
+                from .recipe_serving import serve_recipe
+                serve_recipe(args.model, device=args.device, host=args.host, port=args.port)
+                return 0
+            summary = recipe_cli_report(
+                args.recipe_action, args.model if args.recipe_action == "predict" else args.config,
+                **{key: value for key, value in vars(args).items() if key not in {"command", "recipe_action", "config"}},
             )
             if not summary.get("ok", False):
                 print(json.dumps(summary, indent=2, sort_keys=True))

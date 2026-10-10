@@ -93,16 +93,20 @@ def save(
 
     if not isinstance(model, nn.Module):
         raise TypeError("model must be a torch.nn.Module")
-    _assert_artifact_components_portable(model)
     _validate_sealed_bank_queries(model)
     target = _weight_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    native_graphs = _save_native_program_graphs(model, target)
+    admissions = _native_graph_component_paths(native_graphs, component_provenance(model))
+    _assert_artifact_components_portable(model, native_graph_components=admissions)
     if scope not in {"all", "trainable"}:
         raise ValueError("scope must be 'all' or 'trainable'")
     state = _model_state(model, scope=scope) if state_dict is None else dict(state_dict)
     if not state:
         raise ValueError("state_dict selected no model tensors")
     architecture = _architecture_payload(model, config, state_dict=state, scope=scope)
+    if native_graphs:
+        architecture["native_program_graphs"] = native_graphs
     return _save_state(
         state,
         target,
@@ -116,7 +120,7 @@ def save(
     )
 
 
-def _assert_artifact_components_portable(model: nn.Module) -> None:
+def _assert_artifact_components_portable(model: nn.Module, *, native_graph_components: frozenset[str] = frozenset()) -> None:
     """Reject runtime-only or host-bound records at the artifact boundary."""
 
     registry = get_component_registry()
@@ -124,7 +128,8 @@ def _assert_artifact_components_portable(model: nn.Module) -> None:
     blocked: list[str] = []
     for item in provenance["components"]:
         registration = registry.registration_for_reference(item["ref"])
-        if registration.artifact_policy != "portable":
+        embedded = registration.artifact_policy == "runtime_only" and item["path"] in native_graph_components
+        if registration.artifact_policy != "portable" and not embedded:
             blocked.append(
                 f"{item['path']}:{item['ref']}({registration.artifact_policy})"
             )
@@ -134,6 +139,63 @@ def _assert_artifact_components_portable(model: nn.Module) -> None:
             "arti.st cannot persist non-portable components; save the owning "
             f"constructible module instead: {joined}"
         )
+
+
+def _save_native_program_graphs(model: nn.Module, target: Path) -> list[dict[str, Any]]:
+    from .resource_graph import ProgramGraph, save_program_graph
+
+    records = []
+    for name, module in model.named_modules():
+        if not isinstance(module, ProgramGraph):
+            continue
+        result = save_program_graph(module, target.parent / f"{target.stem}.graph-{len(records)}.safetensors")
+        root = name or "$"
+        components = [root, *(f"{name + '.' if name else ''}connections.{key}" for key in module.connections), *(f"{name + '.' if name else ''}nodes.{key}" for key in module.nodes)]
+        records.append({
+            "path": root,
+            "contract_fingerprint": result.contract_fingerprint,
+            "components": components,
+            "tensors": _file_record(result.tensors_path, _file_sha256(result.tensors_path)),
+            "manifest": _file_record(result.manifest_path, _file_sha256(result.manifest_path)),
+        })
+    return records
+
+
+def _native_graph_component_paths(records: Any, provenance: Mapping[str, Any]) -> frozenset[str]:
+    """Admit only the graph bindings carried by native graph asset records."""
+
+    components = {item["path"]: item for item in provenance["components"]}
+    allowed = set()
+    for record in records:
+        root = record["path"]
+        item = components.get(root)
+        if item is None or item["mechanism_id"] != "arti/program-graph":
+            raise ValueError("native graph record must name a ProgramGraph component")
+        if not _valid_sha(record["contract_fingerprint"]):
+            raise ValueError("native graph contract fingerprint is invalid")
+        prefix = "" if root == "$" else root + "."
+        for path in record["components"]:
+            entry = components.get(path)
+            if entry is None:
+                raise ValueError("native graph component is absent from model provenance")
+            if path != root and not (path.startswith(prefix + "connections.") or path.startswith(prefix + "nodes.")):
+                raise ValueError("native graph component must be a declared connection or node")
+            allowed.add(path)
+    return frozenset(allowed)
+
+
+def _restore_native_program_graphs(model: nn.Module, records: Any, directory: Path, device: str) -> None:
+    from .resource_graph import ProgramGraph, load_program_graph
+
+    modules = dict(model.named_modules())
+    for record in records:
+        graph = modules["" if record["path"] == "$" else record["path"]]
+        if not isinstance(graph, ProgramGraph) or graph.contract_fingerprint != record["contract_fingerprint"]:
+            raise ValueError("native ProgramGraph contract does not match target model")
+        restored = load_program_graph(_member_path(directory, record["tensors"]["file"]), nodes=tuple(graph.nodes.values()), map_location=device)
+        if restored.contract_fingerprint != graph.contract_fingerprint:
+            raise ValueError("embedded ProgramGraph contract does not match model")
+        graph.restore_state(restored.state(), fresh_history=True)
 
 
 def _validate_sealed_bank_queries(model: nn.Module) -> None:
@@ -214,6 +276,7 @@ def load(
         unexpected = tuple(incompatible.unexpected_keys)
         if unexpected:
             raise ValueError(f"arti.st contains keys absent from target model: {unexpected}")
+        _restore_native_program_graphs(model, manifest["architecture"].get("native_program_graphs", ()), target.parent, device)
 
     glyphs = None
     vocab = None
@@ -293,6 +356,9 @@ def _save_state(
     files: dict[str, dict[str, Any]] = {
         "weights": _file_record(target, weights_sha),
     }
+    for index, graph in enumerate(architecture.get("native_program_graphs", ())):
+        files[f"program_graph_{index}_tensors"] = graph["tensors"]
+        files[f"program_graph_{index}_manifest"] = graph["manifest"]
 
     glyph_record = None
     if glyph_tensors is not None:
@@ -431,6 +497,10 @@ def _validate_manifest(manifest: dict[str, Any], *, allow_legacy: bool = False) 
             manifest["architecture"].get("component_provenance"),
             allow_legacy=allow_legacy,
             artifact_scope=True,
+            native_graph_components=_native_graph_component_paths(
+                manifest["architecture"].get("native_program_graphs", ()),
+                manifest["architecture"]["component_provenance"],
+            ),
         )
         component_graph_value = manifest["architecture"].get("component_graph")
         if component_graph_value is not None:
@@ -465,6 +535,8 @@ def _validate_lock_matches_manifest(lock: dict[str, Any], manifest: dict[str, An
 
 def _manifest_file_records(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     records = [manifest["weights"]]
+    for graph in manifest["architecture"].get("native_program_graphs", ()):
+        records.extend((graph["tensors"], graph["manifest"]))
     resources = manifest.get("resources") or {}
     for name in ("glyphs", "vocab"):
         if resources.get(name) is not None:

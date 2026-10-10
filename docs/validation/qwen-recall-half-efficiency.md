@@ -33,12 +33,7 @@ next benchmark should search placement on noisier and longer-context tasks.
 
 Reproduce the complete result:
 
-```bash
-uv run --extra qwen --extra peft python benchmarks/run_qwen_recall_half_efficiency.py \
-  --steps 24 --batch-size 2 --seeds 17,29,43 --include-full-finetune \
-  --output benchmarks/results/qwen_recall_half_efficiency.json
-uv run --extra qwen --extra peft python benchmarks/verify_qwen_recall_half_efficiency.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The result JSON embeds the exact dataset records and SHA-256, model revision,
 dependency versions, loss curves, per-run resource measurements, and the

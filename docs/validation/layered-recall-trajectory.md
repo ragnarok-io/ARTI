@@ -58,11 +58,7 @@ tradeoff, not hidden behind a scalar winner claim.
 
 ## Reproduce
 
-```bash
-uv run --extra dev python benchmarks/run_layered_recall_trajectory.py --device cuda --steps 360
-uv run --extra dev python benchmarks/verify_layered_recall_trajectory.py
-uv run --extra dev python -m pytest tests/test_layered_recall.py tests/test_layered_recall_benchmark.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The verifier checks every seed separately, all single-layer locations,
 parameter and training budgets, local-loss improvement, monotonic depth curves,

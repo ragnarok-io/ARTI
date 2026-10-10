@@ -33,6 +33,7 @@ LOCAL_USER_PATH = re.compile(
 )
 FORBIDDEN_ARCHIVE_PARTS = {
     ".artifacts",
+    ".arti-runs",
     ".cache",
     ".git",
     ".ruff_cache",
@@ -244,6 +245,10 @@ def main() -> None:
             "arti/torch/__init__.py",
             "arti/torch/cuda.py",
             "arti/jax/__init__.py",
+            "arti/jax/formula.py",
+            "arti/jax/program.py",
+            "arti/jax/adapters.py",
+            "arti/jax/contracts.py",
             "arti/backend.py",
             "arti/experimental/__init__.py",
             "arti/experimental/web/__init__.py",
@@ -251,6 +256,20 @@ def main() -> None:
             "arti/experimental/web/exporter.py",
             "arti/experimental/web/stateful.py",
             "arti/serialization.py",
+            "arti/training_config.py",
+            "arti/training_binding.py",
+            "arti/training_run.py",
+            "arti/recipe_data.py",
+            "arti/recipe_chat.py",
+            "arti/recipe_adapters.py",
+            "arti/recipe_workflow.py",
+            "arti/recipe_serving.py",
+            "arti/recipes.py",
+            "arti/language_recipe.py",
+            "arti/formula_position.py",
+            "arti/resource_graph.py",
+            "arti/learning_regions.py",
+            "arti/credit_boundary.py",
             "arti/alpha/__init__.py",
             "arti/mechanisms/__init__.py",
             "arti/execution.py",
@@ -319,6 +338,15 @@ def main() -> None:
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
                     "import arti.cli; "
+                    "assert arti.torch.ClassificationRecipe is arti.ClassificationRecipe; "
+                    "assert arti.torch.CausalLMRecipe is arti.CausalLMRecipe; "
+                    "assert callable(arti.CausalLMPredictor.from_pretrained); "
+                    "assert callable(arti.create_recipe_app); "
+                    "assert callable(arti.trainer); "
+                    "assert arti.torch.trainer is arti.trainer; "
+                    "assert arti.ARTIAttachTrainingConfig is arti.ARTITrainingConfig; "
+                    "assert callable(arti.ARTITrainingSession.evaluation_context); "
+                    "assert arti.cli.build_parser().parse_args(['recipe', 'plan', 'recipe.toml']).recipe_action == 'plan'; "
                     "assert callable(arti.experimental.web.export); "
                     "assert importlib.util.find_spec('arti.web') is None; "
                     "assert importlib.util.find_spec('arti.layered_recall') is None; "
@@ -326,6 +354,7 @@ def main() -> None:
                     f"assert arti.__version__ == {expected_version!r}; "
                     "assert 'torch' in arti.available_backends(); "
                     "assert arti.jax.backend_status() in {'available', 'broken', 'unavailable'}; "
+                    "assert arti.jax.backend_status() != 'available' or all(callable(getattr(arti.jax, name)) for name in ('bind_formula', 'bind_formula_scan', 'bind_resource_graph', 'NativeModule', 'ARTILayer', 'from_flax', 'as_flax_module', 'attach')); "
                     "assert callable(arti.jax.init_layer); "
                     "assert callable(arti.jax.apply_layer); "
                     "assert callable(arti.jax.apply_layer_single); "

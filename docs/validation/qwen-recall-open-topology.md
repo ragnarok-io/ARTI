@@ -46,22 +46,15 @@ broad answer-accuracy improvement.
 
 Trace extraction is a GPU action and must be reviewed before execution:
 
-```bash
-uv run --extra qwen python benchmarks/cache_qwen_layered_recall_traces.py --max-runtime-seconds 120
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Offline screening does not execute Qwen:
 
-```bash
-uv run --extra qwen python benchmarks/screen_qwen_recall_topologies.py --device cpu --steps 120 --max-runtime-seconds 120
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Full confirmation is resumable and hard-limited to nine minutes per batch:
 
-```bash
-uv run --extra qwen python benchmarks/run_qwen_recall_topology_confirmation.py --seeds 401 --resume
-uv run --extra dev python benchmarks/verify_qwen_recall_topology_confirmation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The complete table, response strings, resource measurements, and causal
 controls are stored in `benchmarks/results/qwen_recall_topology_confirmation.*`.

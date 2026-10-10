@@ -163,6 +163,7 @@ class ARTIAttachment:
         base_model: str | Path | None = None,
         revision: str | None = None,
         training_session: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ):
         from .attachment_hub import save_attachment_pretrained
 
@@ -173,6 +174,7 @@ class ARTIAttachment:
             base_model=base_model,
             revision=revision,
             training_session=training_session,
+            metadata=metadata,
         )
 
     def save(
@@ -193,13 +195,15 @@ class ARTIAttachment:
         extra = dict(metadata or {})
         if "unified_attachment" in extra:
             raise ValueError("attachment metadata cannot override unified_attachment")
+        declaration = None
+        if self.declaration is not None:
+            declaration = self.declaration.to_dict()
+            declaration["source_sha256"] = self.declaration.source_sha256
         artifact_metadata = {
             "unified_attachment": {
                 "version": 3,
                 "config": _config_payload(self.config),
-                "declaration": None
-                if self.declaration is None
-                else self.declaration.to_dict(include_source=True),
+                "declaration": declaration,
                 "host_structure": _host_structure_fingerprint(self._model),
                 "execution_surface": {
                     "kind": "federal-bank-attachment",
@@ -260,6 +264,8 @@ class ARTIAttachment:
         gradient_accumulation_steps: int | None = None,
         mixed_precision: str | None = None,
         corruption_probability: float | None = None,
+        device: str | None = None,
+        distributed: bool | None = None,
         optimizer: torch.optim.Optimizer | None = None,
         scheduler: Any | None = None,
         resume_from_checkpoint: str | Path | bool | None = None,
@@ -285,6 +291,8 @@ class ARTIAttachment:
             corruption_probability=base.corruption_probability
             if corruption_probability is None
             else corruption_probability,
+            device=base.device if device is None else device,
+            distributed=base.distributed if distributed is None else distributed,
         )
         return ARTITrainingSession(
             self,

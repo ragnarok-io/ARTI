@@ -53,9 +53,7 @@ reports before a reader treats the result as comparable.
 
 ## Verify
 
-```bash
-uv run --extra dev python benchmarks/verify_evidence_schema.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The verifier currently checks these core result files:
 

@@ -56,11 +56,7 @@ super-resolution, generic OCR, or hallucination-free enhancement.
 
 ## Reproduce
 
-```bash
-uv run --extra dev python benchmarks/run_visual_scan_superresolution.py --device cuda
-uv run --extra dev python benchmarks/verify_visual_scan_superresolution.py
-uv run --extra dev python -m pytest tests/test_visual_scan.py tests/test_visual_scan_benchmark.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The verifier fails if the physical contract or locked split is absent, if a seed
 or metric is missing, if high-resolution targets leak into inference, if the

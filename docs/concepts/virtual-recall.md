@@ -181,10 +181,7 @@ The synthetic RecallExecutor benchmark compares a direct MLP denoiser,
 single-step residual recall, multi-step recall without Half, and multi-step
 RecallExecutor with Half:
 
-```bash
-uv run --extra dev python benchmarks/run_recall_refiner.py
-uv run --extra dev python benchmarks/verify_recall_refiner.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The benchmark measures final MSE to a clean hidden vector, intermediate MSE per
 step, update norms, update-norm stability, and clean-start drift from weak noisy
@@ -214,10 +211,7 @@ Two surviving traces carry different roles; pooling sees a bag of traces, while
 Fold can organize them into a fixed workspace before the downstream head reads
 the ordered pair:
 
-```bash
-uv run --extra dev python benchmarks/run_fold_compaction.py
-uv run --extra dev python benchmarks/verify_fold_compaction.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The benchmark is deliberately narrow. It checks that Fold compacts sparse
 latent traces into a trainable fixed workspace without collapsing role binding;
@@ -242,10 +236,7 @@ The synthetic Pulse benchmark compares mean pooling, legacy explicit Pulse
 compression, learned Pulse with two and four pulse slots, and an optional
 residual correction block on the same role-bound latent signal task:
 
-```bash
-uv run --extra dev python benchmarks/run_learned_pulse_compaction.py
-uv run --extra dev python benchmarks/verify_learned_pulse_compaction.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The benchmark measures accuracy, signal-only retention, noise sensitivity, and
 throughput on a controlled synthetic task. It does not claim tokenizer-free

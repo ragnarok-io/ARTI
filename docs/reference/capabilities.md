@@ -29,7 +29,7 @@ Generated from `arti.capabilities(phases=16)`.
 | `recurrent` | `model-family` | `True` | `rnn-output-strategy`, `lstm-output-strategy`, `gru-output-strategy`, `tuple-output-adaptation` |
 | `timm` | `model-family` | `False` | `vision-transformer-names`, `classifier-head-strategy`, `patch-embedding-strategy` |
 | `torch` | `backend` | `True` | `scan-runtime-tensor-boundaries`, `insert-wrapper`, `freeze-base`, `adapter-artifact` |
-| `transformers` | `model-family` | `False` | `attention-output-strategy`, `mlp-output-strategy`, `pretrained-module-names` |
+| `transformers` | `model-family` | `True` | `attention-output-strategy`, `mlp-output-strategy`, `pretrained-module-names` |
 | `vision-cnn` | `model-family` | `True` | `conv2d-output-strategy`, `spatial-token-bridge`, `resnet-style-names` |
 
 ## Raw JSON
@@ -79,7 +79,7 @@ Generated from `arti.capabilities(phases=16)`.
       "optional_dependency": null
     },
     "transformers": {
-      "available": false,
+      "available": true,
       "capabilities": [
         "attention-output-strategy",
         "mlp-output-strategy",

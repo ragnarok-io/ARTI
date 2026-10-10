@@ -81,10 +81,7 @@ without using labels, answer memory, or an external recall tensor.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_experiential_recall_scaling.py
-uv run --extra dev python benchmarks/verify_experiential_recall_scaling.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Half Recall Trace Survival
 
@@ -118,10 +115,7 @@ leakage, weak-trace survival, positive/negative strong-trace retention, trace
 selectivity, probe accuracy, delta norm, paired seed win rate, and boundary
 status.
 
-```bash
-uv run --extra dev python benchmarks/run_half_recall_trace_survival.py
-uv run --extra dev python benchmarks/verify_half_recall_trace_survival.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The claim is narrow and practical: under salience-separable Recall proposals,
 Half can act as stateless trace thinning, letting sufficiently strong traces
@@ -152,10 +146,7 @@ memory when CUDA is used. The verifier checks replicate-level throughput
 against train examples divided by train seconds, then checks summary and
 resource min/max throughput fields against the recorded replicate rows.
 
-```bash
-uv run --extra dev python benchmarks/run_half_recall_fair_training.py
-uv run --extra dev python benchmarks/verify_half_recall_fair_training.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The current narrow result is not that Half beats every thresholding activation
 on every scalar metric. SoftShrink can be more aggressive on target MSE in this
@@ -196,10 +187,7 @@ report also carries a `half_effect` block whose deltas and ratios must match the
 recorded run rows, so the benchmark cannot silently drift into an unpaired seed
 comparison.
 
-```bash
-uv run --extra dev python benchmarks/run_recall_refiner.py
-uv run --extra dev python benchmarks/verify_recall_refiner.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The claim is deliberately small: iterative Recall plus Half can improve a
 controlled hidden-vector reconstruction task and reduce weak correction drift
@@ -221,10 +209,7 @@ where Half is expected to help. It freezes Qwen, extracts real hidden states as
 clean latent targets, projects them into a compact latent space, corrupts them
 with feature masking and noise, and injects a weak post-recall trace pollutant.
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_hidden_refiner_half.py
-uv run --extra dev python benchmarks/verify_qwen_hidden_refiner_half.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The comparison is deliberately paired: `refiner_no_half` and `refiner_half`
 share the same recall architecture, initialization seed, training batches,
@@ -250,10 +235,7 @@ It also records the train/eval data seeds, an explicit clean-workspace training
 objective contract, the repair/signal/consistency loss weights, samples per
 second, and a resource profile:
 
-```bash
-uv run --extra dev python benchmarks/run_pulse_refiner_repair.py
-uv run --extra dev python benchmarks/verify_pulse_refiner_repair.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 `fold_refiner_no_half` uses the same shared Fold-style trunk and RecallExecutor
 capacity without Half. `pulse_refiner_half` uses public `Pulse` plus
@@ -300,10 +282,7 @@ while final MSE has a bounded mean ratio of about `1.013` and a worst-seed ratio
 of about `1.044`. The verifier requires the repeatable selectivity gains and
 also requires the report to retain the final-MSE non-dominance outcome.
 
-```bash
-uv run --extra torch python benchmarks/run_pulse_refiner_multiseed.py --replicates 3 --base-seed 97 --train-steps 260 --eval-batches 32 --weak-trace-strength 0.55 --device cuda
-uv run --extra dev python benchmarks/verify_pulse_refiner_multiseed.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Latent Repair Goal
 
@@ -311,9 +290,7 @@ The latent repair goal verifier aggregates the controlled repair checks:
 Half recall-trace survival, Half fair training, direct RecallExecutor
 hidden-state repair, and Pulse/Fold compact-workspace repair.
 
-```bash
-uv run --extra dev python benchmarks/verify_latent_repair_goal.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 It does not create a new benchmark. It makes the release gate check that the
 pieces agree as one claim chain: Half thins weak traces without becoming a
@@ -330,12 +307,7 @@ chat strings into ARTI text tensors, trains small ARTI-side frontends, and uses
 Qwen token ids only at the frozen boundary for canonical target-label encoding,
 target labels, final decoding, and conditional-NLL measurement:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_string_recall_refiner_answering.py --model-id Qwen/Qwen3-0.6B --steps 3000 --batch-size 64 --condition-loss-weight 0.35 --answer-identity-loss-weight 0.5 --max-new-tokens 20 --pulse-count 8 --fragment-dim 128 --matched-mean-dim 640 --max-chars 384 --device cuda
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_string_recall_refiner_answering.py
-uv run --extra torch --extra qwen python benchmarks/run_qwen_string_pulse_multiseed.py --model-id Qwen/Qwen3-0.6B --replicates 3 --base-seed 71 --seed-stride 8 --steps 3000 --batch-size 64 --condition-loss-weight 0.35 --answer-identity-loss-weight 0.5 --max-new-tokens 20 --pulse-count 8 --fragment-dim 128 --matched-mean-dim 640 --max-chars 384 --device cuda
-uv run --extra dev python benchmarks/verify_qwen_string_pulse_multiseed.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 It records exact canonical-answer reproduction as one metric, but
 `RecallExecutor` is also scored with sentence coherence, loop penalty,
@@ -418,10 +390,7 @@ zero phase should remove the advantage.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_authority_prompt_injection.py
-uv run --extra dev python benchmarks/verify_authority_prompt_injection.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This is not a production prompt-injection security guarantee. It verifies the
 mechanism boundary: authority identity is represented by phase tensors, not by
@@ -438,10 +407,7 @@ viewer visibility.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_membrane_visibility_routing.py
-uv run --extra dev python benchmarks/verify_membrane_visibility_routing.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This validates the narrow invariant that inner speech is a normal token stream
 with different visibility and phase metadata, not a hidden latent channel and
@@ -462,10 +428,7 @@ It compares:
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_runtime_vocab_binding.py
-uv run --extra dev python benchmarks/verify_runtime_vocab_binding.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This is a synthetic effect test, not a language benchmark. It verifies the
 mechanism claim that fixed heads fail when output order is runtime-bound, while
@@ -485,10 +448,7 @@ It compares:
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_runtime_vocab_replacement.py
-uv run --extra dev python benchmarks/verify_runtime_vocab_replacement.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This validates the narrow alpha claim that the model can learn symbol structure
 from rigid tensors instead of binding meaning to fixed output rows. It is still
@@ -503,10 +463,7 @@ row order.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_runtime_vocab_permutation.py
-uv run --extra dev python benchmarks/verify_runtime_vocab_permutation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This directly protects the alpha claim that the output index is a current
 runtime-vocab slot, not a permanent model vocabulary row.
@@ -520,10 +477,7 @@ token span weights to recover the same pulse-level latent sequence.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_pulse_vocab_invariance.py
-uv run --extra dev python benchmarks/verify_pulse_vocab_invariance.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This validates the narrow claim that pulse can decouple the model's reasoning
 steps from a particular tokenization. It does not prove arbitrary tokenizer
@@ -538,10 +492,7 @@ control where `r` and `rr` are forced to the same pulse latent.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_pulse_distinctness.py
-uv run --extra dev python benchmarks/verify_pulse_distinctness.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Learned Pulse Efficiency
 
@@ -555,17 +506,11 @@ corrected Pulse path.
 
 Run the compact synthetic check with:
 
-```bash
-uv run --extra dev python benchmarks/run_learned_pulse_compaction.py
-uv run --extra dev python benchmarks/verify_learned_pulse_compaction.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Run the frozen-Qwen adapter probe with:
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_learned_pulse_adapter.py
-uv run --extra dev python benchmarks/verify_qwen_learned_pulse_adapter.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 These probes support only an adapter-level efficiency claim: optimized learned
 Pulse should preserve held-out tokenization accuracy within a small tolerance,
@@ -593,10 +538,7 @@ provided as a visible tensor instead of an opaque token id.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_text_bitmap_vocab.py
-uv run --extra dev python benchmarks/verify_text_bitmap_vocab.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The micro-glyph distinctness benchmark adds the small-character pressure test
 for this surface. It covers punctuation such as `.` and `,`, narrow glyphs such
@@ -604,10 +546,7 @@ as `i`, `l`, and `1`, repeated letters such as `r`/`rr`, OOV-like strings,
 shift/bold/noise variants, runtime slot binding, pulse distance retention, and
 control-character auxiliary channels.
 
-```bash
-uv run --extra dev python benchmarks/run_micro_glyph_distinctness.py
-uv run --extra dev python benchmarks/verify_micro_glyph_distinctness.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Passing this benchmark means the fallback bitmap renderer preserves enough
 micro-glyph information for controlled runtime-vocab experiments. It is still
@@ -624,10 +563,7 @@ naive-sum controls while exercising block-level summary diagnostics.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_source_integrity_stereo.py
-uv run --extra dev python benchmarks/verify_source_integrity_stereo.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Source Integrity Multisource
 
@@ -637,10 +573,7 @@ source-separable under normal readout, and that source permutation, missing
 source, wrong basis, partial corruption, and naive-sum collapse controls are
 detected or localized.
 
-```bash
-uv run --extra dev python benchmarks/run_source_integrity_multisource.py
-uv run --extra dev python benchmarks/verify_source_integrity_multisource.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Multi-Source Reliability Arena
 
@@ -652,10 +585,7 @@ Integrity Carrier, and Source Integrity Carrier plus an ARTI block while
 recording token count, parameter count, reconstruction error, localization,
 impersonation rejection, leakage, block-level integrity, and timing.
 
-```bash
-uv run --extra dev python benchmarks/run_multisource_reliability_arena.py
-uv run --extra dev python benchmarks/verify_multisource_reliability_arena.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 ## Qwen 0.6B-Class Smoke
 
@@ -664,11 +594,7 @@ adapter path on Qwen-shaped hidden tensors. The default run is offline and does
 not download weights; pass `--run-model` after installing the optional `qwen`
 extra to load `Qwen/Qwen3-0.6B` through Hugging Face Transformers.
 
-```bash
-uv run --extra dev python scripts/quality_gate.py qwen
-uv run --extra torch --extra qwen python benchmarks/run_qwen_arti_smoke.py --run-model
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_arti_smoke.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This smoke checks source identity preservation and budget accounting for
 original Qwen, source-id embedding, ARTI carrier, and ARTI carrier plus an
@@ -683,10 +609,7 @@ the original dialogue path, `read_glyph_vocab()` scores an external visible-word
 bitmap vocabulary, and `dialogue_drift()` verifies that the glyph readout does
 not mutate ordinary next-token logits.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_glyph_runtime_adapter_api.py
-uv run --extra dev python benchmarks/verify_qwen_glyph_runtime_adapter_api.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This is API-surface evidence, not a trained tokenizer-replacement result.
 
@@ -702,10 +625,7 @@ and `lm_head` as a teacher. It trains only an ARTI runtime vocab output head to
 match the teacher distribution over a dynamic local candidate view built from
 frozen Qwen output-head rows.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_output_head_replacement.py
-uv run --extra dev python benchmarks/verify_qwen_output_head_replacement.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The expected evidence is teacher-student KL reduction plus local-slot
 permutation equivariance. This is the first head-replacement stage, not a full
@@ -716,10 +636,7 @@ body, and `lm_head` as teachers. It trains only a glyph/text tensor encoder that
 maps visible token tensors into Qwen's original embedding space, then forwards
 those embeddings through the frozen Qwen body with `inputs_embeds`.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_input_head_replacement.py
-uv run --extra dev python benchmarks/verify_qwen_input_head_replacement.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The expected evidence is lower embedding MSE, high embedding cosine, close
 frozen-body hidden states, bounded top-k next-token KL, and a readable short
@@ -731,10 +648,7 @@ visible token glyph tensors are encoded into Qwen embedding space, the frozen
 Qwen body produces hidden states from `inputs_embeds`, and an ARTI runtime vocab
 output head scores dynamic local candidate vocab views.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_closed_loop_replacement.py
-uv run --extra dev python benchmarks/verify_qwen_closed_loop_replacement.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The expected evidence is that input alignment does not regress, closed-loop KL
 falls far below a fixed-slot baseline, candidate permutation equivariance stays
@@ -749,10 +663,7 @@ the next context, and forwards the frozen Qwen body again through the ARTI input
 encoder. The report records the teacher token, ARTI local slot, appended visible
 token text, and next-step hidden/logit alignment after the append.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_autoregressive_closed_loop.py
-uv run --extra dev python benchmarks/verify_qwen_autoregressive_closed_loop.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Passing this smoke means the short-sequence local-slot writeback path is
 auditable and beats a fixed-slot baseline. It is still a greedy-teacher adapter
@@ -766,10 +677,7 @@ semantic hits, frozen Qwen repeated-logit drift, visible vocab previews, local
 slots, selected tokens, failure samples, and next-step hidden/logit changes
 after ARTI writeback.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_controlled_open_generation.py
-uv run --extra dev python benchmarks/verify_qwen_controlled_open_generation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Passing this benchmark supports the claim that ARTI runtime vocab binding can
 survive a longer controlled writeback loop while Qwen remains frozen. It does
@@ -804,10 +712,7 @@ untouched Qwen dialogue route.
 
 Run it with:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_runtime_vocab_pulse_semantic.py --steps 220 --eval-batches 16 --batch-size 128 --grad-accum-steps 2
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_runtime_vocab_pulse_semantic.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The current evidence supports a narrow mechanism claim: reading the current
 glyph runtime vocab gives exact semantic local-index answers under shuffled
@@ -822,9 +727,7 @@ surgery without adaptation.
 An additional strict probe can force the positive answer surface to be unseen
 during adapter answer training:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_runtime_vocab_pulse_semantic.py --steps 220 --eval-batches 16 --batch-size 128 --grad-accum-steps 2 --strict-heldout-surfaces --output benchmarks/results/qwen_runtime_vocab_pulse_strict_surface_probe.json
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The strict probe without a semantic bridge is intentionally not a green release
 gate. It records a real gap: with training positives limited to surface ids 0
@@ -835,11 +738,7 @@ vocab binding and slot-order generalization, but not unseen surface semantics.
 A second strict probe adds a frozen-Qwen metadata bridge to each external vocab
 item while keeping a nonzero down-weighted glyph channel:
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_runtime_vocab_pulse_semantic.py --steps 520 --eval-batches 16 --batch-size 128 --grad-accum-steps 2 --strict-heldout-surfaces --semantic-bridge --semantic-bridge-source metadata --vocab-glyph-scale 0.02 --output benchmarks/results/qwen_runtime_vocab_pulse_metadata_bridge_probe.json
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_runtime_vocab_metadata_bridge.py
-uv run --extra torch --extra qwen python benchmarks/verify_qwen_runtime_vocab_bridge_ablation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This bridge probe reaches about 0.93 strict held-out accuracy for
 `runtime_vocab_pulse` while tokenizer-only and fixed-head controls stay near
@@ -860,10 +759,7 @@ from rigid digit glyph tensors; the correct local slot depends on a relation
 inside the current set, such as distance from its mean or relative rank.
 Training and evaluation use disjoint candidate sets.
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_literal_output_context.py
-uv run --extra dev python benchmarks/verify_qwen_literal_output_context.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The three-seed comparison includes a fixed-slot control, a widened terminal
 `LiteralOutputHead`, and `OutputLexiconContext` before the ARTI-side body. The
@@ -886,10 +782,7 @@ validation, or heldout. Validation chooses checkpoints, and heldout strings are
 never used for optimization or selection. Every candidate view is shuffled and
 contains the confusable pair.
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_unseen_literal_transfer.py
-uv run --extra dev python benchmarks/verify_qwen_unseen_literal_transfer.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Across three seeds, the fixed-slot control stays near six-way chance at about
 0.165 unseen exact-string accuracy and loses identity under permutation. The
@@ -911,10 +804,7 @@ sentences one local character slot at a time. Train, validation, and test use
 different prompt templates, and checkpoint selection uses validation open
 generation rather than teacher-forced loss alone.
 
-```bash
-uv run --extra torch --extra qwen python benchmarks/run_qwen_literal_segmentation_generation.py
-uv run --extra dev python benchmarks/verify_qwen_literal_segmentation_generation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Across three seeds, the parameter-matched fixed character head reaches about
 0.958 exact/semantic sentence accuracy, the terminal dynamic head reaches about
@@ -947,9 +837,7 @@ checks that the current alpha chain covers the intended training-loop claim:
   contexts, precomputed runtime vocab banks, batch sampling time,
   forward/backward time, optimizer time, throughput, and peak memory
 
-```bash
-uv run --extra dev python benchmarks/verify_qwen_dynamic_vocab_goal.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 This gate is deliberately evidence-chain based. It supports the alpha claim
 that Qwen can be wrapped by ARTI-side external vocabulary interfaces under
@@ -965,10 +853,7 @@ answer supplied by the current visible glyph vocab rather than by Qwen's default
 next-token preference. The selected local slot is mapped back to token/text and
 written into a 4-12 step answer template.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_external_glyph_answering.py
-uv run --extra dev python benchmarks/verify_qwen_external_glyph_answering.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The evidence compares ARTI with a fixed glyph-slot head and tokenizer-only
 Qwen. It records external glyph answer hit rate, multi-step writeback match,
@@ -985,10 +870,7 @@ external glyph answer slot, then a lightweight decoder reads the selected glyph
 and emits Qwen token pieces step by step. The generated token pieces are written
 back through the frozen Qwen body.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_multitoken_glyph_decoder.py
-uv run --extra dev python benchmarks/verify_qwen_multitoken_glyph_decoder.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The task set includes OOV-like answers such as `qzvxr`, `glyphx`,
 `strawberrry`, repeated-letter strings, and small punctuation combinations. The
@@ -1006,10 +888,7 @@ bitmap-rendered word list, not Qwen's fixed tokenizer rows. Training uses one
 set of visible words; evaluation uses held-out/OOV strings such as repeated
 letters and artificial words.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_oov_text_vocab_finetune.py
-uv run --extra dev python benchmarks/verify_qwen_oov_text_vocab_finetune.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The narrow positive claim is that a glyph runtime head that directly reads the
 current bitmap vocab can select held-out visible words substantially better than
@@ -1024,10 +903,7 @@ while a separate ARTI-side glyph runtime head trains on the held-out visible-wor
 task. It records ordinary dialogue next-token logits before and after adapter
 training, then verifies max logit drift, KL drift, and top-1 preservation.
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_oov_dialogue_preservation.py
-uv run --extra dev python benchmarks/verify_qwen_oov_dialogue_preservation.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The positive claim is deliberately narrow: the OOV glyph-reading path can be
 trained without mutating the ordinary Qwen dialogue path in this frozen-route
@@ -1050,10 +926,7 @@ public token to emit the answer. It compares:
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_membrane_routing_training.py
-uv run --extra dev python benchmarks/verify_qwen_membrane_routing_training.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The current local result on CUDA shows membrane answer accuracy `1.000`, stream
 routing accuracy `1.000`, and inner leakage `0.000`; the all-public baseline
@@ -1085,10 +958,7 @@ The comparison separates four cases:
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_membrane_guessing_game.py
-uv run --extra dev python benchmarks/verify_qwen_membrane_guessing_game.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 The generated report includes normal hint accuracy, attack rejection rate,
 secret leakage rate, inner addressability rate, per-turn user-visible text,
@@ -1108,10 +978,7 @@ the simulated benchmark.
 
 Run it with:
 
-```bash
-uv run --extra dev python benchmarks/run_qwen_membrane_guessing_game_real_forward.py
-uv run --extra dev python benchmarks/verify_qwen_membrane_guessing_game_real_forward.py
-```
+> The original command requires research assets that are not distributed. Use the public software gates in the release guide for this package.
 
 Passing this smoke means the real-Qwen frozen hidden-state integration path ran
 or that the report clearly records why it could not run. It still does not

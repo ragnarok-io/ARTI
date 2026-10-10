@@ -1,53 +1,56 @@
 # Stability Policy
 
-`arti-fit 3.1.0a1` is an alpha release of ARTI's current program-runtime
-surface. It publishes the current package rather than preserving the retired
-layered Recall surface as the default.
+`arti-fit 3.2.0` is a stable package release. Neural component lifecycle is
+independent of the package version and remains explicit in the component registry.
 
-## Current Surface
+## Supported Workflows
 
-- `arti.ARTILayer` is `arti/layer@3`: an identity-safe host for a federated
-  program. Without an installed program it preserves its input.
-- `arti.ARTI.attach`, `.arti.st` artifacts, component provenance, attachment,
-  and fresh reload remain supported public workflows.
-- `arti.mechanisms` contains reusable operations including Formula Fabric,
-  topology, observation, pulse, resource, and program-runtime components.
-- `arti.legacy` contains historical `LayerRecall` and `StatefulRecall`
-  implementations for artifact inspection only. New integrations should not
-  depend on them.
+- PyTorch native models, attachments and pretrained integrations share one
+  training session and task-objective contract.
+- Local single-process Torch runs qualify periodic checkpoints, supported
+  optimizer/scheduler/RNG continuation and state-preserving evaluation.
+- Classification and text-only causal-LM recipes connect data, task loss,
+  continuation, evaluation and portable inference. Their exact supported
+  preprocessing and deployment contracts are documented in the recipe guides.
+- Native JAX bindings execute shared Formula and static resource/program graphs
+  with explicit PyTrees; Flax integration is optional.
+- SafeTensors, component provenance and supported native graph sidecars provide
+  validated assets. Arbitrary custom Python implementations remain caller-owned.
 
-Component references and package versions are independent. A component's
-reference, schema, configuration, and provenance describe its artifact
-contract; Python class names alone do not select artifact behavior.
+## Component Boundaries
 
-## Alpha Boundary
+`ARTILayer` is an identity-safe host for a configured `FederatedProgram` or
+`ProgramGraph`. Its empty form preserves the input. Advanced graph construction,
+dynamic branch search and some Formula mechanisms retain their declared alpha
+lifecycle; a stable package version does not silently relabel those contracts.
+Standalone mechanisms remain independently versioned.
 
-`arti/layer@3`, federated-program composition, branch search, resource graphs,
-and advanced Formula Fabric programs are alpha contracts. They are published
-for developer experimentation, but may evolve before a stable API commitment.
-The package does not claim broad downstream superiority, a production service
-SLA, universal throughput gains, full JAX parity, or a general replacement for
-an arbitrary host model's context state.
+Canonical saved references are content-addressed. Python names are convenience
+entry points, not artifact identities. `arti.legacy` contains retired layered
+Recall implementations and does not define the default execution shell.
 
-## Compatibility
+## Compatibility And Limits
 
-Normal `.arti.st` loading uses explicit component provenance and does not
-depend on Python pickle. Stable component contracts are deprecated before
-removal except for documented correctness or security fixes. Alpha contracts
-may change between alpha releases; artifacts should record their canonical
-component reference and schema.
+Stable contracts receive explicit deprecation before ordinary removal, except
+documented correctness or security repairs. Evolving alpha contracts can change;
+assets must retain their exact component and schema provenance.
 
-## Support
+The local recipes do not qualify arbitrary sharded optimizer resume, hosted
+multi-tenant serving, vLLM/SGLang/TensorRT-LLM compatibility, full JAX parity,
+unbounded dynamic graphs or broad task-quality superiority. CUDA performance
+depends on the chosen program and hardware. Evaluation must use the actual task,
+not substitute an internal diagnostic metric for successful answers.
 
 | Area | Status |
 | --- | --- |
-| Python | 3.10, 3.11, 3.12 |
-| PyTorch | 2.2 or newer |
+| Python | 3.10, 3.11, 3.12 release matrix |
+| PyTorch | 2.2+; optional integrations can require newer upstream versions |
 | CPU | Supported |
-| NVIDIA CUDA | Supported through CUDA-enabled PyTorch; workload-specific performance varies |
-| JAX | Optional functional subset; not full parity |
+| CUDA | Through CUDA-enabled PyTorch; profile-specific performance |
+| JAX | Native Formula and bounded/static ProgramGraph bindings |
+| Flax | Optional native module/model adaptation |
+| Serving | Optional load-once FastAPI/Uvicorn integration |
 | Web runtime | Experimental |
 
-Every release is expected to pass package-build, isolated-install, public API,
-documentation, and privacy checks. CUDA or task-quality claims require their
-own recorded evidence.
+Release gates validate the exact code and package candidate. Hardware scaling,
+distributed deployment and task effectiveness require their own evidence.

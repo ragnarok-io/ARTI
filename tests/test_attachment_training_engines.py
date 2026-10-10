@@ -62,6 +62,7 @@ def test_transformers_trainer_uses_attachment_optimizer_and_artifact(tmp_path) -
                 "per_device_train_batch_size": 1,
                 "logging_steps": 1,
                 "disable_tqdm": True,
+                "use_cpu": True,
             }
         },
     )
@@ -70,7 +71,7 @@ def test_transformers_trainer_uses_attachment_optimizer_and_artifact(tmp_path) -
     assert result.steps == 2
     assert result.checkpoint_path is not None
     assert result.checkpoint_path.exists()
-    assert session.engine_object.__class__.__name__ == "AttachmentTrainer"
+    assert session.engine_object.__class__.__name__ == "ARTITrainer"
     restored_base = tiny_qwen()
     restored_base.load_state_dict(base_state)
     restored = arti.ARTI.load(
