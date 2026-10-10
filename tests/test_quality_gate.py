@@ -36,3 +36,12 @@ def test_gate_reports_do_not_embed_interpreter_or_user_path():
     assert gate.display_command([gate.PY, "scripts/check_package.py"]) == "python scripts/check_package.py"
     assert gate.portable_output_tail(str(gate.ROOT) + "/run") == "./run"
     assert gate.portable_output_tail(str(Path.home()) + "/cache") == "~/cache"
+
+
+def test_gate_creates_temporary_parent_in_a_fresh_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    assert not (tmp_path / ".tmp").exists()
+    row = gate.run_command([
+        gate.PY, "-c", "from pathlib import Path; assert Path('.tmp').is_dir()",
+    ])
+    assert row["returncode"] == 0

@@ -92,6 +92,7 @@ def commands_for(gates):
 
 
 def run_command(command):
+    (ROOT / ".tmp").mkdir(parents=True, exist_ok=True)
     runtime = [
         f"{part}-{os.getpid()}-{time.time_ns()}" if part.startswith("--basetemp=") else part
         for part in command
