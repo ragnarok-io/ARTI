@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import csv
 import hashlib
@@ -185,7 +186,11 @@ def audit_archive_contents(sdist: Path, wheel: Path, manifest: dict) -> list[str
 
 
 def run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> None:
-    print("+", " ".join(command))
+    if len(command) == 3 and command[1] == "-c":
+        command = [*command[:2], ast.unparse(ast.parse(command[2]))]
+        print("+", " ".join(command[:2]), "<wheel import smoke>")
+    else:
+        print("+", " ".join(command))
     subprocess.run(command, cwd=cwd, check=True, env=env)
 
 
@@ -336,7 +341,7 @@ def main() -> None:
                 (
                     "import arti, arti.functional, arti.torch, arti.jax, arti.experimental.web, arti.mechanisms, arti.legacy, importlib.util, json, torch; "
                     "import os, pathlib; "
-                    "assert pathlib.Path(arti.__file__).resolve().parent == pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti'; "
+                    "assert pathlib.Path(arti.__file__).resolve().parent == (pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti').resolve(), 'wheel import must use the isolated installation root'; "
                     "import arti.cli; "
                     "assert arti.torch.ClassificationRecipe is arti.ClassificationRecipe; "
                     "assert arti.torch.CausalLMRecipe is arti.CausalLMRecipe; "

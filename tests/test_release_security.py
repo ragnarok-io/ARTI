@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -11,6 +13,7 @@ from scripts.check_package import (
     archive_member_findings,
     content_findings,
     wheel_record_findings,
+    run,
 )
 
 import arti.cli as cli
@@ -220,3 +223,10 @@ def test_archive_inventory_never_admits_default_training_outputs() -> None:
     assert archive_member_findings(
         "wheel", names, {"file_count": count, "paths_sha256": digest}
     ) == ["wheel: contains a disallowed archive path"]
+
+
+def test_inline_wheel_smoke_preserves_separate_assertion_lines() -> None:
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        run([sys.executable, "-c", "import pathlib; assert False, 'smoke diagnostic'"])
+    assert "\n" in failure.value.cmd[2]
+    assert "assert False" in failure.value.cmd[2]
