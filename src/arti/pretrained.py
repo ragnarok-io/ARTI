@@ -12,7 +12,7 @@ import hashlib
 import inspect
 import json
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -159,6 +159,9 @@ class PretrainedFitResult:
     checkpoint_path: Path | None = None
     run_directory: Path | None = None
     stop_reason: str = "steps_completed"
+    best_checkpoint_path: Path | None = None
+    selected_checkpoint_path: Path | None = None
+    selection: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def model(self) -> Any:
@@ -446,16 +449,18 @@ class ARTIPretrained:
         run: ARTITrainingRunConfig | None = None,
         eval_data: Iterable[Any] | None = None,
         evaluation_weight: Callable[[Any], float] | None = None,
+        validation_fn: Callable[[Any], Mapping[str, Any]] | None = None,
         reporter: RunReporter | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        on_checkpoint=None,
         resume_from_checkpoint: str | Path | None = None,
     ) -> PretrainedFitResult:
         if not self.applied:
             self.apply()
         assert self.plan_value is not None
         session = self.trainer(loss_fn=loss_fn, step_fn=step_fn, optimizer=optimizer, scheduler=scheduler, resume_from_checkpoint=resume_from_checkpoint)
-        fitted = session.fit(train_data, steps=steps, trainer_kwargs=trainer_kwargs, run=run, eval_data=eval_data, evaluation_weight=evaluation_weight, reporter=reporter, stop_requested=stop_requested)
-        result = PretrainedFitResult(self, fitted.engine, fitted.steps, fitted.loss_history, trainer=session.engine_object, optimizer=session.optimizer, scheduler=session.scheduler, session=session, checkpoint_path=fitted.checkpoint_path, run_directory=fitted.run_directory, stop_reason=fitted.stop_reason)
+        fitted = session.fit(train_data, steps=steps, trainer_kwargs=trainer_kwargs, run=run, eval_data=eval_data, evaluation_weight=evaluation_weight, validation_fn=validation_fn, reporter=reporter, stop_requested=stop_requested, on_checkpoint=on_checkpoint)
+        result = PretrainedFitResult(self, fitted.engine, fitted.steps, fitted.loss_history, trainer=session.engine_object, optimizer=session.optimizer, scheduler=session.scheduler, session=session, checkpoint_path=fitted.checkpoint_path, run_directory=fitted.run_directory, stop_reason=fitted.stop_reason, best_checkpoint_path=fitted.best_checkpoint_path, selected_checkpoint_path=fitted.selected_checkpoint_path, selection=fitted.selection)
         self.fit_result = result
         return result
 
@@ -513,7 +518,7 @@ class ARTIPretrained:
             scheduler=None if session is None else session.scheduler,
             training_state=None
             if session is None
-            else session._checkpoint_state(),
+            else session._checkpoint_state(path),
         )
         stem = target.with_suffix("")
         plan_path = stem.with_name(f"{stem.name}.plan.json")

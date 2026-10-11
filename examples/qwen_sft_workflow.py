@@ -128,6 +128,7 @@ def prepare(output, *, train_samples=256, validation_samples=32, test_samples=32
         },
         "data": {
             "path": "gsm8k.jsonl",
+            "cache_dir": "prepared-chat",
             "batch_size": 16,
             "max_length": 256,
             "overlength": "drop",
@@ -145,6 +146,7 @@ def prepare(output, *, train_samples=256, validation_samples=32, test_samples=32
         },
         "optimizer": {"weight_decay": 0.01, "scheduler": "constant", "implementation": "auto"},
         "generation": {"max_new_tokens": 32, "batch_size": 8},
+        "evaluation": {"generate_samples": 16, "sampling": "seeded", "sample_seed": seed, "comparison": "numeric"},
         "run": {
             "output_dir": "train",
             "checkpoint_steps": 25,
@@ -157,7 +159,7 @@ def prepare(output, *, train_samples=256, validation_samples=32, test_samples=32
     return output / "recipe.json"
 
 
-def run(output, *, max_seconds=300):
+def run(output, *, max_seconds=300, reporter=None):
     output = Path(output)
     started = time.monotonic()
     deadline = started + max_seconds
@@ -175,7 +177,8 @@ def run(output, *, max_seconds=300):
     first = current.fit(
         run=replace(
             current.config.run, output_dir=output / "train", max_seconds=min(150, available)
-        )
+        ),
+        reporter=reporter,
     )
     reference = {
         key: value.detach().cpu().clone()
@@ -195,6 +198,7 @@ def run(output, *, max_seconds=300):
         steps=40,
         resume_from_checkpoint=first["checkpoint"],
         run=replace(continued.config.run, output_dir=output / "resume", max_seconds=available),
+        reporter=reporter,
     )
     continued.model.arti.disable()
     try:
@@ -203,9 +207,9 @@ def run(output, *, max_seconds=300):
         )
     finally:
         continued.model.arti.enable()
-    test = continued.evaluate("test", generate_samples=16, output=output / "test.json")
+    test = continued.evaluate("test", generate_samples=16, output=output / "test.json", checkpoint=second["selected_checkpoint"])
     probe = continued.data.splits["test"].batches(1)[0]
-    with torch.inference_mode():
+    with continued.session.checkpoint_context(second["selected_checkpoint"]), torch.inference_mode():
         inputs = {key: value.to("cuda") for key, value in probe.items()}
         expected = continued.model(**inputs, use_cache=False).logits.detach().cpu()
     state_changed_after_resume = any(
@@ -235,6 +239,8 @@ def run(output, *, max_seconds=300):
         "resume_changed_parameters": state_changed_after_resume,
         "model": second["model"],
         "checkpoint": second["checkpoint"],
+        "selected_checkpoint": second["selected_checkpoint"],
+        "selection": second["selection"],
         "reload_logits_max_abs_error": float((actual - expected).abs().max()),
         "gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "gpu_peak_reserved_bytes": torch.cuda.max_memory_reserved(),

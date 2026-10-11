@@ -5,6 +5,21 @@ checkpoint continuation, independent evaluation and a portable inference bundle.
 It uses the same `ARTITrainingSession` as classification, native programs and
 model attachments. It does not create another training engine.
 
+[Recover a Task Run](recipe-recovery.md) covers restoring the original optimizer
+target and finishing evaluation/export without repeating completed training.
+Use [Prepare Qwen Training Data](qwen-data-preparation.md) to reuse prepared
+supervision across plan, training and recovery without loading host weights.
+Use [Import Local SFT Data](qwen-data-import.md) for explicitly split chat or
+prompt/completion exports and portable source lineage.
+Use [Evaluate Generated Answers](qwen-evaluation.md) for declarative generation
+checks, answer-based checkpoint selection and offline receipt scoring.
+Use [Independent Asset Evaluation](qwen-independent-evaluation.md) for new
+test-only data without rebuilding training state.
+Use [Recoverable Prediction Runs](qwen-prediction-runs.md) to commit large
+inference jobs by batch and avoid regenerating completed outputs after interruption.
+Use [Hand Off a Qwen Deployment](qwen-deployment.md) to inspect dependencies and
+move a native-base package without relying on the training machine's cache.
+
 Install the optional model and serving integrations:
 
 ```bash
@@ -58,6 +73,7 @@ attn_implementation = "sdpa"
 
 [data]
 path = "conversations.jsonl"
+cache_dir = "prepared-chat"
 batch_size = 16
 max_length = 256
 overlength = "error"
@@ -126,6 +142,7 @@ implicitly covered by the default read-only adapter serving profile.
 ## Train And Continue
 
 ```bash
+arti recipe prepare-data recipe.toml --output prepared.json
 arti recipe plan recipe.toml --output plan.json
 arti recipe check recipe.toml
 arti recipe train recipe.toml --run-dir outputs/first
@@ -138,6 +155,35 @@ saved, followed by periodic and final checkpoints. Resume restores ARTI weights,
 optimizer, scheduler, RNG/scaler, epoch order, cursor and token/sample counters.
 Model revision, template, task labels and optimizer/data-order contracts must
 match. Use the returned checkpoint path when a budget ends early.
+
+### Validation Selection
+
+Default export still uses the last model; automatic early stopping is off.
+Declare an optional policy alongside `run.evaluation_steps`:
+
+```toml
+[run.validation]
+monitor = "loss"
+mode = "min"
+selection = "best"
+patience = 6
+min_evaluations = 4
+min_delta = 0.0001
+```
+
+Built-in validation includes target-token NLL (`loss`), perplexity and
+`teacher_forced_token_accuracy`. They are not generation correctness. Python
+callers can pass `validation_fn=lambda session: recipe.evaluate("validation",
+generate_samples=32)` and monitor `generation_exact_match` with `mode="max"`;
+this explicitly adds generation cost. No teacher/reasoning trace is introduced.
+
+`checkpoint` remains the last complete training state. `selected_checkpoint`
+identifies the chosen inference source, and `selection` records its metric/step.
+Final validation/export use that source while the live recipe remains at last.
+`recipe.evaluate("test", checkpoint=result["selected_checkpoint"],
+generate_samples=32)` evaluates the exported model's source. Deployment metadata
+contains selection provenance, not source machine paths. Resume with the same
+policy/cadence; see [Training Workflow](training-workflow.md#select-and-stop-on-validation).
 
 Microbatch losses are weighted by their actual target-token counts before
 gradient accumulation. Unequal answer lengths therefore match a single joint
@@ -180,6 +226,21 @@ forward loop inside the core trainer.
 
 ## Deploy The Same Asset
 
+For variable conversation lengths, [Token Budget Batching](qwen-token-batching.md)
+keeps independent rows within an explicit padded-token budget across training,
+teacher-forced evaluation and exact continuation.
+
+The same recipe can use `training.engine="accelerate"` for the qualified local
+single-process lifecycle. See [Train With Local Accelerate](accelerate-training.md)
+for accumulation, checkpoint/continuation and precision boundaries.
+
+Use [A Custom Qwen Program](qwen-custom-programs.md) to declare an installed
+layer factory across the same train/resume/evaluate/export/CLI deployment workflow.
+
+Use [Compare Qwen Evaluation Results](qwen-evaluation-comparison.md) to pair
+candidate/baseline replies and identify regressions from stored receipts without
+running generation again.
+
 The exported directory contains `arti-hub.json`, `model.arti.st` plus bound
 sidecars/native graphs, `tokenizer/`, and `deployment.json`. It carries canonical
 base model ID + pinned revision, not the original local cache path. Base weights
@@ -207,11 +268,36 @@ The optional FastAPI/Uvicorn worker loads one asset once. `POST /predict` accept
 `{"records": [...]}` for actual batch inference. `POST /chat` accepts
 `{"messages": [...], "max_new_tokens": 64}`. `/health`, `/docs` and `/openapi.json`
 expose readiness and the contract. One worker serializes model use; multiple
-workers each load their own model. This is an ASGI integration, not a claim of
-OpenAI API compatibility, request-to-request dynamic batching, authentication,
+workers each load their own model. Compatible requests now share dynamic batches
+by default for the builtin read-only profile. Different generation limits/effective
+batch sizes stay separate; histories remain independent batch rows, never one
+concatenated conversation. This is not OpenAI API compatibility, authentication,
 vLLM/SGLang/NIM/TensorRT-LLM support or session-isolated forward plasticity.
 
+```bash
+arti recipe serve outputs/continued/model --device cuda --batching auto --max-batch-size 32 --batch-wait-ms 4 --max-pending-records 1024
+```
+
+`max_batch_size` caps dynamic dispatch rows. The saved generation batch size (or
+a request override) can select a smaller limit. A larger server cap alone does
+not override the saved profile's memory choice. `batching=off` keeps per-request
+dispatch; `on` is the developer's explicit assertion of independent row semantics
+for a custom predictor. `auto` leaves caller-managed mutable state per-request.
+The worker does not invent session storage or share a session's mutable tensor
+between unrelated clients.
+
+`/metrics` reports counts/aggregate time only: `predictor_calls` counts dispatches,
+not autoregressive token forwards. Full queues return 503/Retry-After; an ASGI
+disconnect skips queued work. Closing rejects queued work and awaits the active
+model call, which cannot be interrupted by Python cancelling the HTTP task.
+Read [Task Recipes](task-recipes.md#cross-request-serving) for Python/lifecycle use.
+
 ## Reproduce The Real Data Workflow
+
+For a native Hugging Face engine rather than this recipe's local Torch lifecycle,
+see [Transformers and TRL Training](transformers-training.md). It retains ARTI
+parameter/asset ownership while delegating data preparation and the loop to the
+chosen native Trainer; the two preprocessing/resume policies are explicit.
 
 ```bash
 python examples/qwen_sft_workflow.py --prepare-only --output .tmp/qwen-sft
@@ -222,11 +308,6 @@ Preparation fetches pinned original GSM8K JSONL and extracts human final numeric
 answers; calculation annotations/CoT are not supervised. Validation is held out
 from source train records; test uses source test records. Data revision/file
 digests, split IDs and all prediction records are saved locally.
-
-The timed example requires a CUDA device and the pinned Qwen checkpoint already
-in the local Hugging Face cache. Download/cache the base checkpoint before the
-timed run. For an ordinary online recipe, leave `model.local_files_only=false`;
-the example enables it to keep model downloading out of the bounded workflow.
 
 The example freezes Qwen, trains 200 updates, restores and continues 40, evaluates
 paired base/adapted test outputs, then reloads the deployed model and verifies

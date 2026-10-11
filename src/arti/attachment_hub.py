@@ -88,7 +88,7 @@ def save_attachment_pretrained(
             artifact_path,
             optimizer=training_session.optimizer,
             scheduler=training_session.scheduler,
-            training_state=training_session._checkpoint_state(),
+            training_state=training_session._checkpoint_state(artifact_path),
             metadata=metadata,
         )
     config_path = target / DEFAULT_CONFIG

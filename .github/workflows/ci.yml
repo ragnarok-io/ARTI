@@ -9,6 +9,7 @@ on:
 jobs:
   package:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +20,9 @@ jobs:
       ACCELERATE_USE_CPU: "true"
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,15 +34,33 @@ jobs:
       - run: uv pip install --index https://download.pytorch.org/whl/cpu "torch==2.11.0+cpu"
       - run: uv run --no-sync ruff check src scripts tests examples
       - name: Public API, artifacts and privacy
-        run: uv run --no-sync python scripts/quality_gate.py quick --fail-fast
+        run: uv run --no-sync python scripts/quality_gate.py quick --fail-fast --output .tmp/ci-quick.json
       - name: Programs, compiler and learning regions
-        run: uv run --no-sync python scripts/quality_gate.py mainline --fail-fast
+        run: uv run --no-sync python scripts/quality_gate.py mainline --fail-fast --output .tmp/ci-mainline.json
       - name: Task recipes, continuation and ASGI
-        run: uv run --no-sync python scripts/quality_gate.py recipes --fail-fast
+        run: uv run --no-sync python scripts/quality_gate.py recipes --fail-fast --output .tmp/ci-recipes.json
+      - name: Native task lifecycle, recovery, episodes and project experience
+        run: uv run --no-sync python scripts/quality_gate.py lifecycle --fail-fast --output .tmp/ci-lifecycle.json
       - run: uv run --no-sync python scripts/check_release_readiness.py
       - run: uv build
       - if: matrix.python-version == '3.12'
         run: uv run --no-sync python scripts/check_package.py
+      - name: Installed wheel user lifecycle
+        if: matrix.python-version == '3.12'
+        run: uv run --no-sync python scripts/check_installed_task_workflow.py
+      - name: Retain CPU gate and package receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: cpu-${{ matrix.os }}-${{ matrix.python-version }}
+          path: |
+            .tmp/ci-*.json
+            .tmp/ci-*.md
+            .tmp/quality-*.xml
+            .tmp/installed-task-workflow.*
+            dist/
+          if-no-files-found: ignore
 
   docs:
     runs-on: ubuntu-latest
@@ -49,9 +71,51 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --locked --extra docs --no-install-package torch --no-install-package triton-windows
+      - run: uv sync --locked --extra docs --extra qwen --no-install-package torch --no-install-package triton-windows
       - run: uv pip install --index https://download.pytorch.org/whl/cpu "torch==2.11.0+cpu"
-      - run: uv run --no-sync mkdocs build --strict
+      - run: uv run --no-sync python scripts/quality_gate.py docs --fail-fast --output .tmp/ci-docs.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: docs-receipts
+          path: .tmp/ci-docs.*
+
+  integrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CUDA_VISIBLE_DEVICES: "-1"
+      ACCELERATE_USE_CPU: "true"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      RAY_TRAIN_V2_ENABLED: "1"
+      WANDB_MODE: offline
+      WANDB_SILENT: "true"
+      MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --extra dev --extra qwen --extra serve --extra trl --extra ray --extra wandb --extra mlflow --no-install-package torch --no-install-package triton-windows
+      - run: uv pip install --index https://download.pytorch.org/whl/cpu "torch==2.11.0+cpu"
+      - run: uv pip install "sqlalchemy>=2.0" "alembic>=1.13"
+      - name: Native CPU SDK integration with no skipped cases
+        run: uv run --no-sync python scripts/quality_gate.py integrations --fail-fast --output .tmp/ci-integrations.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: optional-cpu-sdk-receipts
+          path: |
+            .tmp/ci-integrations.*
+            .tmp/quality-integrations.xml
 
   jax:
     runs-on: ubuntu-latest
@@ -68,4 +132,12 @@ jobs:
           python-version: "3.12"
       - run: uv sync --locked --extra dev --extra jax --extra flax --no-install-package torch --no-install-package triton-windows
       - run: uv pip install --index https://download.pytorch.org/whl/cpu "torch==2.11.0+cpu"
-      - run: uv run --no-sync python scripts/quality_gate.py jax --fail-fast
+      - run: uv run --no-sync python scripts/quality_gate.py jax --fail-fast --output .tmp/ci-jax.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          include-hidden-files: true
+          name: jax-receipts
+          path: |
+            .tmp/ci-jax.*
+            .tmp/quality-jax.xml

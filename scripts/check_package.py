@@ -268,6 +268,17 @@ def main() -> None:
             "arti/recipe_chat.py",
             "arti/recipe_adapters.py",
             "arti/recipe_workflow.py",
+            *{f"arti/{name}.py" for name in (
+                "python_factory", "ray_training", "recipe_assets", "recipe_batching",
+                "recipe_chat_cache", "recipe_deployment", "recipe_episode", "recipe_evaluation",
+                "recipe_export", "recipe_files", "recipe_import", "recipe_prediction",
+                "recipe_recovery", "recipe_runtime", "recipe_scoring", "recipe_suite",
+                "recipe_validation", "reporting", "task_project", "task_recipe", "task_scaffold",
+                "task_status", "training_validation", "transformers_training",
+            )},
+            *{f"arti/templates/task/{name}" for name in (
+                "application.py", "workflow.py", "README.md", "TUTORIAL.md",
+            )},
             "arti/recipe_serving.py",
             "arti/recipes.py",
             "arti/language_recipe.py",
@@ -311,6 +322,10 @@ def main() -> None:
             "arti/integrations/qwen.py",
             "arti/schemas/fit-config.schema.json",
             "arti/schemas/task-graph.schema.json",
+            *{f"arti/schemas/task-{kind}.schema.json" for kind in (
+                "project", "recipe", "snapshot", "transform", "prediction", "files",
+                "episodes", "suite", "runtime", "export",
+            )},
             "arti/torch/fit.py",
         }
         missing = sorted(required - names)
@@ -343,6 +358,20 @@ def main() -> None:
                     "import os, pathlib; "
                     "assert pathlib.Path(arti.__file__).resolve().parent == (pathlib.Path(os.environ['ARTI_WHEEL_ROOT']) / 'arti').resolve(), 'wheel import must use the isolated installation root'; "
                     "import arti.cli; "
+                    "assert arti.torch.TaskRecipe is arti.TaskRecipe; "
+                    "assert arti.torch.TaskProjectConfig is arti.TaskProjectConfig; "
+                    "assert arti.torch.create_task_project is arti.create_task_project; "
+                    "assert arti.torch.task_project_status is arti.task_project_status; "
+                    "assert arti.torch.PredictionFilesConfig is arti.PredictionFilesConfig; "
+                    "assert arti.torch.EvaluationSuiteConfig is arti.EvaluationSuiteConfig; "
+                    "assert arti.torch.EpisodeRunConfig is arti.EpisodeRunConfig; "
+                    "assert arti.torch.TaskRuntimeProfile is arti.TaskRuntimeProfile; "
+                    "assert arti.torch.ResultExportConfig is arti.ResultExportConfig; "
+                    "assert all(arti.packaged_project_schema(kind)==arti.project_schema(kind) for kind in ('project','recipe','snapshot','transform','prediction','files','episodes','suite','runtime','export')); "
+                    "assert arti.cli.build_parser().parse_args(['task','init','fresh-project']).task_action=='init'; "
+                    "assert arti.cli.build_parser().parse_args(['task','explain','project.json']).format=='text'; "
+                    "assert arti.cli.build_parser().parse_args(['recipe','predict-run','--run-dir','run','--resume']).model is None; "
+                    "assert arti.cli.build_parser().parse_args(['recipe','resume-run','run','--plan-only']).plan_only; "
                     "assert arti.torch.ClassificationRecipe is arti.ClassificationRecipe; "
                     "assert arti.torch.CausalLMRecipe is arti.CausalLMRecipe; "
                     "assert callable(arti.CausalLMPredictor.from_pretrained); "

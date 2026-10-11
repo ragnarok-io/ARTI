@@ -43,12 +43,15 @@ def test_package_declares_safetensors_as_core_dependency():
     payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = payload["project"]["dependencies"]
     assert any(dependency.startswith("safetensors") for dependency in dependencies)
+    assert any(dependency.startswith("packaging>=23") for dependency in dependencies)
 
 
 def test_package_declares_pretrained_ecosystem_extras():
     payload = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = payload["project"]["optional-dependencies"]
-    assert {"qwen", "peft", "sd"}.issubset(extras)
+    assert {"qwen", "peft", "sd", "trl", "ray", "wandb", "mlflow"}.issubset(extras)
+    assert any(value.startswith("ray[train]>=2.59,<2.60") for value in extras["ray"])
+    assert "trl>=0.29.1,<0.30" in extras["trl"]
     assert any(dependency.startswith("peft") for dependency in extras["peft"])
 
 

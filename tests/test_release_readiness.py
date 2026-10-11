@@ -40,6 +40,10 @@ def test_readiness_uses_only_public_release_artifacts() -> None:
         "version-consistency",
         "package-build",
         "release-workflow",
+        "lifecycle",
+        "workflow-schemas",
+        "installed-user-workflow",
+        "optional-cpu-integrations",
     ]
 
 
@@ -47,3 +51,17 @@ def test_readiness_has_no_private_benchmark_report_dependency() -> None:
     source = (ROOT / "scripts" / "check_release_readiness.py").read_text(encoding="utf-8")
     assert "benchmarks/results" not in source
     assert "verify_core_goal" not in source
+
+
+def test_ci_requires_complete_lifecycle_installed_user_and_optional_sdk_jobs() -> None:
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for required in (
+        "scripts/quality_gate.py lifecycle", "scripts/check_installed_task_workflow.py",
+        "scripts/quality_gate.py integrations", 'RAY_TRAIN_V2_ENABLED: "1"',
+    ):
+        failures = check_release_readiness.check_workflows(ci_text=ci.replace(required, "removed"))
+        assert any(required in item for item in failures)
+
+
+def test_readiness_checks_native_workflow_schema_and_contract_coverage() -> None:
+    assert check_release_readiness.check_gate_coverage() == []

@@ -80,8 +80,33 @@ nav:
       - Tensor Context And Emission: guides/tensor-context-and-emission.md
       - Unified Model Attachment: guides/unified-attachment.md
       - Training Workflow: guides/training-workflow.md
+      - Custom Task Workflows: guides/custom-task-workflows.md
+      - Installed Task Project Tutorial: guides/installed-task-workflow.md
+      - Native Asset Snapshots: guides/asset-snapshots.md
+      - Recover a Task Run: guides/recipe-recovery.md
+      - Durable File Outputs: guides/prediction-files.md
+      - Prediction Runs: guides/prediction-runs.md
+      - Offline Prediction Scoring: guides/prediction-scoring.md
+      - Task Evaluation Suites: guides/evaluation-suites.md
+      - Independent Task Episodes: guides/task-episodes.md
+      - Task Runtime Profiles: guides/task-runtime.md
+      - Portable Task Delivery: guides/task-deployment.md
+      - Deployment Validation: guides/deployment-validation.md
+      - Export Committed Results: guides/result-export.md
+      - Local Accelerate Lifecycle: guides/accelerate-training.md
+      - Native Transformers and TRL: guides/transformers-training.md
+      - Ray Train Handoff: guides/ray-training.md
       - Task Recipes: guides/task-recipes.md
       - Qwen SFT Workflow: guides/qwen-sft-workflow.md
+      - Custom Qwen Programs: guides/qwen-custom-programs.md
+      - Qwen Data Import: guides/qwen-data-import.md
+      - Qwen Prepared Data: guides/qwen-data-preparation.md
+      - Qwen Token Batching: guides/qwen-token-batching.md
+      - Qwen Deployment: guides/qwen-deployment.md
+      - Qwen Evaluation: guides/qwen-evaluation.md
+      - Independent Qwen Evaluation: guides/qwen-independent-evaluation.md
+      - Qwen Evaluation Comparison: guides/qwen-evaluation-comparison.md
+      - Qwen Prediction Runs: guides/qwen-prediction-runs.md
       - Recall Topology Screening: guides/recall-topology-screening.md
       - GPU Validation: guides/gpu-validation.md
       - Native JAX Backend: guides/jax-backend.md
@@ -107,6 +132,7 @@ nav:
       - Program Roles: reference/program-roles.md
       - Validation Matrix: reference/validation-matrix.md
       - Evidence Schema: reference/evidence-schema.md
+      - Task Workflow Configuration: reference/task-workflow-configuration.md
       - K-wide Branch Search: reference/branch-search.md
       - External Tensor Binding: reference/external-tensor-binding.md
       - GPU Resident Hot-Only Runtime: reference/gpu-resident-hot-only.md

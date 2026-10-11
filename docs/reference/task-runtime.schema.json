@@ -1,0 +1,201 @@
+{
+  "$id": "urn:arti:task-workflow:runtime:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "allowed_dependencies": {
+      "anyOf": [
+        {
+          "items": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "backend": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "factory": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "pattern": "^[^\\s:]+:[^\\s:]+$",
+                  "type": "string"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kwargs": {
+                      "type": "object"
+                    },
+                    "reference": {
+                      "minLength": 1,
+                      "pattern": "^[^\\s:]+:[^\\s:]+$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "reference"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "revision": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "factory",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "container": {
+      "anyOf": [
+        {
+          "properties": {
+            "image": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "entrypoint": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "environment": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "format": {
+      "const": "arti.task-runtime-profile"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "enum": [
+          "file",
+          "directory"
+        ]
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "limits": {
+      "additionalProperties": {
+        "exclusiveMinimum": 0,
+        "type": "number"
+      },
+      "type": "object"
+    },
+    "network": {
+      "enum": [
+        "inherit",
+        "disabled"
+      ]
+    },
+    "options": {
+      "type": "object"
+    },
+    "outputs": {
+      "additionalProperties": {
+        "enum": [
+          "file",
+          "directory"
+        ]
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "python": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "require_enforcement": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requirements": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "revision": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    }
+  },
+  "required": [
+    "entrypoint",
+    "revision"
+  ],
+  "title": "ARTI task workflow runtime configuration",
+  "type": "object"
+}

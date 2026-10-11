@@ -9,9 +9,11 @@ import uuid
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .serialization import _atomic_json
+from .reporting import ReporterGroup, RunReporter
+from .training_validation import ARTIValidationConfig
 
 
 @dataclass(frozen=True)
@@ -23,25 +25,33 @@ class ARTITrainingRunConfig:
     max_seconds: float | None = None
     evaluation_steps: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    validation: ARTIValidationConfig | None = None
 
     def __post_init__(self) -> None:
-        if self.checkpoint_steps <= 0 or self.log_steps <= 0:
-            raise ValueError("checkpoint_steps and log_steps must be positive")
+        if isinstance(self.validation, Mapping):
+            object.__setattr__(self, "validation", ARTIValidationConfig(**self.validation))
+        if self.validation is not None and not isinstance(self.validation, ARTIValidationConfig):
+            raise TypeError("run.validation must be an ARTIValidationConfig or mapping")
+        for name in ("checkpoint_steps", "log_steps", "evaluation_steps"):
+            value = getattr(self, name)
+            if name == "evaluation_steps" and value is None:
+                continue
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         for name in ("checkpoint_seconds", "max_seconds"):
             value = getattr(self, name)
-            if value is not None and (not math.isfinite(value) or value <= 0):
+            if name == "max_seconds" and value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-        if self.evaluation_steps is not None and self.evaluation_steps <= 0:
-            raise ValueError("evaluation_steps must be positive")
         json.dumps(dict(self.metadata), allow_nan=False)
+        if self.validation is not None and self.evaluation_steps is None:
+            raise ValueError("run.validation requires explicit evaluation_steps")
 
     def to_dict(self) -> dict[str, Any]:
         values = asdict(self)
         values["output_dir"] = None if self.output_dir is None else str(self.output_dir)
         return values
-
-
-RunReporter = Callable[[Mapping[str, Any]], None]
 
 
 def _prepare_run_directory(config: ARTITrainingRunConfig) -> Path:
@@ -58,6 +68,8 @@ class _TrainingRun:
         config: ARTITrainingRunConfig,
         plan: Mapping[str, Any],
         reporter: RunReporter | None,
+        *,
+        parent_run_id: str | None = None,
     ) -> None:
         self.config = config
         self.directory = _prepare_run_directory(config)
@@ -68,6 +80,8 @@ class _TrainingRun:
         self.payload: dict[str, Any] = {
             "format": "arti.training-run",
             "format_version": 1,
+            "run_id": uuid.uuid4().hex,
+            "parent_run_id": parent_run_id,
             "status": "running",
             "plan": dict(plan),
             "run": config.to_dict(),
@@ -75,13 +89,26 @@ class _TrainingRun:
             "evaluations": [],
         }
         self.write()
+        self.emit(
+            "run_started",
+            step=plan["global_step"],
+            requested_steps=plan["training"]["steps"],
+            parent_run_id=parent_run_id,
+        )
+        self.write()
 
     def write(self) -> None:
         self.payload["elapsed_seconds"] = time.monotonic() - self.started
         _atomic_json(self.directory / "run.json", self.payload)
 
     def emit(self, kind: str, **values: Any) -> None:
-        event = {"type": kind, **values}
+        event = {
+            "type": kind,
+            "run_id": self.payload["run_id"],
+            "timestamp": time.time(),
+            "elapsed_seconds": time.monotonic() - self.started,
+            **values,
+        }
         with (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
         if self.reporter is not None:
@@ -91,6 +118,14 @@ class _TrainingRun:
                 self.reporter = None
                 self.payload["reporter_error"] = type(exc).__name__
                 warnings.warn(f"training reporter disabled after {type(exc).__name__}", RuntimeWarning, stacklevel=2)
+            if isinstance(self.reporter, ReporterGroup) and self.reporter.errors:
+                self.payload["reporter_errors"] = list(self.reporter.errors)
+
+    def finish(self, status: str, step: int, **values: Any) -> None:
+        self.payload.update(status=status, global_step=step, **values)
+        self.write()
+        self.emit("run_finished", status=status, step=step, **values)
+        self.write()
 
     def expired(self) -> bool:
         limit = self.config.max_seconds

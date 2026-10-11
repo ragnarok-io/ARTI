@@ -5,6 +5,12 @@ and the deployable model. The first supported recipe is supervised dense-feature
 classification with the local Torch engine. It uses the existing shared training
 session, not an additional trainer.
 
+[Recover a Task Run](recipe-recovery.md) explains how to finish an interrupted
+task or retry evaluation/export without duplicating training.
+
+[Import Local Qwen SFT Data](qwen-data-import.md) accepts explicitly split chat
+and prompt/completion exports without hand-writing a JSONL conversion script.
+
 ## Run A Real Task
 
 The digit recognition example uses scikit-learn's offline `load_digits` dataset:
@@ -13,6 +19,7 @@ inference need only ARTI's core dependencies.
 
 ```bash
 python examples/classification_workflow.py --output .tmp/digits-workflow
+python examples/classification_workflow.py --select-best --output .tmp/digits-selected
 ```
 
 This runs preparation, gradient preflight, 200 optimizer updates, checkpoint
@@ -115,6 +122,26 @@ metrics = recipe.evaluate("test", output="outputs/test.json")
 ```
 
 Training reads validation, not test, and exports the final completed model.
+This is the default. Optional validation-driven selection is configured as:
+
+```toml
+[run.validation]
+monitor = "accuracy"
+mode = "max"
+selection = "best"
+patience = 6
+min_evaluations = 4
+min_delta = 0.001
+```
+
+Keep `run.evaluation_steps` explicit. Omit `patience` to select without stopping.
+The workflow returns `checkpoint` for last-state resume and `selected_checkpoint`
+for the best/last inference source. It evaluates and exports the selected source
+without rewinding the live recipe/optimizer. The exported model's `selection`
+metadata records the actual choice; task declaration fields retain the default.
+`recipe.evaluate("test", checkpoint=result["selected_checkpoint"])` evaluates the
+same chosen model. Only validation selects it; test is a final independent check.
+
 There is no hidden selection against test accuracy. Evaluation reports actual
 sample-mean cross-entropy, accuracy, macro F1 and a labeled confusion matrix.
 The companion `*.predictions.jsonl` retains record IDs, true labels, predictions
@@ -178,6 +205,46 @@ python examples/serve_classification.py outputs/model --port 8080
 `POST /predict` accepts `{"records": [...]}`; `GET /health` reports readiness and
 label order. This is a local serving integration, not an authenticated production
 gateway or a qualified vLLM, NIM, TensorRT-LLM or cloud deployment profile.
+
+## Cross-Request Serving
+
+The optional ASGI worker serves classification and Qwen through the same path:
+
+```python
+from arti import RecipeServingConfig, create_recipe_app
+
+app = create_recipe_app(predictor, config=RecipeServingConfig(
+    batching="auto", max_batch_size=32, batch_wait_ms=4,
+    max_pending_records=1024,
+))
+```
+
+```bash
+arti recipe serve outputs/model --batching auto --max-batch-size 32 --batch-wait-ms 4
+python scripts/check_recipe_service.py outputs/model requests.jsonl --concurrency 16 --limit 16 --batch-wait-ms 10 --output outputs/service-check.json
+```
+
+Builtin read-only predictors combine compatible requests into one ordinary tensor
+batch. Results preserve each request's record order/IDs, even when a large request
+uses multiple dispatches. `on` declares independent custom predictor rows; `off`
+keeps one request per dispatch. `auto` preserves caller-managed forward-state
+semantics. Custom predictors can provide `validate_records` for model-free input
+checks. Builtins do so before queueing, isolating bad input from valid batches.
+
+One worker uses one loaded model sequentially, with model work in a thread and
+HTTP awaiting asynchronously. FastAPI lifespan starts/closes the dispatcher.
+HTTPX `ASGITransport` does not run lifespan automatically; tests/embedded callers
+should use `async with app.router.lifespan_context(app)`. Lazy startup is supported,
+but direct users must close `app.state.batcher` when finished.
+
+Queued disconnect/cancellation skips model work. Closing rejects queued requests
+and waits for the active model call; it does not abort an active Torch/CUDA kernel.
+Pending limits include active records. Queue pressure returns 503/Retry-After;
+ordinary model errors fail the affected batch but leave the worker usable.
+`/health` and `/metrics` contain no prompt/path/record content. Metrics are aggregate
+diagnostics, not a cloud SLA, GPU benchmark, token-level continuous batching or
+authentication layer. Tune waiting versus latency for the workload. The standard
+library HTTP example above remains per-request rather than this dispatcher.
 
 Dataset and preprocessing references:
 [load_digits](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_digits.html),

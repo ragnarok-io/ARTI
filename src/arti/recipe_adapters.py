@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import ClassVar
 
 import torch
 from torch import Tensor, nn
 
 from .arti_layer import ARTILayer
+from .python_factory import PythonFactoryConfig
 from .federal_layer import ProgramLayerResult
 from .formula_v2 import (
     BankBinding,
@@ -28,6 +30,28 @@ from .resource_graph import (
     TensorResourceSpec,
 )
 from .tensor_view import TensorView, TensorViewPattern
+
+
+@dataclass(frozen=True)
+class LayerFactoryConfig(PythonFactoryConfig):
+    """Explicit installed Python factory; an asset describes but never imports it."""
+
+    kind: ClassVar[str] = "layer"
+
+
+def _resolve_layer_factory(value, *, expected=None):
+    if isinstance(value, str):
+        saved = expected if expected and expected.get("reference") == value else {}
+        value = LayerFactoryConfig(value, saved.get("kwargs", {}))
+    if isinstance(value, LayerFactoryConfig):
+        if expected is not None and value.to_dict() != expected:
+            raise ValueError(
+                "layer factory reference/kwargs differ from the saved task declaration"
+            )
+        return value.resolve()
+    if value is not None and not callable(value):
+        raise ValueError("layer_factory must be callable, a reference or LayerFactoryConfig")
+    return value
 
 
 @dataclass(frozen=True)
@@ -142,4 +166,4 @@ def formula_adapter_factory(config: FormulaAdapterConfig):
     return create
 
 
-__all__ = ["FormulaAdapterConfig", "formula_adapter_factory"]
+__all__ = ["FormulaAdapterConfig", "formula_adapter_factory", "LayerFactoryConfig"]

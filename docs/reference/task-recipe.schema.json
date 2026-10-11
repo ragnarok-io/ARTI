@@ -1,0 +1,228 @@
+{
+  "$id": "urn:arti:task-workflow:recipe:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "factory": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "format": {
+      "const": "arti.task-recipe-config"
+    },
+    "options": {
+      "type": "object"
+    },
+    "resources": {
+      "type": "object"
+    },
+    "run": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "validation": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "validation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evaluation_steps": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "evaluation_steps"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "checkpoint_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "checkpoint_steps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "evaluation_steps": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "log_steps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_seconds": {
+          "exclusiveMinimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "output_dir": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "min_delta": {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "min_evaluations": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "mode": {
+                  "enum": [
+                    "min",
+                    "max"
+                  ]
+                },
+                "monitor": {
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "patience": {
+                  "minimum": 1,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "selection": {
+                  "enum": [
+                    "best",
+                    "last"
+                  ]
+                },
+                "start_step": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "task": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "training": {
+      "additionalProperties": false,
+      "properties": {
+        "corruption_probability": {
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "device": {
+          "enum": [
+            "auto",
+            "cpu",
+            "cuda"
+          ]
+        },
+        "distributed": {
+          "type": "boolean"
+        },
+        "engine": {
+          "enum": [
+            "torch",
+            "transformers",
+            "accelerate"
+          ]
+        },
+        "gradient_accumulation_steps": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "learning_rate": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "mixed_precision": {
+          "enum": [
+            "no",
+            "fp16",
+            "bf16"
+          ]
+        },
+        "objective": {
+          "enum": [
+            "tensor_alignment",
+            "model_loss"
+          ]
+        },
+        "steps": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  "required": [
+    "task",
+    "factory"
+  ],
+  "title": "ARTI task workflow recipe configuration",
+  "type": "object"
+}

@@ -1,0 +1,109 @@
+{
+  "$id": "urn:arti:task-workflow:files:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "validator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "revision": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "revision"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "revision": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "revision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "validator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validator"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "format": {
+      "const": "arti.prediction-files-config"
+    },
+    "revision": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "validator": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [],
+  "title": "ARTI task workflow files configuration",
+  "type": "object"
+}

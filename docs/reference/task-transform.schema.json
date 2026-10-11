@@ -1,0 +1,50 @@
+{
+  "$id": "urn:arti:task-workflow:transform:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "factory": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "format": {
+      "const": "arti.asset-transform-config"
+    },
+    "options": {
+      "type": "object"
+    },
+    "revision": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    }
+  },
+  "required": [
+    "factory",
+    "revision"
+  ],
+  "title": "ARTI task workflow transform configuration",
+  "type": "object"
+}

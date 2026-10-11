@@ -1,12 +1,12 @@
 {
   "distribution": "arti-fit",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "sdist": {
-    "file_count": 600,
-    "paths_sha256": "2246ec45f96c3b2782ede365c18a4f56eb7390ef0b85dadf65955fb2e8ccc86e"
+    "file_count": 719,
+    "paths_sha256": "100239a143d52d0d36e16b3f9824c1a425e780fd1f9453a4756bd34919bfa3cf"
   },
   "wheel": {
-    "file_count": 211,
-    "paths_sha256": "6ea2509c665026009dbcca42486ce1a91d346c57761a1f2799f3d082efa8cb17"
+    "file_count": 249,
+    "paths_sha256": "a22033b393ec27387b6474a0fae0a92a8b309c64b7130028f53d5b83e859877f"
   }
 }

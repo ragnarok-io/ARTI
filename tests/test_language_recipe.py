@@ -216,11 +216,17 @@ def test_qwen_native_objective_artifact_and_frozen_base(tmp_path):
     before = {
         name: parameter.detach().clone() for name, parameter in current.model.named_parameters()
     }
+    events = []
     result = current.fit(
-        run=arti.ARTITrainingRunConfig(output_dir=tmp_path / "run", checkpoint_steps=2)
+        run=arti.ARTITrainingRunConfig(output_dir=tmp_path / "run", checkpoint_steps=2),
+        reporter=events.append,
     )
     assert result["optimizer_steps"] == 4
     assert result["status"] == "completed"
+    assert events[0]["type"] == "run_started"
+    assert events[-1]["type"] == "workflow_finished" and events[-1]["status"] == "completed"
+    final_evaluation = next(row for row in events if row["type"] == "evaluation" and row.get("phase") == "final")
+    assert final_evaluation["metrics"]["supervised_tokens"] > 0
     assert result["data_cursor"]["samples_seen"] == 7
     assert result["validation"]["supervised_tokens"] > 0
     assert (tmp_path / "run" / "tokenizer" / "tokenizer.json").exists()
@@ -239,6 +245,35 @@ def test_qwen_native_objective_artifact_and_frozen_base(tmp_path):
     assert "task_recipe" in inspected.manifest["architecture"]["config"]
     assert not any("embed_tokens" in name or "lm_head" in name for name in inspected.state_dict)
     assert str(tmp_path) not in json.dumps(inspected.manifest["architecture"]["config"])
+
+
+def test_qwen_selected_checkpoint_exports_best_without_rewinding_session(tmp_path):
+    current = recipe(tmp_path)
+    states = {}
+
+    def validation(session):
+        key = tuple(torch.cat([value.detach().flatten() for value in session.binding.parameters()]).tolist())
+        if key not in states:
+            states[key] = float(len(states)+1)
+        return {"fixture_score":states[key]}
+
+    run = arti.ARTITrainingRunConfig(output_dir=tmp_path / "selected", evaluation_steps=1, validation=arti.ARTIValidationConfig(monitor="fixture_score"))
+    result = current.fit(steps=3, run=run, validation_fn=validation)
+    assert result["selection"]["selected_step"] == 1
+    snapshot = {name:value.detach().clone() for name,value in current.model.arti._bundle().state_dict().items()}
+    predicted = CausalLMPredictor.from_pretrained(result["model"], model=base_model())
+    batch = current.data.splits["validation"].batches(1)[0]
+    with current.session.checkpoint_context(result["selected_checkpoint"]), torch.no_grad():
+        expected = current.model(**batch, use_cache=False).logits
+    with torch.no_grad():
+        actual = predicted.model(**batch, use_cache=False).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for name,value in current.model.arti._bundle().state_dict().items():
+        torch.testing.assert_close(value,snapshot[name],rtol=0,atol=0)
+    declaration = json.loads((tmp_path / "selected" / "model" / "deployment.json").read_text())
+    assert declaration["selection"]["selected_step"] == 1
+    assert "checkpoint" not in declaration["selection"]
+    assert current.session.global_step == 3
 
 
 @pytest.mark.parametrize("grouped", [True, False])

@@ -1,0 +1,150 @@
+{
+  "$id": "urn:arti:task-workflow:episodes:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "effects": {
+            "const": "external"
+          }
+        },
+        "required": [
+          "effects"
+        ]
+      },
+      "then": {
+        "properties": {
+          "recovery": {
+            "enum": [
+              "snapshot",
+              "none"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "adapter": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "effects": {
+      "enum": [
+        "local",
+        "external"
+      ]
+    },
+    "environment_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "environment_state_lifetime": {
+      "const": "trial"
+    },
+    "evaluator_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "format": {
+      "const": "arti.episode-run-config"
+    },
+    "independent_batch": {
+      "type": "boolean"
+    },
+    "initial_state_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "max_calls": {
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_steps": {
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "native_model_state_lifetime": {
+      "const": "read-only-policy-step"
+    },
+    "policy_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "policy_state_lifetime": {
+      "enum": [
+        "step",
+        "trial"
+      ]
+    },
+    "recovery": {
+      "enum": [
+        "snapshot",
+        "replay",
+        "none"
+      ]
+    },
+    "seed_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "trial_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "adapter",
+    "policy_id",
+    "environment_id",
+    "evaluator_id",
+    "initial_state_field",
+    "seed_field"
+  ],
+  "title": "ARTI task workflow episodes configuration",
+  "type": "object"
+}

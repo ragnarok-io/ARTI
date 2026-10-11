@@ -7,8 +7,9 @@ import inspect
 import json
 import math
 import random
+import shutil
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
@@ -19,6 +20,7 @@ from .training_config import ARTITrainingConfig
 from .training_binding import TrainingBinding
 from .fit.scanner import run_model
 from .training_run import ARTITrainingRunConfig, RunReporter, _TrainingRun
+from .training_validation import _ValidationTracker
 
 try:
     from transformers import TrainerCallback as _TrainerCallback
@@ -31,6 +33,11 @@ TRANSFORMERS_ARTIFACT = "model.arti.st"
 
 class ARTICheckpointCallback(_TrainerCallback):
     """Record that a Transformers checkpoint contains an ARTI-only payload."""
+
+    def on_step_end(self, args, state, control, **_kwargs):
+        if args.save_strategy != "no" and (state.global_step == 1 or state.global_step >= state.max_steps):
+            control.should_save = True
+        return control
 
     def on_save(self, args, state, control, **_kwargs):
         checkpoint = Path(args.output_dir) / f"checkpoint-{state.global_step}"
@@ -62,6 +69,9 @@ class ARTITrainingResult:
     checkpoint_path: Path | None = None
     run_directory: Path | None = None
     stop_reason: str = "steps_completed"
+    best_checkpoint_path: Path | None = None
+    selected_checkpoint_path: Path | None = None
+    selection: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,8 @@ class ARTITrainingSession:
             raise ValueError("training parameters must be unique trainable parameters owned by the state module")
         if optimizer is not None and _optimizer_parameter_ids(optimizer) != {id(parameter) for parameter in parameters}:
             raise ValueError("optimizer parameters must exactly match the selected ARTI trainable role")
+        self._optimizer_supplied = optimizer is not None
+        self._scheduler_supplied = scheduler is not None
         self.optimizer = optimizer or torch.optim.AdamW(parameters, lr=config.learning_rate)
         self.scheduler = scheduler
         self.global_step = 0
@@ -117,8 +129,14 @@ class ARTITrainingSession:
         self._scaler: Any | None = None
         self._scaler_state: Any | None = None
         self._run: _TrainingRun | None = None
+        self._last_run_id: str | None = None
+        self._validation: _ValidationTracker | None = None
+        self._validation_fn: Callable[[ARTITrainingSession], Mapping[str, Any]] | None = None
+        self._checkpoint_view = False
         self._pending_losses: list[Tensor] = []
         self._stop_reason = "steps_completed"
+        self._transformers_selection: dict[str, Any] = {}
+        self._on_checkpoint: Callable[[ARTITrainingSession, Path], None] | None = None
         self._evaluation_data: Iterable[Any] | None = None
         self._evaluation_weight: Callable[[Any], float] | None = None
         self._objective_weight: Callable[[Any], float] | None = None
@@ -135,57 +153,84 @@ class ARTITrainingSession:
         run: ARTITrainingRunConfig | None = None,
         eval_data: Iterable[Any] | None = None,
         evaluation_weight: Callable[[Any], float] | None = None,
+        validation_fn: Callable[[ARTITrainingSession], Mapping[str, Any]] | None = None,
         objective_weight: Callable[[Any], float] | None = None,
         max_grad_norm: float | None = None,
         reporter: RunReporter | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        on_checkpoint: Callable[[ARTITrainingSession, Path], None] | None = None,
     ) -> ARTITrainingResult:
-        target_steps = self.config.steps if steps is None else int(steps)
-        if target_steps < 0:
-            raise ValueError("steps must be non-negative")
+        if self._checkpoint_view:
+            raise ValueError("cannot train inside a model-only checkpoint context")
+        target_steps = self.config.steps if steps is None else steps
+        if type(target_steps) is not int or target_steps < 0:
+            raise ValueError("steps must be a nonnegative integer")
         if self.config.distributed and self.config.engine == "torch":
             raise ValueError("distributed training requires engine='accelerate' or 'transformers'")
         if max_grad_norm is not None and (not math.isfinite(max_grad_norm) or max_grad_norm <= 0):
             raise ValueError("max_grad_norm must be finite and positive")
-        if self.config.engine != "torch" and (run is not None or eval_data is not None or reporter is not None or stop_requested is not None or objective_weight is not None or max_grad_norm is not None):
-            raise ValueError("local run policy currently requires engine='torch'; other engines own their run lifecycle")
+        local_engine = self.config.engine == "torch" or (self.config.engine == "accelerate" and not self.config.distributed)
+        if not local_engine and (run is not None or eval_data is not None or validation_fn is not None or reporter is not None or stop_requested is not None or objective_weight is not None or max_grad_norm is not None or on_checkpoint is not None):
+            raise ValueError("local run policy requires single-process Torch or Accelerate; distributed and other engines own their run lifecycle")
+        if self.config.engine == "accelerate" and not self.config.distributed:
+            self._prepare_local_accelerate()
         self._stop_reason = "steps_completed"
+        self._transformers_selection = {}
         self._stop_requested = stop_requested
+        self._on_checkpoint = on_checkpoint
         self._train_data = train_data
         self._evaluation_data = eval_data
         self._evaluation_weight = evaluation_weight
+        self._validation_fn = validation_fn
         self._objective_weight = objective_weight
         self._max_grad_norm = max_grad_norm
-        if self.config.engine == "torch":
+        if local_engine:
             policy = run or ARTITrainingRunConfig()
-            if policy.evaluation_steps is not None and eval_data is None:
+            if policy.evaluation_steps is not None and eval_data is None and validation_fn is None:
                 raise ValueError("evaluation_steps requires explicit eval_data")
-            self._run = _TrainingRun(policy, self.plan(steps=target_steps), reporter)
+            if self._validation is not None and policy.validation != self._validation.config:
+                raise ValueError("resume validation policy must match the saved policy")
+            if self._validation is not None and self._validation.cadence not in {None, policy.evaluation_steps}:
+                raise ValueError("resume validation cadence must match the saved policy")
+            if self._validation is None and policy.validation is not None:
+                self._validation = _ValidationTracker(policy.validation)
+            if self._validation is not None:
+                self._validation.cadence = policy.evaluation_steps
+            self._run = _TrainingRun(policy, self.plan(steps=target_steps), reporter, parent_run_id=self._last_run_id)
+            self._last_run_id = self._run.payload["run_id"]
         try:
+            if local_engine:
+                self._inherit_best_checkpoint()
+                self._run.emit("selection", step=self.global_step, **self.selection_receipt())
             if target_steps == 0:
-                pass
+                if self.config.engine == "transformers" and self.resume_from_checkpoint:
+                    self._fit_transformers(train_data, target_steps, trainer_kwargs)
             elif self.config.engine == "transformers":
                 self._fit_transformers(train_data, target_steps, trainer_kwargs)
             elif self.config.engine == "accelerate":
                 self._fit_accelerate(train_data, target_steps)
             else:
                 self._fit_torch(train_data, target_steps)
+            if self._validation is not None and self._validation.last_step != self.global_step and not self._run.expired():
+                self._run_validation(scheduled=False)
             saved = None
             if checkpoint_path is not None:
                 saved = self.save_checkpoint(checkpoint_path)
             if self._run is not None:
                 self._save_run_checkpoint()
                 saved = saved or self._run.latest
-                self._run.payload.update(status="completed", stop_reason=self._stop_reason, global_step=self.global_step)
-                self._run.write()
+                selection = self.selection_receipt()
+                self._run.payload["selection"] = selection
+                self._run.payload["best_checkpoint"] = None if self._validation is None or self._validation.best_checkpoint is None else str(self._validation.best_checkpoint.relative_to(self._run.directory))
+                self._run.finish("completed", self.global_step, stop_reason=self._stop_reason)
         except BaseException as exc:
             if self._run is not None:
-                self._run.payload.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", error_type=type(exc).__name__, completed_optimizer_steps=self.global_step)
-                self._run.write()
+                self._run.finish("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", self.global_step, error_type=type(exc).__name__, completed_optimizer_steps=self.global_step)
             self._pending_losses.clear()
             raise
         finally:
             self._train_data = None
+            self._on_checkpoint = None
         return ARTITrainingResult(
             engine=self.config.engine,
             steps=self.global_step,
@@ -193,6 +238,9 @@ class ARTITrainingSession:
             checkpoint_path=saved,
             run_directory=None if self._run is None else self._run.directory,
             stop_reason=self._stop_reason,
+            best_checkpoint_path=self._transformers_selection.get("best_checkpoint") if self._validation is None else self._validation.best_checkpoint,
+            selected_checkpoint_path=self._transformers_selection.get("selected_checkpoint", saved) if self._validation is None else self._validation.best_checkpoint if self._validation.config.selection == "best" and self._validation.best_checkpoint is not None else saved,
+            selection=self._transformers_selection.get("receipt", self.selection_receipt()),
         )
 
     def plan(self, *, steps: int | None = None) -> dict[str, Any]:
@@ -249,29 +297,32 @@ class ARTITrainingSession:
         return self._evaluation_snapshot()
 
     @contextmanager
+    def checkpoint_context(self, path: str | Path):
+        """Temporarily use checkpoint model state without rewinding training."""
+        with self._evaluation_snapshot():
+            previous = self._checkpoint_view
+            try:
+                self.binding.load(path, load_checkpoint=False)
+                self._checkpoint_view = True
+                yield
+            finally:
+                self._checkpoint_view = previous
+
+    def selection_receipt(self) -> dict[str, Any]:
+        if self._transformers_selection:
+            return dict(self._transformers_selection["receipt"])
+        if self._validation is None:
+            return {"selection": "last", "reason": "policy_disabled", "selected_step": self.global_step}
+        return self._validation.receipt(self.global_step)
+
+    @contextmanager
     def _evaluation_snapshot(self):
-        from .resource_graph import ProgramGraph
-
-        bundle = self.binding.state_module()
-        state = copy.deepcopy(bundle.state_dict())
-        graph_states = [(module, module.state()) for module in bundle.modules() if isinstance(module, ProgramGraph)]
-        buffers = [(buffer, buffer.detach().clone()) for buffer in self.model.buffers()]
-        modes = [(module, module.training) for module in self.model.modules()]
-        rng = _rng_state()
-        try:
+        with self.binding.evaluation_context():
             yield
-        finally:
-            bundle.load_state_dict(state)
-            for graph, graph_state in graph_states:
-                graph.restore_state(graph_state)
-            with torch.no_grad():
-                for buffer, value in buffers:
-                    buffer.copy_(value)
-            for module, training in modes:
-                module.training = training
-            _restore_rng(rng)
 
-    def _checkpoint_state(self) -> dict[str, Any]:
+    def _checkpoint_state(self, path: str | Path, *, portable: bool = False) -> dict[str, Any]:
+        if self._checkpoint_view:
+            raise ValueError("cannot save training state from a model-only checkpoint context; export an inference asset")
         state = {
             **self.binding.checkpoint_metadata,
             "engine": self.config.engine,
@@ -280,10 +331,28 @@ class ARTITrainingSession:
             "steps": self.global_step,
             "loss_history": list(self.loss_history),
             "micro_batches_seen": self.micro_batches_seen,
+            "run_id": self._last_run_id,
             "rng": _rng_state(),
-            "scaler": None if self._scaler is None else self._scaler.state_dict(),
+            "scaler": self._scaler_state if self._scaler is None else self._scaler.state_dict(),
         }
-        if self._train_data is not None and callable(getattr(self._train_data, "state_dict", None)):
+        if self.config.engine == "transformers" and self.engine_object is not None:
+            state.update(self.engine_object._arti_optimizer_metadata())
+        if self._validation is not None:
+            directory = Path(path).resolve().parent
+            validation = self._validation.state_dict(directory)
+            best = self._validation.best_checkpoint
+            if best is not None and best.resolve() != Path(path).resolve() and (portable or self._run is None or not directory.is_relative_to(self._run.directory.resolve())):
+                destination = directory / "validation-best"
+                source_directory = best.parent.resolve()
+                if source_directory != destination.resolve():
+                    if destination.resolve().is_relative_to(source_directory):
+                        raise ValueError("portable checkpoint destination cannot be inside its best checkpoint bundle")
+                    shutil.copytree(source_directory, destination, dirs_exist_ok=True)
+                validation["best_checkpoint"] = str(Path("validation-best") / best.name)
+            state["validation"] = validation
+        if self._data_state is not None:
+            state["data_state"] = copy.deepcopy(self._data_state)
+        elif self._train_data is not None and callable(getattr(self._train_data, "state_dict", None)):
             state["data_state"] = self._train_data.state_dict()
         return state
 
@@ -296,23 +365,46 @@ class ARTITrainingSession:
         if self._run is not None:
             self._run.emit("metrics", step=self.global_step, loss=values[-1], mean_loss=sum(values) / len(values), optimizer_steps=len(values))
 
-    def _save_run_checkpoint(self) -> None:
+    def _save_run_checkpoint(self, *, force: bool = False) -> None:
         assert self._run is not None
         self._flush_losses()
         path = self._run.checkpoint_path(self.global_step)
-        if path != self._run.latest:
+        if force or path != self._run.latest:
             saved = self.save_checkpoint(path)
             self._run.saved(saved, self.global_step)
-    def save_checkpoint(self, path: str | Path) -> Path:
-        saved = self.binding.save(
-            path,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            training_state=self._checkpoint_state(),
-        )
+            if self._on_checkpoint is not None:
+                self._on_checkpoint(self, saved)
+
+    def save_checkpoint(self, path: str | Path, *, portable: bool = False) -> Path:
+        best_view = getattr(self.engine_object, "_arti_best_view", False)
+        with self._evaluation_snapshot() if best_view else nullcontext():
+            if best_view:
+                self.binding.load(self.engine_object._arti_last_artifact, load_checkpoint=False)
+            saved = self.binding.save(
+                path,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                training_state=self._checkpoint_state(path, portable=portable),
+            )
         return saved.weights_path
 
     def load_checkpoint(self, path: str | Path, *, map_location: str | torch.device | None = None) -> None:
+        if self._checkpoint_view:
+            raise ValueError("cannot resume inside a model-only checkpoint context")
+        if self.config.engine == "transformers":
+            metadata = self.binding.load(path, map_location=map_location, load_checkpoint=True).training_state
+            if isinstance(metadata, Mapping):
+                if metadata.get("transformers_optimizer_supplied") and not self._optimizer_supplied:
+                    raise ValueError("recreate the checkpoint's caller-supplied optimizer before loading")
+                if metadata.get("transformers_scheduler_supplied") and not self._scheduler_supplied:
+                    raise ValueError("recreate the checkpoint's caller-supplied scheduler before loading")
+            if isinstance(metadata, Mapping) and metadata.get("transformers_optimizer") is not None and not self._optimizer_supplied and self.engine_object is None:
+                from .transformers_training import build_transformers_trainer
+
+                trainer = build_transformers_trainer(self, [], trainer_kwargs={"training_args": metadata["transformers_optimizer"]}, prepare_resume=False)
+                trainer.create_optimizer_and_scheduler(num_training_steps=metadata["transformers_max_steps"])
+                self.optimizer, self.scheduler = trainer.optimizer, trainer.lr_scheduler
+                self.engine_object = trainer
         loaded = self.binding.load(
             path,
             map_location=map_location,
@@ -330,19 +422,32 @@ class ARTITrainingSession:
         self.global_step = int(state.get("global_step", state.get("steps", 0)))
         self.loss_history = [float(value) for value in state.get("loss_history", ())]
         self.micro_batches_seen = int(state.get("micro_batches_seen", 0))
+        self._last_run_id = state.get("run_id")
+        self._validation = None if state.get("validation") is None else _ValidationTracker.from_state(state["validation"], Path(path).resolve().parent)
         self._data_state = state.get("data_state")
         self._scaler_state = state.get("scaler")
         if state.get("rng") is not None:
             _restore_rng(state["rng"])
+        if self.config.engine == "transformers" and self.engine_object is not None:
+            self.engine_object._arti_best_view = False
+            self.engine_object._arti_last_artifact = None
+            self._transformers_selection = {}
 
     def _fit_torch(self, train_data: Iterable[Any], steps: int) -> None:
+        self._fit_local(train_data, steps)
+
+    def _fit_local(self, train_data: Iterable[Any], steps: int, *, accelerator=None) -> None:
+        if accelerator is not None:
+            from accelerate.utils import send_to_device
+
         iterator = self._training_iterator(train_data)
         accumulation = self.config.gradient_accumulation_steps
         self.model.train()
         parameter = next(self.model.parameters(), torch.empty(0))
         use_scaler = self.config.mixed_precision == "fp16" and parameter.device.type == "cuda"
-        scaler = (self._scaler or torch.amp.GradScaler("cuda", enabled=True)) if use_scaler else None
-        self._scaler = scaler
+        scaler = (self._scaler or torch.amp.GradScaler("cuda", enabled=True)) if use_scaler and accelerator is None else None
+        if accelerator is None:
+            self._scaler = scaler
         if scaler is not None and self._scaler_state is not None:
             scaler.load_state_dict(self._scaler_state)
             self._scaler_state = None
@@ -362,41 +467,90 @@ class ARTITrainingSession:
                 raise ValueError("objective weights must be finite and positive")
             total_weight = sum(weights)
             for batch, weight in zip(batches, weights, strict=True):
-                with _autocast(self.model, self.config.mixed_precision):
-                    loss = self._objective(self.model, batch, self.attachment)
-                scaled_loss = loss * (weight / total_weight)
-                if scaler is None:
-                    scaled_loss.backward()
+                if accelerator is None:
+                    with _autocast(self.model, self.config.mixed_precision):
+                        loss = self._objective(self.model, batch, self.attachment)
+                    scaled_loss = loss * (weight / total_weight)
+                    if scaler is None:
+                        scaled_loss.backward()
+                    else:
+                        scaler.scale(scaled_loss).backward()
                 else:
-                    scaler.scale(scaled_loss).backward()
+                    with accelerator.accumulate(self.model), accelerator.autocast():
+                        loss = self._objective(self.model, send_to_device(batch, accelerator.device, non_blocking=True), self.attachment)
+                        # backward() divides by the native accumulation depth.
+                        accelerator.backward(loss * (weight / total_weight) * accumulation)
                 totals.append(loss.detach().float() * (weight / total_weight))
                 self.micro_batches_seen += 1
             if self._max_grad_norm is not None:
-                if scaler is not None:
+                if accelerator is not None:
+                    accelerator.clip_grad_norm_(self.binding.parameters(), self._max_grad_norm)
+                elif scaler is not None:
                     scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.binding.parameters(), self._max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(self.binding.parameters(), self._max_grad_norm)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.binding.parameters(), self._max_grad_norm)
             if scaler is None:
                 self.optimizer.step()
             else:
                 scaler.step(self.optimizer)
                 scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
-            if self.scheduler is not None:
+            if self.scheduler is not None and (accelerator is None or not self.optimizer.step_was_skipped):
                 self.scheduler.step()
             self.global_step += 1
             self._pending_losses.append(torch.stack(totals).sum())
             assert self._run is not None
+            interval = self._run.config.evaluation_steps
+            if self._validation is not None and interval is not None and self.global_step % interval == 0:
+                if self._run_validation(scheduled=True):
+                    self._stop_reason = "early_stopping"
+                    break
             if self._run.checkpoint_due(self.global_step, first_step):
                 self._save_run_checkpoint()
             elif self.global_step % self._run.config.log_steps == 0:
                 self._flush_losses()
-            interval = self._run.config.evaluation_steps
-            if interval is not None and self.global_step % interval == 0:
-                evaluation = self.evaluate(self._evaluation_data, weight=self._evaluation_weight)
-                self._run.payload["evaluations"].append({"step": self.global_step, **evaluation.__dict__})
-                self._run.emit("evaluation", step=self.global_step, **evaluation.__dict__)
-                self._run.write()
+            if self._validation is None and interval is not None and self.global_step % interval == 0:
+                self._run_validation(scheduled=True)
         self._flush_losses()
+
+    def _inherit_best_checkpoint(self) -> None:
+        if self._validation is None or self._validation.best_checkpoint is None:
+            return
+        source = self._validation.best_checkpoint
+        if not source.exists():
+            raise FileNotFoundError("resume requires the best checkpoint bundle referenced by the last checkpoint")
+        destination = self._run.directory / "best"
+        shutil.copytree(source.parent, destination)
+        self._validation.best_checkpoint = destination / source.name
+
+    def _run_validation(self, *, scheduled: bool) -> bool:
+        assert self._run is not None
+        try:
+            if self._validation_fn is None:
+                metrics = self.evaluate(self._evaluation_data, weight=self._evaluation_weight).__dict__
+            else:
+                with self.evaluation_context(), torch.no_grad():
+                    self.model.eval()
+                    metrics = dict(self._validation_fn(self))
+            if metrics.get("split", "validation") != "validation":
+                raise ValueError("checkpoint selection requires validation, not test metrics")
+            improved, stop = (False, False) if self._validation is None else self._validation.observe(metrics, self.global_step, scheduled=scheduled)
+        except BaseException:
+            self._save_run_checkpoint()
+            raise
+        self._run.payload["evaluations"].append({"step": self.global_step, **metrics})
+        self._run.emit("evaluation", step=self.global_step, split="validation", phase="scheduled" if scheduled else "selection_final", metrics=metrics)
+        if self._validation is not None:
+            if improved:
+                self._validation.best_checkpoint = self._run.checkpoint_path(self.global_step)
+            self._save_run_checkpoint(force=True)
+            receipt = self.selection_receipt()
+            self._run.payload["selection"] = receipt
+            self._run.payload["best_checkpoint"] = None if self._validation.best_checkpoint is None else str(self._validation.best_checkpoint.relative_to(self._run.directory))
+            self._run.emit("selection", step=self.global_step, **receipt)
+        self._run.write()
+        return stop
 
     def _training_iterator(self, data: Iterable[Any]):
         if self._data_state is not None:
@@ -419,7 +573,38 @@ class ARTITrainingSession:
                 self._run.payload["data_resume"] = "loader_state" if callable(getattr(data, "state_dict", None)) else "weights_optimizer_rng_only"
             yield from _cycling(data)
 
+    def _prepare_local_accelerate(self) -> None:
+        if self.engine_object is None:
+            try:
+                from accelerate import Accelerator
+                from accelerate.utils import GradientAccumulationPlugin
+            except ImportError as error:
+                raise RuntimeError("Accelerate integration requires `pip install accelerate`") from error
+            rng = _rng_state()
+            try:
+                accelerator = Accelerator(
+                    mixed_precision=self.config.mixed_precision,
+                    gradient_accumulation_plugin=GradientAccumulationPlugin(num_steps=self.config.gradient_accumulation_steps, sync_with_dataloader=False),
+                    cpu=self.config.device == "cpu",
+                )
+                if accelerator.num_processes != 1:
+                    raise ValueError("the local Accelerate run profile requires one process; distributed lifecycle is separate")
+                if self.scheduler is None:
+                    self.model, self.optimizer = accelerator.prepare(self.model, self.optimizer)
+                else:
+                    self.model, self.optimizer, self.scheduler = accelerator.prepare(self.model, self.optimizer, self.scheduler)
+                self.engine_object = accelerator
+            finally:
+                _restore_rng(rng)
+        self._scaler = self.engine_object.scaler
+        if self._scaler is not None and self._scaler_state is not None:
+            self._scaler.load_state_dict(self._scaler_state)
+            self._scaler_state = None
+
     def _fit_accelerate(self, train_data: Iterable[Any], steps: int) -> None:
+        if not self.config.distributed:
+            self._fit_local(train_data, steps, accelerator=self.engine_object)
+            return
         try:
             from accelerate import Accelerator, DistributedDataParallelKwargs
             from accelerate.utils import GradientAccumulationPlugin
@@ -471,88 +656,29 @@ class ARTITrainingSession:
         self.optimizer = prepared_optimizer
         self.scheduler = prepared_scheduler
 
+    def transformers_trainer(self, train_data, *, steps: int | None = None, trainer_class=None, trainer_kwargs: Mapping[str, Any] | None = None):
+        """Use a native Trainer subclass with ARTI parameter and asset ownership."""
+        if self.config.engine != "transformers":
+            raise ValueError("transformers_trainer requires engine='transformers'")
+        from .transformers_training import build_transformers_trainer
+
+        return build_transformers_trainer(self, train_data, steps=steps, trainer_class=trainer_class, trainer_kwargs=trainer_kwargs)
+
     def _fit_transformers(self, train_data: Any, steps: int, trainer_kwargs: Mapping[str, Any] | None) -> None:
-        try:
-            from transformers import Trainer, TrainingArguments
-        except ImportError as exc:
-            raise RuntimeError("Transformers integration requires `uv sync --extra qwen`") from exc
         options = dict(trainer_kwargs or {})
-        arguments = options.pop("args", None)
-        if arguments is None:
-            values = dict(options.pop("training_args", {}))
-            for name in tuple(options):
-                if name in getattr(TrainingArguments, "__dataclass_fields__", {}):
-                    values[name] = options.pop(name)
-            values.setdefault("output_dir", ".arti-trainer")
-            values.setdefault("max_steps", steps)
-            values.setdefault("learning_rate", self.config.learning_rate)
-            values.setdefault("gradient_accumulation_steps", self.config.gradient_accumulation_steps)
-            values.setdefault("bf16", self.config.mixed_precision == "bf16")
-            values.setdefault("fp16", self.config.mixed_precision == "fp16")
-            values.setdefault("report_to", [])
-            values.setdefault("save_strategy", "no")
-            values.setdefault("save_only_model", True)
-            if self.config.device == "cpu":
-                values.setdefault("use_cpu", True)
-            arguments = TrainingArguments(**values)
-        objective = self._objective
-        attachment = self.attachment
-        binding = self.binding
-        callbacks = list(options.pop("callbacks", ()))
-
-        session = self
-
-        class ARTITrainer(Trainer):
-            def compute_loss(self, model, inputs, return_outputs=False, **_kwargs):
-                if session.objective is model_loss_objective or getattr(session.objective, "_arti_native_model_loss", False):
-                    return super().compute_loss(model, inputs, return_outputs=return_outputs, **_kwargs)
-                loss = objective(model, inputs, attachment)
-                if return_outputs:
-                    return loss, {"loss": loss}
-                return loss
-
-            def _save(self, output_dir=None, state_dict=None):
-                del state_dict
-                target = Path(output_dir or self.args.output_dir)
-                target.mkdir(parents=True, exist_ok=True)
-                history = [float(row["loss"]) for row in self.state.log_history if "loss" in row]
-                binding.save(
-                    target / TRANSFORMERS_ARTIFACT,
-                    optimizer=self.optimizer,
-                    scheduler=self.lr_scheduler,
-                    training_state={
-                        **binding.checkpoint_metadata,
-                        "engine": "transformers",
-                        "binding_kind": binding.kind,
-                        "global_step": session.global_step + int(self.state.global_step),
-                        "loss_history": [*session.loss_history, *history],
-                    },
-                )
-
-        trainer = ARTITrainer(
-            model=self.model,
-            args=arguments,
-            train_dataset=train_data,
-            optimizers=(self.optimizer, self.scheduler),
-            callbacks=[ARTICheckpointCallback(), *callbacks],
-            **options,
-        )
-        if self.config.distributed and int(getattr(trainer.args, "world_size", 1)) < 2:
-            raise RuntimeError("distributed=True requires torchrun or accelerate launch on at least two processes")
-        if self.resume_from_checkpoint:
-            resume_path = self._resolve_resume_path(self.resume_from_checkpoint, output_dir=Path(arguments.output_dir))
-            trainer.create_optimizer_and_scheduler(num_training_steps=steps)
-            self.optimizer = trainer.optimizer
-            self.scheduler = trainer.lr_scheduler
-            self.load_checkpoint(resume_path)
-            self.resume_from_checkpoint = None
+        trainer_class = options.pop("trainer_class", None)
+        trainer = self.transformers_trainer(train_data, steps=steps, trainer_class=trainer_class, trainer_kwargs=options)
+        if steps == 0:
+            trainer._restore_without_training()
+            return
         output = trainer.train()
-        self.engine_object = trainer
-        self.optimizer = trainer.optimizer
-        self.scheduler = trainer.lr_scheduler
-        history = [float(row["loss"]) for row in trainer.state.log_history if "loss" in row]
-        self.loss_history.extend(history or [float(output.training_loss)])
-        self.global_step += int(output.global_step)
+        if not self.loss_history:
+            self.loss_history.append(float(output.training_loss))
+        if trainer._arti_last_artifact is not None:
+            self.binding.load(trainer._arti_last_artifact, load_checkpoint=False)
+            trainer._arti_best_view = False
+        if int(trainer.state.global_step) < trainer.args.max_steps:
+            self._stop_reason = "trainer_stopped"
 
     def _resolve_resume_path(
         self,

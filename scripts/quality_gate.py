@@ -17,7 +17,10 @@ DEFAULT_OUTPUT = ROOT / ".tmp" / "quality_gate_report.json"
 
 
 def pytest_command(name, *files):
-    return [PY, "-m", "pytest", "--basetemp=.tmp/quality-" + name, *files]
+    return [
+        PY, "-m", "pytest", "--basetemp=.tmp/quality-" + name,
+        "--junitxml=.tmp/quality-" + name + ".xml", *files,
+    ]
 
 
 QUICK_COMMANDS = [pytest_command(
@@ -49,6 +52,49 @@ RECIPE_COMMANDS = [pytest_command(
     "tests/test_attachment_training_engines.py", "tests/test_pretrained_workflow.py",
     "tests/test_attachment_hub.py",
 )]
+LIFECYCLE_COMMANDS = [
+    pytest_command(
+        "lifecycle", "tests/test_recipe_factory.py", "tests/test_custom_task_workflow.py",
+        "tests/test_recipe_recovery.py", "tests/test_recipe_recovery_resources.py",
+        "tests/test_recipe_import.py", "tests/test_recipe_token_budget.py",
+        "tests/test_recipe_batching.py", "tests/test_accelerate_local_workflow.py",
+        "tests/test_recipe_preparation.py", "tests/test_recipe_assets.py",
+        "tests/test_prediction_run.py", "tests/test_task_prediction_run.py",
+        "tests/test_prediction_files.py", "tests/test_prediction_scoring.py",
+        "tests/test_deployment_evaluation.py", "tests/test_recipe_evaluation.py",
+        "tests/test_recipe_comparison.py", "tests/test_recipe_deployment.py",
+        "tests/test_task_deployment.py", "tests/test_recipe_validation.py",
+        "tests/test_recipe_suite.py", "tests/test_recipe_runtime.py",
+        "tests/test_runtime_backend.py", "tests/test_recipe_episode.py",
+        "tests/test_recipe_export.py", "tests/test_file_lifecycle_workflow.py",
+        "tests/test_task_project.py", "tests/test_task_project_cli.py",
+        "tests/test_task_scaffold.py", "tests/test_task_status.py",
+        "tests/test_training_validation.py", "tests/test_atomic_checkpoint_write.py",
+    ),
+    pytest_command(
+        "reporting", "tests/test_reporting.py", "-k",
+        "not actual_mlflow_sqlite_client_metrics_and_artifacts and not actual_wandb_offline_run",
+    ),
+]
+INTEGRATION_COMMANDS = [
+    [PY, "-c", (
+        "import accelerate, transformers, datasets, trl, ray.train.torch, wandb, "
+        "mlflow, sqlalchemy, alembic; print('optional CPU SDK dependencies available')"
+    )],
+    pytest_command(
+        "integrations", "tests/test_transformers_training.py", "tests/test_trl_training.py",
+        "tests/test_ray_training.py", "tests/test_reporting.py",
+    ),
+    [PY, "-c", (
+        "import xml.etree.ElementTree as E; "
+        "r=E.parse('.tmp/quality-integrations.xml').getroot(); "
+        "s=list(r.iter('testsuite')); "
+        "assert sum(int(v.get('tests',0)) for v in s)>0; "
+        "assert all(int(v.get(k,0))==0 for v in s "
+        "for k in ('failures','errors','skipped')), 'optional SDK cases must all execute'; "
+        "print('optional CPU SDK integration: no skips, errors or failures')"
+    )],
+]
 PRETRAINED_COMMANDS = [pytest_command("pretrained", "tests/test_pretrained_workflow.py")]
 JAX_COMMANDS = [
     pytest_command("jax", "tests/test_jax_contract.py", "tests/test_jax_torch_parity.py",
@@ -60,6 +106,13 @@ DOCS_COMMANDS = [
     [PY, "-m", "arti.cli", "docs", "check"],
     [PY, "-m", "arti.cli", "schema", "fit-config", "check"],
     [PY, "-m", "arti.cli", "schema", "task-graph", "check"],
+    *[
+        [PY, "-m", "arti.cli", "schema", "task-workflow", "check", "--kind", kind]
+        for kind in (
+            "project", "recipe", "snapshot", "transform", "prediction", "files",
+            "episodes", "suite", "runtime", "export",
+        )
+    ],
     [PY, "-m", "mkdocs", "build", "--strict"],
 ]
 PACKAGE_COMMANDS = [
@@ -70,9 +123,13 @@ PACKAGE_COMMANDS = [
 CUDA_COMMANDS = [[PY, "-m", "arti.cli", "doctor", "--require-cuda-smoke"]]
 GATES = {
     "quick": QUICK_COMMANDS, "mainline": MAINLINE_COMMANDS, "recipes": RECIPE_COMMANDS,
+    "lifecycle": LIFECYCLE_COMMANDS, "integrations": INTEGRATION_COMMANDS,
     "pretrained": PRETRAINED_COMMANDS, "jax": JAX_COMMANDS, "docs": DOCS_COMMANDS,
     "package": PACKAGE_COMMANDS, "mechanism": MAINLINE_COMMANDS,
     "qwen": RECIPE_COMMANDS, "cuda": CUDA_COMMANDS,
+    "sd": PRETRAINED_COMMANDS,
+    "training-integrations": INTEGRATION_COMMANDS,
+    "ray-training": [pytest_command("ray-training", "tests/test_ray_training.py")],
 }
 
 
@@ -87,7 +144,7 @@ def portable_output_tail(value):
 
 
 def commands_for(gates):
-    names = ["quick", "mainline", "recipes", "docs", "package"] if "all" in gates else gates
+    names = ["quick", "mainline", "recipes", "lifecycle", "docs", "package"] if "all" in gates else gates
     return [command for name in names for command in GATES[name]]
 
 
