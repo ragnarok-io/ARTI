@@ -244,7 +244,7 @@ def run_workflow(output):
     write_json(inputs / "training.json", training)
     write_json(inputs / "preparation.json", prepared.report)
     with recovered.session.checkpoint_context(full_report["selected_checkpoint"]):
-        expected_values = recovered.predictor().predict_records(requests)
+        expected_values = recovered.predictor().predict_records(requests, batch_size=3)
     job = local / "prediction"
     run = arti.PredictionRunConfig(job, batch_size=3, files=files)
     try:
