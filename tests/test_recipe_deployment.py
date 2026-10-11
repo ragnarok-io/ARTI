@@ -44,6 +44,7 @@ def test_native_package_preserves_logits_replies_and_relative_sources(tmp_path, 
     )
     expected = predictor.predict_records(requests())
     state = [p.detach().clone() for p in current.model.arti.parameters()]
+    full_state = {name: value.detach().clone() for name, value in current.model.state_dict().items()}
     result = arti.package_causal_lm_deployment(
         asset, tmp_path / "package", include_base=True, base_model=base
     )
@@ -52,10 +53,25 @@ def test_native_package_preserves_logits_replies_and_relative_sources(tmp_path, 
     restored = arti.CausalLMPredictor.from_pretrained(moved, local_files_only=True)
     assert restored.predict_records(requests()) == expected
     batch = current.data.splits["test"].batches(2)[0]
-    with torch.no_grad():
+    with current.session.evaluation_context(), torch.no_grad():
+        current.model.eval()
+        before_package = predictor.model(**batch, use_cache=False).logits
+        after_package = restored.model(**batch, use_cache=False).logits
+        # Compare the same selected native base across the packaging boundary.
         torch.testing.assert_close(
-            restored.model(**batch).logits, current.model(**batch).logits, rtol=0, atol=0
+            after_package, before_package, rtol=0, atol=0
         )
+        # Independently constructed/loaded native models may differ in FP32 rounding.
+        # Its complete parameter state stays exact; forward equivalence is FP32.
+        torch.testing.assert_close(
+            after_package, current.model(**batch, use_cache=False).logits,
+            rtol=1e-6, atol=1e-7,
+        )
+    restored_state, current_state = restored.model.state_dict(), current.model.state_dict()
+    assert restored_state.keys() == current_state.keys() == full_state.keys()
+    for name, value in full_state.items():
+        torch.testing.assert_close(restored_state[name], value, rtol=0, atol=0)
+        torch.testing.assert_close(current_state[name], value, rtol=0, atol=0)
     assert restored.contract == current.task_contract
     assert all(
         torch.equal(a, b) for a, b in zip(state, current.model.arti.parameters(), strict=True)
