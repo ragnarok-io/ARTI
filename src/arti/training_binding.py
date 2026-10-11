@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import copy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+import torch
 from torch import nn
 
 from .serialization import load, save
@@ -54,6 +57,31 @@ class TrainingBinding:
 
     def state_module(self) -> nn.Module:
         return self._state_module if isinstance(self._state_module, nn.Module) else self._state_module()
+
+    @contextmanager
+    def evaluation_context(self):
+        """Preserve owned state, runtime resources, host buffers, modes and RNG."""
+        from .attachment_training import _rng_state, _restore_rng
+        from .resource_graph import ProgramGraph
+
+        bundle = self.state_module()
+        state = copy.deepcopy(bundle.state_dict())
+        graph_states = [(module, module.state()) for module in bundle.modules() if isinstance(module, ProgramGraph)]
+        buffers = [(buffer, buffer.detach().clone()) for buffer in self.model.buffers()]
+        modes = [(module, module.training) for module in self.model.modules()]
+        rng = _rng_state()
+        try:
+            yield
+        finally:
+            bundle.load_state_dict(state)
+            for graph, graph_state in graph_states:
+                graph.restore_state(graph_state)
+            with torch.no_grad():
+                for buffer, value in buffers:
+                    buffer.copy_(value)
+            for module, training in modes:
+                module.training = training
+            _restore_rng(rng)
 
     def describe(self) -> dict[str, Any]:
         if self._summary is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import copy
 import json
 import shutil
 import threading
@@ -151,6 +152,96 @@ def test_native_graph_recipe_has_gradients_and_real_classification_loss(tmp_path
         not torch.equal(value, before[key]) for key, value in recipe.model.state_dict().items()
     )
     assert not (tmp_path / "run" / "test.json").exists()
+
+
+@pytest.mark.parametrize("failed_stage", [None, "evaluation", "export"])
+def test_recipe_reporting_tracks_whole_workflow_not_only_training(tmp_path, monkeypatch, failed_stage):
+    recipe = ClassificationRecipe(_config(tmp_path))
+    events = []
+    tracked = {}
+
+    class Run:
+        summary = tracked
+
+        def define_metric(self, *args, **kwargs):
+            pass
+
+        def log(self, metrics):
+            pass
+
+    if failed_stage is not None:
+        def fail(*args, **kwargs):
+            raise RuntimeError("task stage failed")
+
+        monkeypatch.setattr(recipe, "evaluate" if failed_stage == "evaluation" else "export", fail)
+    reporter = arti.ReporterGroup(arti.WandbReporter(Run()), events.append)
+    options = dict(steps=2, run=arti.ARTITrainingRunConfig(output_dir=tmp_path / "run"), reporter=reporter)
+    if failed_stage is None:
+        result = recipe.fit(**options)
+        assert result["run_id"] == events[0]["run_id"]
+        assert any(row["type"] == "evaluation" and row.get("phase") == "final" for row in events)
+        assert any(row["type"] == "artifact" for row in events)
+        assert tracked["arti/workflow/status"] == "completed"
+    else:
+        with pytest.raises(RuntimeError, match="task stage failed"):
+            recipe.fit(**options)
+        assert tracked["arti/workflow/status"] == "failed"
+        assert tracked["arti/workflow/stage"] == failed_stage
+        assert not any(row["type"] == "artifact" for row in events)
+        run = json.loads((tmp_path / "run" / "run.json").read_text())
+        assert (tmp_path / "run" / run["latest_checkpoint"]).exists()
+    assert tracked["arti/training/status"] == "completed"
+    assert events[-1]["type"] == "workflow_finished"
+
+
+def test_recipe_exports_selected_best_but_keeps_last_for_resume(tmp_path):
+    recipe = ClassificationRecipe(_config(tmp_path))
+    events = []
+    states = {}
+
+    def validation(session):
+        key = tuple(torch.cat([value.detach().flatten() for value in session.model.parameters()]).tolist())
+        if key not in states:
+            states[key] = float(len(states) + 1)
+        return {"fixture_score":states[key], "split":"validation"}
+
+    run = arti.ARTITrainingRunConfig(output_dir=tmp_path / "run", evaluation_steps=1, validation=arti.ARTIValidationConfig(monitor="fixture_score"))
+    result = recipe.fit(steps=3, run=run, validation_fn=validation, reporter=events.append)
+    assert result["selection"]["selected_step"] == 1
+    assert result["checkpoint"] != result["selected_checkpoint"]
+    live = copy.deepcopy(recipe.model.state_dict())
+    predictions = ClassificationPredictor.from_pretrained(result["model"]).predict_records([
+        {"id":"one", "features":[1, 0.5, 3]}
+    ])
+    with recipe.session.checkpoint_context(result["selected_checkpoint"]):
+        expected = recipe.model(torch.tensor([[1.0,0.5,3.0]]))["logits"].softmax(-1).detach()[0]
+    torch.testing.assert_close(torch.tensor(predictions[0]["probabilities"]), expected, rtol=0, atol=0)
+    for name, value in recipe.model.state_dict().items():
+        torch.testing.assert_close(value, live[name], rtol=0, atol=0)
+    selected = recipe.evaluate("validation", checkpoint=result["selected_checkpoint"])
+    assert selected["loss"] == result["validation"]["loss"]
+    artifact = arti.load(result["model"], load_checkpoint=False)
+    assert artifact.manifest["architecture"]["config"]["selection"]["selected_step"] == 1
+    assert any(row["type"] == "selection" for row in events)
+
+
+@pytest.mark.parametrize("format", ["json", "toml"])
+def test_recipe_cli_parses_validation_policy_and_selects_by_accuracy(tmp_path, capsys, format):
+    _write(tmp_path / "records.jsonl", _records())
+    declaration = {
+        "task":"classification", "data":{"path":"records.jsonl", "batch_size":3},
+        "model":{"hidden_dim":8}, "training":{"device":"cpu", "steps":3},
+        "run":{"output_dir":"run", "evaluation_steps":1, "validation":{"monitor":"accuracy", "mode":"max", "patience":5}},
+    }
+    path = tmp_path / f"recipe.{format}"
+    path.write_text(json.dumps(declaration) if format == "json" else 'task="classification"\n[data]\npath="records.jsonl"\nbatch_size=3\n[model]\nhidden_dim=8\n[training]\ndevice="cpu"\nsteps=3\n[run]\noutput_dir="run"\nevaluation_steps=1\n[run.validation]\nmonitor="accuracy"\nmode="max"\npatience=5\n', encoding="utf-8")
+    exit_code = main(["recipe","train",str(path)])
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.err
+    result = json.loads(captured.out)
+    assert result["selection"]["monitor"] == "accuracy"
+    assert result["selection"]["mode"] == "max"
+    assert result["selection"]["selection"] == "best"
 
 
 def test_evaluation_is_sample_weighted_and_keeps_raw_ids(tmp_path):

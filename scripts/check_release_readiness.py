@@ -65,14 +65,23 @@ def check_workflows(ci_text: str | None = None, release_text: str | None = None)
     for snippet in (
         "name: CI",
         "workflow_call:",
+        'os: [ubuntu-latest, windows-latest]',
+        'python-version: ["3.10", "3.11", "3.12"]',
         "uv sync --locked --extra dev",
         "scripts/quality_gate.py quick",
         "scripts/quality_gate.py mainline",
         "scripts/quality_gate.py recipes",
+        "scripts/quality_gate.py lifecycle",
+        "scripts/quality_gate.py integrations",
+        "scripts/quality_gate.py docs",
         "scripts/quality_gate.py jax",
         "--extra qwen --extra serve",
+        "--extra trl --extra ray --extra wandb --extra mlflow",
+        'RAY_TRAIN_V2_ENABLED: "1"',
+        "WANDB_MODE: offline",
+        'HF_HUB_OFFLINE: "1"',
         "scripts/check_package.py",
-        "mkdocs build --strict",
+        "scripts/check_installed_task_workflow.py",
     ):
         if snippet not in ci:
             failures.append(f"CI workflow missing release gate: {snippet}")
@@ -89,6 +98,42 @@ def check_workflows(ci_text: str | None = None, release_text: str | None = None)
     return failures
 
 
+def check_gate_coverage() -> list[str]:
+    """Check the public commands rather than any private benchmark receipt."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("public_quality_gate", ROOT / "scripts/quality_gate.py")
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    failures = []
+    lifecycle_files = {
+        part for command in gate.GATES.get("lifecycle", ()) for part in command
+    }
+    for filename in (
+        "test_custom_task_workflow.py", "test_recipe_assets.py", "test_prediction_files.py",
+        "test_recipe_episode.py", "test_recipe_suite.py", "test_recipe_runtime.py",
+        "test_runtime_backend.py", "test_recipe_export.py", "test_file_lifecycle_workflow.py",
+        "test_task_project.py", "test_task_project_cli.py", "test_task_status.py",
+        "test_task_scaffold.py", "test_training_validation.py", "test_atomic_checkpoint_write.py",
+    ):
+        if f"tests/{filename}" not in lifecycle_files:
+            failures.append(f"lifecycle gate missing accepted contract: {filename}")
+    docs = gate.GATES.get("docs", ())
+    for kind in (
+        "project", "recipe", "snapshot", "transform", "prediction", "files",
+        "episodes", "suite", "runtime", "export",
+    ):
+        expected = [gate.PY, "-m", "arti.cli", "schema", "task-workflow", "check", "--kind", kind]
+        if expected not in docs:
+            failures.append(f"docs gate missing task workflow schema: {kind}")
+    if [gate.PY, "-m", "mkdocs", "build", "--strict"] not in docs:
+        failures.append("docs gate missing strict MkDocs build")
+    if not (ROOT / "scripts/check_installed_task_workflow.py").is_file():
+        failures.append("installed wheel user lifecycle gate is missing")
+    return failures
+
+
 def check_release_documentation() -> list[str]:
     release = read("docs/guides/release.md")
     required = (
@@ -98,6 +143,10 @@ def check_release_documentation() -> list[str]:
         "check_package.py",
         "PyPI Trusted Publishing",
         "recipes",
+        "lifecycle",
+        "installed",
+        "schemas",
+        "integrations",
         "native JAX",
     )
     return [
@@ -112,13 +161,17 @@ def check_readiness() -> dict[str, object]:
     failures.extend(check_version_consistency())
     failures.extend(check_public_identity())
     failures.extend(check_workflows())
+    failures.extend(check_gate_coverage())
     failures.extend(check_release_documentation())
     return {
         "ok": not failures,
         "kind": "public-release-readiness",
         "version": project_version(),
         "distribution": "arti-fit",
-        "required_gates": ["ci", "version-consistency", "package-build", "release-workflow"],
+        "required_gates": [
+            "ci", "version-consistency", "package-build", "release-workflow",
+            "lifecycle", "workflow-schemas", "installed-user-workflow", "optional-cpu-integrations",
+        ],
         "failures": failures,
     }
 

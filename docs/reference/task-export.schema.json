@@ -1,0 +1,166 @@
+{
+  "$id": "urn:arti:task-workflow:export:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "validator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "validation_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validation_id"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "validation_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validation_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "validator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "validator"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "archive": {
+      "enum": [
+        "directory",
+        "zip"
+      ]
+    },
+    "examples": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "format": {
+      "const": "arti.result-export-config"
+    },
+    "instructions": {
+      "type": "string"
+    },
+    "options": {
+      "type": "object"
+    },
+    "revision": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "unresolved_checks": {
+      "items": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "validation_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "validator": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "writer": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "writer",
+    "revision"
+  ],
+  "title": "ARTI task workflow export configuration",
+  "type": "object"
+}

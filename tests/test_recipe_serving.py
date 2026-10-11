@@ -77,7 +77,7 @@ def test_classification_and_language_share_the_same_asgi_service(tmp_path):
 def test_workflow_export_failure_does_not_report_deployment_success(tmp_path, monkeypatch):
     current = arti.CausalLMRecipe(config(tmp_path), model=base_model(), tokenizer=tokenizer())
 
-    def failed_export(directory):
+    def failed_export(directory, **kwargs):
         raise RuntimeError("export stopped")
 
     monkeypatch.setattr(current, "export", failed_export)
@@ -92,3 +92,60 @@ def test_sft_recipe_does_not_require_serving_dependencies_for_training(tmp_path)
     cfg = config(tmp_path)
     resolved = replace(cfg, run=arti.ARTITrainingRunConfig(output_dir=tmp_path / "normal"))
     assert arti.CausalLMRecipe(resolved, model=base_model(), tokenizer=tokenizer()).check()["ok"]
+
+
+def test_concurrent_qwen_requests_share_one_real_generation_batch(tmp_path, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    current = arti.CausalLMRecipe(config(tmp_path), model=base_model(), tokenizer=tokenizer())
+    result = current.fit(run=arti.ARTITrainingRunConfig(output_dir=tmp_path / "run"))
+    predictor = arti.CausalLMPredictor.from_pretrained(result["model"], model=base_model())
+    records = [{"id":"a", "messages":[{"role":"user","content":"color red"}]}, {"id":"b", "messages":[{"role":"user","content":"color blue"}]}]
+    expected = predictor.predict_records(records)
+    calls = []
+    original = predictor.model.generate
+
+    def generate(*args,**kwargs):
+        calls.append(tuple(kwargs["input_ids"].shape))
+        return original(*args,**kwargs)
+
+    monkeypatch.setattr(predictor.model,"generate",generate)
+    app = arti.create_recipe_app(predictor,config=arti.RecipeServingConfig(batch_wait_ms=20))
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+                responses = await asyncio.gather(*(client.post("/predict",json={"records":[record]}) for record in records))
+                assert [response.json()["predictions"][0] for response in responses] == expected
+                assert len(calls) == 1 and calls[0][0] == 2
+
+    asyncio.run(exercise())
+
+
+def test_concurrent_classifier_requests_share_one_tensor_forward(tmp_path):
+    from httpx import ASGITransport,AsyncClient
+    from test_task_recipes import _config
+
+    recipe = arti.ClassificationRecipe(_config(tmp_path))
+    predictor = arti.ClassificationPredictor.from_pretrained(recipe.export(tmp_path / "model"))
+    records = [{"id":str(value),"features":[value,value*0.5,3]} for value in (1,-1,2)]
+    expected = predictor.predict_records(records)
+    shapes = []
+    hook = predictor.model.register_forward_pre_hook(lambda _module,args,kwargs: shapes.append(tuple((args[0] if args else kwargs["features"]).shape)),with_kwargs=True)
+    app = arti.create_recipe_app(predictor,config=arti.RecipeServingConfig(batch_wait_ms=20))
+
+    async def exercise():
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+                responses = await asyncio.gather(*(client.post("/predict",json={"records":[row]}) for row in records))
+                assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+                actual = [response.json()["predictions"][0] for response in responses]
+                assert [row["id"] for row in actual] == [row["id"] for row in expected]
+                assert [row["label"] for row in actual] == [row["label"] for row in expected]
+                torch.testing.assert_close(torch.tensor([row["probabilities"] for row in actual]),torch.tensor([row["probabilities"] for row in expected]),rtol=1e-6,atol=1e-7)
+                assert shapes == [(3,3)]
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        hook.remove()

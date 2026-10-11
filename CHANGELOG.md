@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.3.0
+
+- Add model-independent `TaskRecipe`/`TrainingBinding` workflows with explicit
+  application factories, native data/loss semantics, checkpoint selection and
+  qualified local recovery through the existing training session.
+- Add immutable record/binary-asset snapshots, logical roles/splits/groups,
+  reference availability, relocatable bindings and versioned preparation reuse.
+- Extend prediction journals with staged named-file outputs, atomic committed
+  closures, format validators and remainder-only recovery; retain JSON-only use.
+- Add independently declared policy/environment episodes with state lifetimes,
+  outcome traces, local recovery and refusal of ambiguous external-action replay.
+- Add reference/output/external evaluation suites preserving original coverage,
+  paired trial identities, explicit criteria and distinct evidence origins.
+- Add trusted runtime/handoff profiles and portable result archives with exact
+  ID/file closure; formatting export reuses results and performs no submission.
+- Add atomic task scaffolding, unified project checks and packaged JSON Schemas,
+  read-only task status/explain and a complete installed-package tutorial.
+- Add validation-selected checkpoints, prepared supervision, explicit local
+  SFT imports, token budgets, cross-request batching and optional native
+  Transformers/TRL, Ray Train and offline reporting integration paths.
+- Preserve the selected Windows CPython virtual environment while managing the
+  actual direct worker, avoiding redirector-only termination on a local deadline.
+
+Support is bounded by documented local CPU and engine contracts. This release
+does not qualify arbitrary native episode-state codecs, distributed/sharded
+recovery, process-tree/network/memory isolation, providers, hardware, throughput
+or task quality. Declared, observed and enforced limits remain separate.
+
 ## 3.2.0
 
 - Unify native models, model attachments and pretrained integrations around

@@ -11,13 +11,43 @@ from ..attachment_layer import AttachedARTILayerConfig, AttachedARTILayerSpec
 from ..attachment_config import ARTIAttachConfig, ARTIAttachTrainingConfig, attach_config_from_dict, load_attach_config, validate_attach_lock, write_attach_config, write_attach_lock
 from ..attachment_training import ARTICheckpointCallback, ARTIEvaluationResult, ARTITrainingResult, ARTITrainingSession, model_loss_objective, resolve_attachment_objective, tensor_alignment_objective
 from ..training_run import ARTITrainingRunConfig
+from ..training_validation import ARTIValidationConfig
+from ..reporting import MLflowReporter, ReporterGroup, WandbReporter
+from ..ray_training import RayTrainCheckpointHandler, restore_ray_checkpoint
+from ..recipe_recovery import plan_recipe_resume, resume_recipe_run
+from ..python_factory import PythonFactoryConfig
+from ..task_recipe import TaskRecipeConfig, TaskRecipe, TaskPredictor
+from ..task_project import TaskProjectConfig, read_task_project, check_task_project, project_schema, packaged_project_schema
+from ..task_project import project_schema_json, write_task_project_schema, check_task_project_schema
+from ..task_scaffold import create_task_project
+from ..task_status import task_project_status, explain_task_project, render_task_project_status
+from ..recipe_evaluation import CausalLMEvaluationConfig, score_causal_lm_predictions, compare_causal_lm_predictions, compare_causal_lm_evaluations
+from ..recipe_deployment import inspect_causal_lm_deployment, package_causal_lm_deployment
 from ..training_config import ARTITrainingConfig
 from ..training_binding import TrainingBinding, trainer
 from ..recipes import ClassificationPredictor, ClassificationRecipe, ClassificationRecipeConfig, recipe_from_config, load_recipe_predictor
-from ..language_recipe import CausalLMRecipe, CausalLMRecipeConfig, CausalLMPredictor, CausalLMModelConfig, CausalLMGenerationConfig, CausalLMOptimizerConfig
-from ..recipe_adapters import FormulaAdapterConfig, formula_adapter_factory
+from ..language_recipe import CausalLMRecipe, CausalLMRecipeConfig, CausalLMPredictor, CausalLMModelConfig, CausalLMGenerationConfig, CausalLMOptimizerConfig, prepare_causal_lm_data, evaluate_causal_lm_deployment
+from ..recipe_adapters import FormulaAdapterConfig, formula_adapter_factory, LayerFactoryConfig
 from ..recipe_chat import ChatFields
-from ..recipe_serving import create_recipe_app
+from ..recipe_import import CausalLMImportFields, CausalLMDataSource, CausalLMDataImportConfig, import_causal_lm_data
+from ..recipe_prediction import CausalLMPredictionRunConfig, run_causal_lm_prediction, inspect_causal_lm_prediction
+from ..recipe_prediction import PredictionRunConfig, run_prediction, inspect_prediction
+from ..recipe_files import PredictionFilesConfig
+from ..recipe_deployment import inspect_recipe_deployment, package_recipe_deployment
+from ..recipe_validation import validate_recipe_deployment
+from ..recipe_assets import AssetReference, DatasetSnapshotConfig, DatasetSnapshot, create_dataset_snapshot, inspect_dataset_snapshot, AssetTransformConfig, AssetPreparationInput, DatasetAssetPreparation, prepare_dataset_assets
+from ..recipe_scoring import PredictionScoringConfig, score_prediction_run, compare_prediction_runs
+from ..recipe_suite import EvaluationTrialFields, EvaluationViewConfig, EvaluationSuiteConfig, evaluate_prediction_suite, compare_prediction_suites, import_evaluation_evidence, evaluation_source_identity
+from ..recipe_runtime import TaskRuntimeProfile, TaskRuntimeContext, inspect_task_runtime, run_task_runtime
+from ..recipe_episode import EpisodeRunConfig, EpisodeAdapter
+from ..recipe_runtime import TaskRuntimeBackendConfig, TaskRuntimeBackendContext
+from ..recipe_export import (
+    ResultExportConfig,
+    ResultExportContext,
+    export_prediction_results,
+    inspect_result_export,
+)
+from ..recipe_serving import RecipeServingConfig, create_recipe_app
 from ..recipe_data import ClassificationDataset, ClassificationFields
 from ..attachment_hub import ARTIDoctorReport, ARTIHubSaveResult, load_attachment_pretrained, save_attachment_pretrained
 from ..config import ARTIConfig
@@ -149,13 +179,68 @@ from ..training import experiential_recall_alignment_loss, experiential_recall_s
 
 __all__ = [
     "create_recipe_app",
+    "RecipeServingConfig",
     "CausalLMRecipe",
     "CausalLMRecipeConfig",
+    "CausalLMImportFields",
+    "CausalLMDataSource",
+    "CausalLMDataImportConfig",
+    "import_causal_lm_data",
+    "CausalLMEvaluationConfig",
+    "score_causal_lm_predictions",
+    "compare_causal_lm_predictions",
+    "compare_causal_lm_evaluations",
+    "inspect_causal_lm_deployment",
+    "package_causal_lm_deployment",
+    "prepare_causal_lm_data",
+    "evaluate_causal_lm_deployment",
+    "CausalLMPredictionRunConfig",
+    "run_causal_lm_prediction",
+    "inspect_causal_lm_prediction",
+    "PredictionRunConfig",
+    "PredictionFilesConfig",
+    "AssetReference",
+    "DatasetSnapshotConfig",
+    "DatasetSnapshot",
+    "create_dataset_snapshot",
+    "inspect_dataset_snapshot",
+    "AssetTransformConfig",
+    "AssetPreparationInput",
+    "DatasetAssetPreparation",
+    "prepare_dataset_assets",
+    "inspect_recipe_deployment",
+    "package_recipe_deployment",
+    "validate_recipe_deployment",
+    "PredictionScoringConfig",
+    "EvaluationTrialFields",
+    "EvaluationViewConfig",
+    "EvaluationSuiteConfig",
+    "TaskRuntimeProfile",
+    "ResultExportConfig",
+    "EpisodeRunConfig",
+    "EpisodeAdapter",
+    "TaskRuntimeBackendConfig",
+    "TaskRuntimeBackendContext",
+    "ResultExportContext",
+    "export_prediction_results",
+    "inspect_result_export",
+    "TaskRuntimeContext",
+    "inspect_task_runtime",
+    "run_task_runtime",
+    "evaluate_prediction_suite",
+    "compare_prediction_suites",
+    "import_evaluation_evidence",
+    "evaluation_source_identity",
+    "score_prediction_run",
+    "compare_prediction_runs",
+    "run_prediction",
+    "inspect_prediction",
     "CausalLMPredictor",
     "CausalLMModelConfig",
     "CausalLMGenerationConfig",
     "CausalLMOptimizerConfig",
     "FormulaAdapterConfig",
+    "LayerFactoryConfig",
     "formula_adapter_factory",
     "ChatFields",
     "recipe_from_config",
@@ -184,6 +269,30 @@ __all__ = [
     "ARTICheckpointCallback",
     "ARTITrainingResult",
     "ARTITrainingRunConfig",
+    "ARTIValidationConfig",
+    "MLflowReporter",
+    "ReporterGroup",
+    "WandbReporter",
+    "RayTrainCheckpointHandler",
+    "restore_ray_checkpoint",
+    "plan_recipe_resume",
+    "resume_recipe_run",
+    "PythonFactoryConfig",
+    "TaskRecipeConfig",
+    "TaskProjectConfig",
+    "read_task_project",
+    "check_task_project",
+    "project_schema",
+    "packaged_project_schema",
+    "project_schema_json",
+    "write_task_project_schema",
+    "check_task_project_schema",
+    "create_task_project",
+    "task_project_status",
+    "explain_task_project",
+    "render_task_project_status",
+    "TaskRecipe",
+    "TaskPredictor",
     "ARTITrainingConfig",
     "TrainingBinding",
     "trainer",

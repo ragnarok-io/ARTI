@@ -1,0 +1,112 @@
+{
+  "$id": "urn:arti:task-workflow:snapshot:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "asset_metadata": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "assets": {
+      "additionalProperties": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "bindings": {
+      "additionalProperties": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "asset_id": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "role": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "asset_id"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "format": {
+      "const": "arti.dataset-snapshot-config"
+    },
+    "group_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "records": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "source_revision": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "split_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "records"
+  ],
+  "title": "ARTI task workflow snapshot configuration",
+  "type": "object"
+}

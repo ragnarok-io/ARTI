@@ -3,10 +3,15 @@
 ARTI provides neural programs, tensor resources and a usable training lifecycle.
 The public package is `arti-fit`; the import is `arti`.
 
+For a custom application using the installed package, start with the
+[complete task project tutorial](installed-task-workflow.md). `arti task init`
+generates a runnable project with checks, status, recovery and offline delivery.
+
 ## Choose Your Entry Point
 
 | Goal | Entry point |
 | --- | --- |
+| Start a custom task project | `arti task init/check/status/explain`, `TaskRecipe` |
 | Train a labeled task | `arti recipe`, `ClassificationRecipe`, `CausalLMRecipe` |
 | Adapt an existing model | `ARTI.attach` with a configured layer or factory |
 | Train a native Torch model | `arti.trainer(model, objective=...)` |

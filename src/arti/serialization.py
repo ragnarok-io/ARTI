@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -818,11 +819,23 @@ def _member_path(root: Path, name: str) -> Path:
     return root / name
 
 
+def _replace_atomic_file(source: Path, destination: Path) -> None:
+    # Windows readers/indexers can briefly deny FILE_SHARE_DELETE during replace.
+    for attempt in range(6):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            time.sleep(0.01 * 2**attempt)
+
+
 def _atomic_safetensors(tensors: Mapping[str, Tensor], path: Path, *, metadata: Mapping[str, str]) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     try:
         save_file(dict(tensors), temporary, metadata=dict(metadata))
-        os.replace(temporary, path)
+        _replace_atomic_file(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -832,7 +845,7 @@ def _atomic_json(path: Path, payload: Any) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     try:
         temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=True, allow_nan=False) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
+        _replace_atomic_file(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()

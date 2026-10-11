@@ -57,6 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arti", description="ARTI adaptation build utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    task_parser = subparsers.add_parser("task", help="Create, check and inspect an application task project.")
+    task_actions = task_parser.add_subparsers(dest="task_action", required=True)
+    task_init = task_actions.add_parser("init", help="Create a fresh runnable native file-task project.")
+    task_init.add_argument("directory", type=Path)
+    task_init.add_argument("--name", default="task")
+    task_init.add_argument("--template", choices=("files",), default="files")
+    for action in ("check", "status", "explain"):
+        task_action = task_actions.add_parser(action, help="Read declarations and existing evidence without executing task code.")
+        task_action.add_argument("project", type=Path)
+        task_action.add_argument("--output", type=Path, help="Save the report; existing lifecycle artifacts are not modified.")
+        task_action.add_argument("--format", choices=("json", "text"), default="text" if action == "explain" else "json")
+
     inspect_parser = subparsers.add_parser("inspect", help="Print ARTI fit capabilities as JSON.")
     inspect_parser.add_argument(
         "section",
@@ -82,11 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "gates",
         nargs="*",
         default=["quick"],
-        choices=("quick", "docs", "package", "mainline", "mechanism", "cuda", "qwen", "pretrained", "recipes", "sd", "all"),
+        choices=("quick", "docs", "package", "mainline", "mechanism", "cuda", "qwen", "pretrained", "recipes", "lifecycle", "integrations", "sd", "jax", "training-integrations", "ray-training", "all"),
         help="Quality gate names to run.",
     )
     gate_parser.add_argument("--fail-fast", action="store_true", help="Stop after the first failed gate command.")
-    gate_parser.add_argument("--output", type=Path, default=Path("benchmarks/results/quality_gate_report.json"), help="Quality gate JSON report path.")
+    gate_parser.add_argument("--output", type=Path, default=Path(".tmp/quality_gate_report.json"), help="Quality gate JSON report path.")
     gate_parser.add_argument(
         "--reuse-passing-producers",
         action="store_true",
@@ -110,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     schema_task_parser = schema_subparsers.add_parser("task-graph", help="Generate or check the ARTI task graph JSON Schema.")
     schema_task_parser.add_argument("action", choices=("generate", "check"), help="Generate or check the schema file.")
     schema_task_parser.add_argument("--output", type=Path, default=Path("docs/reference/task-graph.schema.json"), help="Generated task graph schema path.")
+    from .task_project import SCHEMA_KINDS
+    schema_workflow_parser = schema_subparsers.add_parser("task-workflow", help="Generate or check task project and native lifecycle schemas.")
+    schema_workflow_parser.add_argument("action", choices=("generate", "check"))
+    schema_workflow_parser.add_argument("--kind", dest="workflow_kind", choices=SCHEMA_KINDS, default="project")
+    schema_workflow_parser.add_argument("--output", type=Path)
 
     pretrained_parser = subparsers.add_parser("pretrained", help="Run declarative pretrained-model workflows.")
     pretrained_subparsers = pretrained_parser.add_subparsers(dest="pretrained_action", required=True)
@@ -130,7 +147,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     recipe_parser = subparsers.add_parser("recipe", help="Train, evaluate and deploy a supervised task recipe.")
     recipe_actions = recipe_parser.add_subparsers(dest="recipe_action", required=True)
-    for action in ("plan", "check", "train", "evaluate", "export"):
+    import_data = recipe_actions.add_parser("import-data", help="Normalize explicitly split local SFT files; no model loading.")
+    import_data.add_argument("config", type=Path, help="JSON/TOML data-source declaration.")
+    import_data.add_argument("--output", type=Path, required=True, help="Fresh dataset snapshot directory.")
+    snapshot_data = recipe_actions.add_parser("snapshot-data", help="Freeze native records and explicit binary-asset bindings.")
+    snapshot_data.add_argument("config", type=Path)
+    snapshot_data.add_argument("--output", type=Path, required=True)
+    inspect_data = recipe_actions.add_parser("inspect-data", help="Verify records/assets without task code or decoding.")
+    inspect_data.add_argument("config", type=Path, help="Dataset snapshot directory.")
+    inspect_data.add_argument("--output", type=Path)
+    prepare_assets = recipe_actions.add_parser("prepare-assets", help="Batch immutable asset transforms and reuse committed cache entries.")
+    prepare_assets.add_argument("config", type=Path, help="Dataset snapshot directory.")
+    prepare_assets.add_argument("--transform", type=Path, required=True)
+    prepare_assets.add_argument("--cache-dir", type=Path, required=True)
+    prepare_assets.add_argument("--batch-size", type=int, default=16)
+    prepare_assets.add_argument("--role", action="append", help="Only transform assets with these declared roles.")
+    prepare_assets.add_argument("--output", type=Path)
+    for action in ("plan", "prepare-data", "check", "train", "evaluate", "export"):
         recipe_action = recipe_actions.add_parser(action)
         recipe_action.add_argument("config", type=Path)
         if action == "train":
@@ -142,26 +175,184 @@ def build_parser() -> argparse.ArgumentParser:
             evaluation_source.add_argument("--model", type=Path, help="Inference asset for the configured data split.")
             evaluation_source.add_argument("--data", type=Path, help="New labeled JSONL; positional path names the model asset.")
             recipe_action.add_argument("--split", choices=("train", "validation", "test"), default="validation")
-            recipe_action.add_argument("--generate-samples", type=int, default=0, help="Causal-LM generation evaluation sample count.")
+            recipe_action.add_argument("--generate-samples", type=int, default=None, help="Override configured causal-LM generation samples; 0 disables generation.")
             recipe_action.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+            recipe_action.add_argument("--base-model", type=Path, help="Local native causal-LM base snapshot override.")
+            recipe_action.add_argument("--layer-factory", help="Explicit installed.module:callable for a custom causal-LM program.")
+            recipe_action.add_argument("--factory-kwargs-json", type=Path, help="Explicit layer-factory keyword arguments JSON.")
+            recipe_action.add_argument("--task-factory", help="Installed task factory for a generic deployment.")
+            recipe_action.add_argument("--task-factory-kwargs-json", type=Path)
             recipe_action.add_argument("--output", type=Path)
         elif action == "export":
             recipe_action.add_argument("--checkpoint", type=Path, required=True)
             recipe_action.add_argument("--output", type=Path, required=True)
         else:
             recipe_action.add_argument("--output", type=Path)
+    resume_run = recipe_actions.add_parser("resume-run", help="Recover an existing task horizon or finish evaluation/export.")
+    resume_run.add_argument("source_run", type=Path)
+    resume_run.add_argument("--run-dir", type=Path, help="Fresh attempt directory.")
+    resume_run.add_argument("--plan-only", action="store_true", help="Read artifact metadata without loading model weights or CUDA.")
+    resume_run.add_argument("--refresh-completed", action="store_true", help="Repeat only evaluation/export for a completed task.")
+    resume_run.add_argument("--max-seconds", type=float, help="Training time allowance for this new attempt.")
+    resume_run.add_argument("--output", type=Path)
+    resume_run.add_argument("--data", type=Path, help="Relocated, semantically identical causal-LM JSONL snapshot.")
+    resume_run.add_argument("--cache-dir", type=Path, help="Current writable prepared-data cache directory.")
+    resume_run.add_argument("--source-manifest", type=Path, help="Relocated source provenance manifest.")
+    resume_run.add_argument("--base-model", type=Path, help="Current local native causal-LM base snapshot.")
+    resume_run.add_argument("--layer-factory", help="Explicit installed.module:callable for a custom program.")
+    resume_run.add_argument("--factory-kwargs-json", type=Path)
+    resume_run.add_argument("--resources-json", type=Path, help="Named runtime resource overrides for a generic task factory.")
+    for action in ("inspect-deployment", "package-deployment"):
+        deployment = recipe_actions.add_parser(action)
+        deployment.add_argument("model", type=Path)
+        deployment.add_argument("--base-model", type=Path, help="Local native base snapshot; no download.")
+        deployment.add_argument("--output", type=Path, required=action == "package-deployment")
+        if action == "package-deployment":
+            deployment.add_argument("--include-base", action="store_true", help="Copy native base weights into a movable offline package.")
+            deployment.add_argument("--resources-json", type=Path, help="Explicit generic-task inference name-to-file/directory bindings.")
+            deployment.add_argument("--requirements-json", type=Path, help="Declared Python requirements; no automatic installation.")
+            deployment.add_argument("--runtime-profile", type=Path)
+            deployment.add_argument("--code-json", type=Path, help="Explicit trusted code distribution roots; no automatic tree inclusion.")
+            deployment.add_argument("--wheels-json", type=Path, help="Offline wheel inputs only; never installed automatically.")
+    for runtime_action in ("inspect-runtime", "run-runtime"):
+        runtime_parser = recipe_actions.add_parser(runtime_action, help="Probe or execute a declared trusted application handoff.")
+        runtime_parser.add_argument("model", type=Path)
+        runtime_parser.add_argument("--python", type=Path)
+        if runtime_action == "inspect-runtime":
+            runtime_parser.add_argument("--inspect-backend", action="store_true", help="Explicitly import the selected trusted host backend for target-environment inspection.")
+        runtime_parser.add_argument("--output", type=Path, required=runtime_action == "run-runtime")
+        if runtime_action == "run-runtime":
+            runtime_parser.add_argument("--inputs-json", type=Path, required=True)
+            runtime_parser.add_argument("--outputs-json", type=Path, required=True)
+            runtime_parser.add_argument("--options-json", type=Path)
+    export_results = recipe_actions.add_parser(
+        "export-results",
+        help="Format committed results into an atomic portable handoff; no inference.",
+    )
+    export_results.add_argument("run_dir", type=Path)
+    export_results.add_argument("--config", dest="export_config", type=Path, required=True)
+    export_results.add_argument("--output", type=Path, required=True)
+    export_results.add_argument("--expected-ids-json", type=Path)
+    export_results.add_argument("--evidence-json", type=Path)
+    export_results.add_argument("--attachments-json", type=Path)
+    export_results.add_argument("--deployment", type=Path)
+    inspect_results = recipe_actions.add_parser(
+        "inspect-results",
+        help="Verify all exported content and expected ID coverage without writer/model code.",
+    )
+    inspect_results.add_argument("run_dir", type=Path)
+    compare = recipe_actions.add_parser("compare-evaluations", help="Pair stored causal-LM evaluation replies; no model loading.")
+    validation = recipe_actions.add_parser("validate-deployment", help="Recoverable task prediction, offline scoring and explicit metric criteria.")
+    validation.add_argument("model", type=Path, nargs="?", help="Required for new/unfinished inference; completed scoring can omit it.")
+    validation.add_argument("--data", type=Path)
+    validation.add_argument("--run-dir", type=Path, required=True)
+    validation.add_argument("--resume", action="store_true")
+    validation.add_argument("--batch-size", type=int)
+    validation.add_argument("--max-seconds", type=float)
+    validation.add_argument("--predict-kwargs-json", type=Path)
+    validation.add_argument("--episode-config", type=Path, help="Explicit task-owned episode adapter, state lifetime and recovery declaration.")
+    validation.add_argument("--id-field")
+    validation.add_argument("--output-id-field")
+    validation_scoring = validation.add_mutually_exclusive_group(required=True)
+    validation_scoring.add_argument("--scorer")
+    validation_scoring.add_argument("--evaluation-suite", type=Path)
+    validation.add_argument("--scorer-id")
+    validation.add_argument("--scorer-kwargs-json", type=Path)
+    validation.add_argument("--targets", "--references", dest="targets", type=Path)
+    validation.add_argument("--external-json", type=Path)
+    validation.add_argument("--target-id-field")
+    validation.add_argument("--criteria-json", type=Path, help="Metric minimum/maximum bounds; omitted means evaluation only.")
+    validation.add_argument("--output", type=Path, help="Derived receipt outside the prediction job; defaults to a sibling .validation.json.")
+    validation.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    validation.add_argument("--task-factory")
+    validation.add_argument("--task-factory-kwargs-json", type=Path)
+    validation.add_argument("--base-model", type=Path)
+    validation.add_argument("--layer-factory")
+    validation.add_argument("--factory-kwargs-json", type=Path)
+    compare.add_argument("candidate", type=Path, help="Candidate evaluation JSON, with sibling .predictions.jsonl.")
+    compare.add_argument("--baseline", type=Path, required=True)
+    compare.add_argument("--comparison", choices=("exact_text", "numeric"), help="Common whole-response scoring rule; otherwise reuse the declared profile.")
+    compare.add_argument("--pairing", choices=("exact", "intersection"), default="exact")
+    compare.add_argument("--output", type=Path, required=True)
+    for suite_action in ("score-suite", "compare-suites", "import-evaluation"):
+        suite_parser = recipe_actions.add_parser(suite_action, help="Evaluate stored task evidence through application-defined views.")
+        suite_parser.add_argument("candidate" if suite_action == "compare-suites" else "run_dir", type=Path)
+        suite_parser.add_argument("--suite", type=Path, required=True)
+        suite_parser.add_argument("--allow-partial", action="store_true")
+        suite_parser.add_argument("--output", type=Path, required=True)
+        if suite_action == "import-evaluation":
+            suite_parser.add_argument("--view", required=True)
+            suite_parser.add_argument("--evidence", type=Path, required=True)
+        else:
+            suite_parser.add_argument("--references", type=Path)
+            suite_parser.add_argument("--external-json", type=Path, help="Explicit view-to-evidence paths, or per-arm mappings for comparison.")
+        if suite_action == "compare-suites":
+            suite_parser.add_argument("--baseline", type=Path, required=True)
+            suite_parser.add_argument("--pairing", choices=("exact", "intersection"), default="exact")
+    for action in ("score-prediction", "compare-predictions"):
+        scoring = recipe_actions.add_parser(action, help="Score committed task results without loading a model.")
+        scoring.add_argument("run_dir" if action == "score-prediction" else "candidate", type=Path)
+        if action == "compare-predictions":
+            scoring.add_argument("--baseline", type=Path, required=True)
+            scoring.add_argument("--pairing", choices=("exact", "intersection"), default="exact")
+        scoring.add_argument("--scorer", required=True, help="Installed.module:callable accepting raw paired records.")
+        scoring.add_argument("--scorer-id", required=True, help="Explicit scoring rule/version identity.")
+        scoring.add_argument("--scorer-kwargs-json", type=Path)
+        scoring.add_argument("--targets", type=Path, help="Original labeled JSONL; otherwise use pinned input records.")
+        scoring.add_argument("--target-id-field")
+        scoring.add_argument("--allow-partial", action="store_true")
+        scoring.add_argument("--output", type=Path, required=True)
     predict = recipe_actions.add_parser("predict")
     predict.add_argument("model", type=Path)
     predict.add_argument("--data", type=Path, required=True, help="Unlabeled JSONL records.")
     predict.add_argument("--output", type=Path, required=True, help="Prediction JSONL.")
     predict.add_argument("--batch-size", type=int, default=None, help="Override the task's deployment batch size.")
     predict.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    predict.add_argument("--base-model", type=Path, help="Local native causal-LM base snapshot override.")
+    predict.add_argument("--layer-factory", help="Explicit installed.module:callable; omitted kwargs reuse the matching saved descriptor.")
+    predict.add_argument("--factory-kwargs-json", type=Path)
+    predict.add_argument("--task-factory")
+    predict.add_argument("--task-factory-kwargs-json", type=Path)
     predict.add_argument("--max-new-tokens", type=int, default=None, help="Causal-LM generation budget.")
+    predict_run = recipe_actions.add_parser("predict-run", help="Commit task predictions by batch and resume unfinished work.")
+    predict_run.add_argument("model", type=Path, nargs="?", help="Required for new or unfinished work; completed recovery can omit it.")
+    predict_run.add_argument("--data", type=Path, help="Required for a new run; resume may use its pinned snapshot.")
+    predict_run.add_argument("--run-dir", type=Path, required=True)
+    predict_run.add_argument("--resume", action="store_true")
+    predict_run.add_argument("--batch-size", type=int)
+    predict_run.add_argument("--max-new-tokens", type=int)
+    predict_run.add_argument("--max-seconds", type=float, help="Stop starting new batches after this post-load allowance.")
+    predict_run.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    predict_run.add_argument("--base-model", type=Path)
+    predict_run.add_argument("--layer-factory")
+    predict_run.add_argument("--factory-kwargs-json", type=Path)
+    predict_run.add_argument("--task-factory")
+    predict_run.add_argument("--task-factory-kwargs-json", type=Path)
+    predict_run.add_argument("--predict-kwargs-json", type=Path, help="Task callback prediction options, separate from output partition size.")
+    predict_run.add_argument("--episode-config", type=Path, help="Execute declared independent episodes through the existing result journal.")
+    predict_run.add_argument("--id-field")
+    predict_run.add_argument("--output-id-field")
+    for file_parser in (predict_run, validation):
+        file_parser.add_argument("--output-files-field", help="Enable staged named files under this task output field.")
+        file_parser.add_argument("--file-validator", help="Installed callable accepting inputs, outputs and directory.")
+        file_parser.add_argument("--file-validator-id", help="Declared file validator revision.")
+        file_parser.add_argument("--file-validator-kwargs-json", type=Path)
+    inspect_prediction = recipe_actions.add_parser("inspect-prediction", help="Read committed prediction progress; no model loading.")
+    inspect_prediction.add_argument("run_dir", type=Path)
     serve = recipe_actions.add_parser("serve", help="Load one inference asset once in a FastAPI/Uvicorn worker.")
     serve.add_argument("model", type=Path)
     serve.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    serve.add_argument("--base-model", type=Path, help="Local native causal-LM base snapshot override.")
+    serve.add_argument("--layer-factory", help="Explicit installed.module:callable for a custom program.")
+    serve.add_argument("--factory-kwargs-json", type=Path)
+    serve.add_argument("--task-factory")
+    serve.add_argument("--task-factory-kwargs-json", type=Path)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--batching", choices=("auto", "on", "off"), default="auto")
+    serve.add_argument("--max-batch-size", type=int, default=32)
+    serve.add_argument("--batch-wait-ms", type=float, default=4.0)
+    serve.add_argument("--max-pending-records", type=int, default=1024)
 
     plan_build_parser = subparsers.add_parser("plan", help="Create a dry-run ARTI fit plan from an importable model factory.")
     plan_build_parser.add_argument("model", help="Import path for an nn.Module or factory, such as package.module:make_model.")
@@ -576,6 +767,17 @@ def check_docs_report(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def schema_report(args: argparse.Namespace) -> dict[str, Any]:
+    if args.kind == "task-workflow":
+        from .task_project import project_schema
+        from .recipe_workflow import write_json
+        target = args.output or Path(f"docs/reference/task-{args.workflow_kind}.schema.json")
+        schema = project_schema(args.workflow_kind)
+        if args.action == "generate":
+            write_json(target, schema)
+        elif json.loads(target.read_text(encoding="utf-8")) != schema:
+            raise ValueError(f"stale task workflow {args.workflow_kind} schema: {target}")
+        return {"ok": True, "kind": "task-workflow-schema", "schema": args.workflow_kind,
+                "action": args.action, "path": str(target), "bytes": target.stat().st_size}
     if args.kind == "fit-config":
         generator = generate_fit_config_schema_json
         writer = write_fit_config_schema
@@ -602,6 +804,41 @@ def schema_report(args: argparse.Namespace) -> dict[str, Any]:
         "path": str(target),
         "bytes": len(content.encode("utf-8")),
     }
+
+
+def task_cli_report(args: argparse.Namespace) -> dict[str, Any]:
+    """Thin, non-executing project commands; init only creates the chosen template."""
+    if args.task_action == "init":
+        from .task_scaffold import create_task_project
+        return create_task_project(args.directory, name=args.name, template=args.template)
+    if args.task_action == "check":
+        from .task_project import check_task_project
+        report = check_task_project(args.project)
+    else:
+        from .task_status import task_project_status
+        report = task_project_status(args.project, explain=args.task_action == "explain")
+    if args.output is not None:
+        from .recipe_workflow import write_json
+        _check_task_report_destination(args.project, args.output)
+        write_json(args.output, report)
+    return report
+
+
+def _check_task_report_destination(project_file: Path, output: Path) -> None:
+    """Keep optional reports outside the declared input and artifact closures."""
+    from .recipe_workflow import read_recipe_config
+    source, target = project_file.resolve(), output.resolve()
+    protected = [source]
+    value = read_recipe_config(source)
+    for section in ("configs", "resources", "inputs", "artifacts"):
+        bindings = value.get(section, {})
+        if isinstance(bindings, dict):
+            for binding in bindings.values():
+                if isinstance(binding, str) and binding.strip():
+                    path = Path(binding)
+                    protected.append(path.resolve() if path.is_absolute() else (source.parent / path).resolve())
+    if any(target == path or target.is_relative_to(path) or path.is_relative_to(target) for path in protected):
+        raise ValueError("task report output must be outside project declarations, inputs and lifecycle artifacts")
 
 
 def maybe_write_task_graph_artifact(path: Path | None, *, command_kind: str, task_graph: dict[str, Any]) -> str | None:
@@ -1498,6 +1735,19 @@ def main(argv: list[str] | None = None) -> int:
             summary = generate_docs_report(args)
         elif args.command == "docs" and args.kind == "check":
             summary = check_docs_report(args)
+        elif args.command == "task":
+            summary = task_cli_report(args)
+            if getattr(args, "format", "json") == "text":
+                if args.task_action == "check":
+                    print(f"Task project check: {'ok' if summary['ok'] else 'issues'}")
+                    for issue in summary["issues"]:
+                        print(f"{issue['severity']} {issue['field']}: {issue['message']}")
+                else:
+                    from .task_status import render_task_project_status
+                    print(render_task_project_status(summary))
+            else:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0 if summary.get("ok", False) else 1
         elif args.command == "schema":
             summary = schema_report(args)
         elif args.command == "pretrained":
@@ -1518,12 +1768,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         elif args.command == "recipe":
             if args.recipe_action == "serve":
-                from .recipe_serving import serve_recipe
-                serve_recipe(args.model, device=args.device, host=args.host, port=args.port)
+                from .recipe_serving import RecipeServingConfig, serve_recipe
+                from .recipes import _recipe_factory, _task_factory
+                serve_recipe(args.model, device=args.device, host=args.host, port=args.port, base_model=args.base_model, layer_factory=_recipe_factory(vars(args)), task_factory=_task_factory(vars(args)), config=RecipeServingConfig(batching=args.batching, max_batch_size=args.max_batch_size, batch_wait_ms=args.batch_wait_ms, max_pending_records=args.max_pending_records))
                 return 0
             summary = recipe_cli_report(
-                args.recipe_action, args.model if args.recipe_action == "predict" else args.config,
-                **{key: value for key, value in vars(args).items() if key not in {"command", "recipe_action", "config"}},
+                args.recipe_action, args.run_dir if args.recipe_action in {"inspect-prediction", "score-prediction", "score-suite", "import-evaluation", "export-results", "inspect-results"} else args.candidate if args.recipe_action in {"compare-evaluations", "compare-predictions", "compare-suites"} else args.source_run if args.recipe_action == "resume-run" else args.model if args.recipe_action in {"predict", "predict-run", "validate-deployment", "inspect-deployment", "package-deployment", "inspect-runtime", "run-runtime"} else args.config,
+                **{key: value for key, value in vars(args).items() if key not in {"command", "recipe_action", "config", "source_run"}},
             )
             if not summary.get("ok", False):
                 print(json.dumps(summary, indent=2, sort_keys=True))

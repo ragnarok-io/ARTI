@@ -18,6 +18,20 @@ The separate native JAX job installs JAX/Flax and runs the Formula/ProgramGraph
 gate and native training example. Tests do not download a pretrained model or
 launch research GPU training. Optional backend/hardware limits remain explicit.
 
+The `lifecycle` gate runs application-owned native task recovery, immutable
+assets/preparation, file prediction journals, evaluation suites, episodes,
+runtime/handoff/export and project scaffold/check/status contracts in all six
+OS/Python cells. The docs gate checks source-backed documentation, the existing
+fit/task schemas and all ten task-workflow schemas before strict MkDocs.
+
+Each Python 3.12 package cell also runs the `installed` workflow slice from an
+isolated wheel. It verifies installed framework and cold-child origins, generates
+a project without repository examples, trains/recovers, reuses committed file
+results and runs an extracted archive after original application sources are
+removed. The separate CPU `integrations` job exercises the selected native
+Transformers/TRL, Ray Train and offline W&B/MLflow SDK paths, with nonempty
+zero-skip receipts; it starts no provider account or remote cluster.
+
 The release build then runs:
 
 ```bash
@@ -53,3 +67,8 @@ workflow runs the same CI before building, then uses PyPI Trusted Publishing.
 
 Do not claim CUDA scaling, complete optional-backend parity, or broad downstream
 superiority unless the corresponding evidence exists for the released source.
+
+A candidate branch can run the complete CI above without a release tag. Its
+reviewed wheel, source distribution and receipts are candidate artifacts; no
+PyPI publication follows from branch CI. Tagging, merging and registry upload
+remain separate release operations.

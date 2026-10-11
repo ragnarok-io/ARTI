@@ -12,13 +12,41 @@ The PyPI distribution is `arti-fit`; the Python import is `arti`.
 ## Install
 
 ```bash
-pip install "arti-fit==3.2.0"
-pip install "arti-fit[qwen,serve]==3.2.0"  # language recipes and optional ASGI serving
-pip install "arti-fit[jax,flax]==3.2.0"    # native JAX and optional Flax integration
+pip install "arti-fit==3.3.0"
+pip install "arti-fit[qwen,serve]==3.3.0"  # language recipes and optional ASGI serving
+pip install "arti-fit[jax,flax]==3.3.0"    # native JAX and optional Flax integration
 ```
 
 Python 3.10+ is supported. PyTorch is a core dependency; model, JAX, Flax,
 documentation and serving integrations are optional extras.
+
+For an unpublished candidate, install its reviewed local wheel with
+`python -m pip install --no-index --no-deps /path/to/arti_fit-3.3.0-py3-none-any.whl`
+in an environment whose declared dependencies are already provisioned. A
+candidate version string does not imply availability on PyPI.
+
+## Start An Application Task
+
+```bash
+arti task init my-task --name "my task"
+cd my-task
+arti task check project.json
+arti task explain project.json
+python workflow.py prepare
+python workflow.py train
+python workflow.py package
+python workflow.py predict
+python workflow.py evaluate
+python workflow.py runtime
+python workflow.py export
+```
+
+The generated project owns its model, native objective, preprocessing, file
+producer, scorers, runtime entrypoint and result writer. Project checks and
+status/explain inspect existing declarations and evidence without running
+application callbacks. [The complete installed-user tutorial](docs/guides/installed-task-workflow.md)
+is also included as `TUTORIAL.md` in the project. It demonstrates interrupted
+recovery, cache reuse, committed file outputs and an offline archive consumer.
 
 ## One Training Workflow
 

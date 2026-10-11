@@ -1,0 +1,355 @@
+{
+  "$defs": {
+    "episodes": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "effects": {
+                "const": "external"
+              }
+            },
+            "required": [
+              "effects"
+            ]
+          },
+          "then": {
+            "properties": {
+              "recovery": {
+                "enum": [
+                  "snapshot",
+                  "none"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kwargs": {
+                  "type": "object"
+                },
+                "reference": {
+                  "minLength": 1,
+                  "pattern": "^[^\\s:]+:[^\\s:]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reference"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "effects": {
+          "enum": [
+            "local",
+            "external"
+          ]
+        },
+        "environment_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "environment_state_lifetime": {
+          "const": "trial"
+        },
+        "evaluator_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "field": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "format": {
+          "const": "arti.episode-run-config"
+        },
+        "independent_batch": {
+          "type": "boolean"
+        },
+        "initial_state_field": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "max_calls": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_steps": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "native_model_state_lifetime": {
+          "const": "read-only-policy-step"
+        },
+        "policy_id": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "policy_state_lifetime": {
+          "enum": [
+            "step",
+            "trial"
+          ]
+        },
+        "recovery": {
+          "enum": [
+            "snapshot",
+            "replay",
+            "none"
+          ]
+        },
+        "seed_field": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "trial_field": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "adapter",
+        "policy_id",
+        "environment_id",
+        "evaluator_id",
+        "initial_state_field",
+        "seed_field"
+      ],
+      "type": "object"
+    },
+    "files": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "validator": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "validator"
+            ]
+          },
+          "then": {
+            "properties": {
+              "revision": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "revision"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "revision": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "revision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "validator": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "validator"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "format": {
+          "const": "arti.prediction-files-config"
+        },
+        "revision": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validator": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kwargs": {
+                  "type": "object"
+                },
+                "reference": {
+                  "minLength": 1,
+                  "pattern": "^[^\\s:]+:[^\\s:]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reference"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  "$id": "urn:arti:task-workflow:prediction:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "episodes": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "episodes"
+        ]
+      },
+      "then": {
+        "properties": {
+          "files": {
+            "type": "null"
+          },
+          "predict_kwargs": {
+            "maxProperties": 0,
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "batch_size": {
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "episodes": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/episodes"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "files": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/files"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "format": {
+      "const": "arti.prediction-run-config"
+    },
+    "id_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_seconds": {
+      "minimum": 0,
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "output_dir": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "output_id_field": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "predict_kwargs": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "output_dir"
+  ],
+  "title": "ARTI task workflow prediction configuration",
+  "type": "object"
+}

@@ -1,0 +1,404 @@
+{
+  "$id": "urn:arti:task-workflow:suite:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "aggregator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "aggregator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregation_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "aggregation_id"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "aggregation_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "aggregation_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aggregator": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "aggregator"
+        ]
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "properties": {
+            "aggregator": {
+              "not": {
+                "type": "null"
+              }
+            }
+          },
+          "required": [
+            "aggregator"
+          ]
+        }
+      },
+      "then": {
+        "properties": {
+          "criteria": {
+            "maxProperties": 0,
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "aggregation_id": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "aggregator": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "pattern": "^[^\\s:]+:[^\\s:]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kwargs": {
+              "type": "object"
+            },
+            "reference": {
+              "minLength": 1,
+              "pattern": "^[^\\s:]+:[^\\s:]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reference"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "criteria": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "maximum": {
+            "type": "number"
+          },
+          "minimum": {
+            "type": "number"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "format": {
+      "const": "arti.evaluation-suite-config"
+    },
+    "trials": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_state": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seed": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trial": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "views": {
+      "items": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "properties": {
+                "external_protocol": {
+                  "type": "null"
+                },
+                "scoring": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              },
+              "required": [
+                "scoring"
+              ]
+            },
+            "if": {
+              "properties": {
+                "requires": {
+                  "const": "external"
+                }
+              },
+              "required": [
+                "requires"
+              ]
+            },
+            "then": {
+              "properties": {
+                "external_protocol": {
+                  "minLength": 1,
+                  "pattern": "\\S",
+                  "type": "string"
+                },
+                "files": {
+                  "const": false
+                },
+                "scoring": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "external_protocol"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "requires": {
+                  "enum": [
+                    "output",
+                    "external"
+                  ]
+                }
+              },
+              "required": [
+                "requires"
+              ]
+            },
+            "then": {
+              "properties": {
+                "availability_field": {
+                  "type": "null"
+                },
+                "reference_field": {
+                  "type": "null"
+                },
+                "reference_role": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "availability_field": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "criteria": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "maximum": {
+                  "type": "number"
+                },
+                "minimum": {
+                  "type": "number"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "propertyNames": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "external_protocol": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "type": "boolean"
+          },
+          "name": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "reference_field": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference_role": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requires": {
+            "enum": [
+              "reference",
+              "output",
+              "external"
+            ]
+          },
+          "scoring": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "scorer": {
+                    "anyOf": [
+                      {
+                        "minLength": 1,
+                        "pattern": "^[^\\s:]+:[^\\s:]+$",
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kwargs": {
+                            "type": "object"
+                          },
+                          "reference": {
+                            "minLength": 1,
+                            "pattern": "^[^\\s:]+:[^\\s:]+$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "reference"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "scorer_id": {
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": "string"
+                  },
+                  "target_id_field": {
+                    "minLength": 1,
+                    "pattern": "\\S",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "scorer",
+                  "scorer_id"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "views"
+  ],
+  "title": "ARTI task workflow suite configuration",
+  "type": "object"
+}

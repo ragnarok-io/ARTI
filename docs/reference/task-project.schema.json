@@ -1,0 +1,169 @@
+{
+  "$id": "urn:arti:task-workflow:project:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "artifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "cache": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "dataset": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "deployment": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "evaluation": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "prediction_run": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "preparation_report": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "result_export": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "runtime_receipt": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "training_run": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "configs": {
+      "additionalProperties": false,
+      "properties": {
+        "episodes": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "export": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "files": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "prediction": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "recipe": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "runtime": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "snapshot": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "suite": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        },
+        "transform": {
+          "minLength": 1,
+          "pattern": "\\S",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recipe"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "arti.task-project"
+    },
+    "format_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "name": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "resources": {
+      "additionalProperties": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "format",
+    "format_version",
+    "name",
+    "configs"
+  ],
+  "title": "ARTI task workflow project configuration",
+  "type": "object"
+}
